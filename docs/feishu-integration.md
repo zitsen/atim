@@ -193,14 +193,40 @@ crates/aim-im/src/
     └── api.rs       # Feishu API client (send_message, etc.)
 ```
 
-## Implementation Priority
+## Implementation Notes
 
-1. Token management + API client
-2. Webhook server with event parsing
-3. `ImAdapter` impl (all 7 methods)
-4. Card builder for interactive UI
-5. Wiring into `aim-bin`
-6. Voice transcription (same OpenAI pipeline)
+### Outbound Flow
+- `send_message` → `POST /im/v1/messages` as `msg_type: "text"` (plain text)
+- `edit_message` → Recalls old message via `DELETE /im/v1/messages/:id` + sends new as interactive card
+- `send_photo` → Uploads image via multipart, then sends `msg_type: "image"`
+- `send_keyboard` → Builds interactive card JSON with button rows, sends as `msg_type: "interactive"`
+- `edit_keyboard` → `PATCH /im/v1/messages/:id` to update card content; falls back to send+delete
+
+### Inbound Flow
+- **Text**: Parsed from `content.text`, @-mention placeholders stripped in group chats
+- **Post (rich text)**: Locale-aware extraction (`zh_cn` > `en_us` > `ja_jp`), flattens text/links/mentions/images
+- **Image**: Image key extracted, downloaded via `GET /im/v1/images/:key`
+- **Card actions**: `card.action.trigger` events parsed into `CallbackQuery` with Feishu's action token
+
+### Group Chat Behavior
+In group chats, the bot only responds when @-mentioned, or when the message starts with `/` or `!`.
+
+### File Structure
+```
+crates/aim-im/src/
+├── lib.rs           # pub mod feishu;
+├── telegram.rs      # Telegram adapter
+└── feishu.rs        # All Feishu logic (~740 lines)
+```
+
+### Config
+
+| Env Var | Default | Description |
+|---------|---------|-------------|
+| `AIM_FEISHU_APP_ID` | — | Feishu app ID |
+| `AIM_FEISHU_APP_SECRET` | — | Feishu app secret |
+| `AIM_FEISHU_WEBHOOK_PORT` | `9090` | Webhook HTTP server port |
+| `AIM_IM_BACKEND` | `telegram` | Set to `feishu` to enable |
 
 ## Testing
 

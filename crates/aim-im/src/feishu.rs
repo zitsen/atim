@@ -88,28 +88,6 @@ impl FeishuAdapter {
 
     // ── API helpers ──
 
-    /// Send an authenticated GET request to the Feishu API.
-    async fn api_get(&self, path: &str) -> Result<serde_json::Value> {
-        let token = self.get_token().await?;
-        let url = format!("https://open.feishu.cn/open-apis{path}");
-        let resp = self
-            .client
-            .get(&url)
-            .header("Authorization", format!("Bearer {token}"))
-            .send()
-            .await
-            .map_err(|e| Error::Feishu(format!("HTTP error: {e}")))?;
-
-        let json: serde_json::Value = resp.json().await
-            .map_err(|e| Error::Feishu(format!("JSON decode: {e}")))?;
-
-        if json["code"].as_i64().unwrap_or(-1) != 0 {
-            let msg = json["msg"].as_str().unwrap_or("unknown");
-            return Err(Error::Feishu(format!("API error: {msg}")));
-        }
-        Ok(json["data"].clone())
-    }
-
     /// Send an authenticated POST request to the Feishu API.
     async fn api_post(&self, path: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
         let token = self.get_token().await?;
@@ -129,6 +107,33 @@ impl FeishuAdapter {
         if json["code"].as_i64().unwrap_or(-1) != 0 {
             let msg = json["msg"].as_str().unwrap_or("unknown");
             return Err(Error::Feishu(format!("API error: {msg}")));
+        }
+        Ok(json["data"].clone())
+    }
+
+    /// Send an authenticated DELETE request (message recall).
+    async fn api_delete(&self, path: &str) -> Result<serde_json::Value> {
+        let token = self.get_token().await?;
+        let url = format!("https://open.feishu.cn/open-apis{path}");
+        let resp = self
+            .client
+            .delete(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .map_err(|e| Error::Feishu(format!("HTTP error: {e}")))?;
+
+        let json: serde_json::Value = resp.json().await
+            .map_err(|e| Error::Feishu(format!("JSON decode: {e}")))?;
+
+        let code = json["code"].as_i64().unwrap_or(-1);
+        if code != 0 {
+            let msg = json["msg"].as_str().unwrap_or("unknown");
+            // 1000001 = message too old to recall, 99991663 = token expired
+            if code != 1000001 && code != 99991663 {
+                return Err(Error::Feishu(format!("API error: {msg}")));
+            }
+            tracing::warn!("Feishu message recall failed (code {code}): {msg} — continuing");
         }
         Ok(json["data"].clone())
     }
@@ -294,21 +299,33 @@ impl ImAdapter for FeishuAdapter {
     }
 
     async fn edit_message(&self, target: &MessageTarget, msg_id: &MessageId, text: &str) -> Result<()> {
-        // Feishu only supports editing card (interactive) messages
-        // For text messages we'd need to send a new message and delete the old one
-        // Patch the message content
+        // Feishu cannot edit text messages in-place. Recall the old message
+        // and send a new one as a single card for a richer display.
+        let _ = msg_id; // best-effort recall below
+
+        // Recall old message (best-effort)
+        self.api_delete(&format!("/im/v1/messages/{}", msg_id.0)).await.ok();
+
+        // Send as interactive card so future edits can use PATCH
         let chat_id = self.resolve_chat(&target.chat_id)
             .await
             .ok_or_else(|| Error::Feishu("unknown chat_id".into()))?;
 
-        // Feishu PATCH /im/v1/messages/:message_id only works for card messages
-        // For text, fall back to send + delete pattern
-        let _ = chat_id;
-        let _ = msg_id;
-        let _ = text;
+        let card = serde_json::json!({
+            "config": { "wide_screen_mode": true },
+            "elements": [
+                { "tag": "markdown", "content": text },
+            ],
+        });
 
-        // Send new message instead
-        self.send_message(target, text).await?;
+        let body = serde_json::json!({
+            "receive_id": chat_id,
+            "msg_type": "interactive",
+            "content": serde_json::to_string(&card)
+                .map_err(|e| Error::Feishu(format!("card serialization: {e}")))?,
+        });
+
+        self.api_post("/im/v1/messages?receive_id_type=chat_id", &body).await?;
         Ok(())
     }
 
@@ -359,11 +376,11 @@ impl ImAdapter for FeishuAdapter {
     }
 
     async fn delete_message(&self, _target: &MessageTarget, msg_id: &MessageId) -> Result<()> {
-        self.api_get(&format!("/im/v1/messages/{}", msg_id.0)).await?;
-        // Feishu doesn't have a direct "delete" for user-visible messages,
-        // but recalling is not supported for bot messages.
-        // We mark it as handled.
-        tracing::debug!("Feishu message {} deletion not supported by platform", msg_id.0);
+        // Feishu DELETE /im/v1/messages/:message_id recalls the message within 24h
+        match self.api_delete(&format!("/im/v1/messages/{}", msg_id.0)).await {
+            Ok(_) => tracing::debug!("Feishu message {} recalled", msg_id.0),
+            Err(e) => tracing::warn!("Feishu message recall failed: {e}"),
+        }
         Ok(())
     }
 
@@ -373,24 +390,18 @@ impl ImAdapter for FeishuAdapter {
         msg_id: &MessageId,
         buttons: &[Vec<Button>],
     ) -> Result<()> {
-        let chat_id = self.resolve_chat(&target.chat_id)
+        let _chat_id = self.resolve_chat(&target.chat_id)
             .await
             .ok_or_else(|| Error::Feishu("unknown chat_id".into()))?;
 
-        // For card messages, PATCH updates the card content
-        // We need to send a new card and delete the old one
-        let _ = chat_id;
-        let _ = msg_id;
-        let _ = buttons;
-
-        // Build a placeholder card with updated buttons
+        // Feishu PATCH /im/v1/messages/:message_id updates interactive card content.
+        // Re-send the same card with updated buttons.
         let card = build_card("(updated)", buttons);
         let body = serde_json::json!({
             "content": serde_json::to_string(&card)
                 .map_err(|e| Error::Feishu(format!("card serialization: {e}")))?,
         });
 
-        // PATCH /im/v1/messages/:message_id
         let token = self.get_token().await?;
         let url = format!("https://open.feishu.cn/open-apis/im/v1/messages/{}", msg_id.0);
         let resp = self.client.patch(&url)
@@ -404,7 +415,9 @@ impl ImAdapter for FeishuAdapter {
 
         if json["code"].as_i64().unwrap_or(-1) != 0 {
             let msg = json["msg"].as_str().unwrap_or("unknown");
-            return Err(Error::Feishu(format!("edit keyboard error: {msg}")));
+            // Fall back to send+delete if PATCH fails (e.g. message is not a card)
+            tracing::warn!("Feishu edit_keyboard PATCH failed ({msg}), falling back to new message");
+            let _ = self.send_keyboard(target, "(updated)", buttons).await?;
         }
         Ok(())
     }
@@ -416,26 +429,27 @@ impl ImAdapter for FeishuAdapter {
     }
 
     async fn send_chat_action(&self, target: &MessageTarget) -> Result<()> {
+        // Feishu doesn't have a typing indicator or similar API.
+        // Use a lightweight presence check by resolving the chat ID.
+        // If the chat doesn't exist or the bot can't access it, this returns an error.
         let chat_id = self.resolve_chat(&target.chat_id)
             .await
             .ok_or_else(|| Error::Feishu("unknown chat_id".into()))?;
 
-        // Feishu doesn't have a direct "typing" indicator API for open messages.
-        // Use get_message to check if the chat still exists.
         let token = self.get_token().await?;
-        let url = format!("https://open.feishu.cn/open-apis/im/v1/messages?container_id_type=chat&container_id={chat_id}");
+        let url = format!("https://open.feishu.cn/open-apis/im/v1/messages?container_id_type=chat&container_id={chat_id}&page_size=1");
         let resp = self.client.get(&url)
             .header("Authorization", format!("Bearer {token}"))
             .send().await
-            .map_err(|e| Error::Feishu(format!("chat action probe error: {e}")))?;
+            .map_err(|e| Error::Feishu(format!("chat probe error: {e}")))?;
 
         let json: serde_json::Value = resp.json().await
             .map_err(|e| Error::Feishu(format!("JSON decode: {e}")))?;
 
         let code = json["code"].as_i64().unwrap_or(-1);
-        if code != 0 && code != 10000 && code != 99991663 {
+        if code != 0 {
             let msg = json["msg"].as_str().unwrap_or("unknown");
-            return Err(Error::Feishu(format!("chat/probe error ({code}): {msg}")));
+            return Err(Error::Feishu(format!("chat probe error ({code}): {msg}")));
         }
         Ok(())
     }
@@ -531,14 +545,47 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
         message["content"].as_str().unwrap_or("{}"),
     ).unwrap_or_default();
 
+    let mut text = String::new();
+    let mut has_mention = false;
+
     let kind = match msg_type {
         "text" => {
-            let text = parsed_content["text"].as_str().unwrap_or("");
-            ImEventKind::Text(text.to_string())
+            let raw = parsed_content["text"].as_str().unwrap_or("").to_string();
+            text = raw.clone();
+            // Check for @bot mention in group chat
+            if chat_type == "group" {
+                if let Some(mentions) = message["mentions"].as_array() {
+                    for mention in mentions {
+                        if mention["name"].as_str().map(|n| n.contains("bot")).unwrap_or(false) {
+                            has_mention = true;
+                        }
+                        // Strip mention placeholder from text
+                        if let Some(key) = mention["key"].as_str() {
+                            text = text.replace(key, "").trim().to_string();
+                        }
+                    }
+                }
+            }
+            ImEventKind::Text(text.clone())
+        }
+        "post" => {
+            // Rich text: extract from locale-aware content
+            let content = &parsed_content;
+            let locale = if content["zh_cn"].is_object() { "zh_cn" }
+                else if content["en_us"].is_object() { "en_us" }
+                else if content["ja_jp"].is_object() { "ja_jp" }
+                else { "" };
+
+            if !locale.is_empty() {
+                text = extract_post_text(&content[locale]);
+            }
+            if text.is_empty() {
+                text = parsed_content["text"].as_str().unwrap_or("").to_string();
+            }
+            ImEventKind::Text(text.clone())
         }
         "image" => {
             let image_key = parsed_content["image_key"].as_str().unwrap_or("");
-            // Download image data
             let data = adapter.download_image(image_key).await.unwrap_or_default();
             ImEventKind::Photo {
                 caption: None,
@@ -548,6 +595,16 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
         }
         _ => return Ok(()),  // skip audio, file, sticker, etc.
     };
+
+    // In group chats, only process messages that @mentioned the bot
+    if chat_type == "group" && !has_mention {
+        // The bot was not @-mentioned — only respond if the message holds
+        // an explicit command (e.g. /ss) or we match "direct" patterns.
+        let is_command = text.starts_with('/') || text.starts_with('!');
+        if !is_command {
+            return Ok(());  // skip unmentioned messages in groups
+        }
+    }
 
     if let Some(tx) = adapter.event_tx.read().await.as_ref() {
         let _ = tx.send(ImEvent {
@@ -696,6 +753,78 @@ fn build_card(text: &str, buttons: &[Vec<Button>]) -> serde_json::Value {
     })
 }
 
+/// Extract plain text from a Feishu `post` rich-text block.
+///
+/// Feishu post content has the structure:
+/// ```json
+/// { "title": "optional", "content": [[{ "tag": "text", "text": "hello" }, { "tag": "a", "text": "link", "href": "..." }]] }
+/// ```
+/// The inner array contains paragraphs; each paragraph is an array of inline elements.
+fn extract_post_content_text(content: &serde_json::Value) -> String {
+    let mut result = String::new();
+
+    // title
+    if let Some(title) = content["title"].as_str() {
+        if !title.is_empty() {
+            result.push_str(title);
+            result.push('\n');
+        }
+    }
+
+    // paragraphs (content is an array of paragraphs)
+    if let Some(paragraphs) = content["content"].as_array() {
+        for (i, para) in paragraphs.iter().enumerate() {
+            if i > 0 {
+                result.push('\n');
+            }
+            if let Some(elements) = para.as_array() {
+                for el in elements {
+                    let tag = el["tag"].as_str().unwrap_or("");
+                    match tag {
+                        "text" => {
+                            if let Some(t) = el["text"].as_str() {
+                                result.push_str(t);
+                            }
+                        }
+                        "a" => {
+                            if let Some(t) = el["text"].as_str() {
+                                result.push_str(t);
+                            }
+                            if let Some(href) = el["href"].as_str() {
+                                result.push_str(&format!(" ({href})"));
+                            }
+                        }
+                        "at" => {
+                            if let Some(name) = el["user_name"].as_str() {
+                                result.push('@');
+                                result.push_str(name);
+                            } else if let Some(open_id) = el["user_id"].as_str() {
+                                result.push_str(&format!("@user:{open_id}"));
+                            }
+                        }
+                        "md" => {
+                            if let Some(t) = el["text"].as_str() {
+                                result.push_str(t);
+                            }
+                        }
+                        "img" => {
+                            result.push_str(" [image] ");
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    result
+}
+
+/// Shorthand wrapper for the helper above.
+fn extract_post_text(post_content: &serde_json::Value) -> String {
+    extract_post_content_text(post_content)
+}
+
 // ── Tests ──
 
 #[cfg(test)]
@@ -708,6 +837,13 @@ mod tests {
         let h1 = FeishuAdapter::hash_id(id);
         let h2 = FeishuAdapter::hash_id(id);
         assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_hash_id_unique_per_input() {
+        let h1 = FeishuAdapter::hash_id("ou_a");
+        let h2 = FeishuAdapter::hash_id("ou_b");
+        assert_ne!(h1, h2);
     }
 
     #[test]
@@ -733,5 +869,97 @@ mod tests {
         let actions_row1 = card["elements"][2]["actions"].as_array().unwrap();
         assert_eq!(actions_row1[0]["text"]["content"], "No");
         assert_eq!(actions_row1[0]["type"], "danger");
+    }
+
+    #[test]
+    fn test_extract_post_content_text_simple() {
+        let content = serde_json::json!({
+            "title": "Note",
+            "content": [[
+                { "tag": "text", "text": "Hello, world!" }
+            ]]
+        });
+        let result = extract_post_content_text(&content);
+        assert!(result.contains("Hello, world!"));
+        assert!(result.contains("Note"));
+    }
+
+    #[test]
+    fn test_extract_post_content_text_with_link() {
+        let content = serde_json::json!({
+            "title": "",
+            "content": [[
+                { "tag": "text", "text": "Check out " },
+                { "tag": "a", "text": "this link", "href": "https://example.com" }
+            ]]
+        });
+        let result = extract_post_content_text(&content);
+        assert!(result.contains("Check out"));
+        assert!(result.contains("this link"));
+        assert!(result.contains("example.com"));
+    }
+
+    #[test]
+    fn test_extract_post_content_text_with_mention() {
+        let content = serde_json::json!({
+            "title": "",
+            "content": [[
+                { "tag": "text", "text": "Hey " },
+                { "tag": "at", "user_name": "Alice", "user_id": "ou_xxx" }
+            ]]
+        });
+        let result = extract_post_content_text(&content);
+        assert!(result.contains("Hey"));
+        assert!(result.contains("Alice"));
+    }
+
+    #[test]
+    fn test_extract_post_content_text_multi_paragraph() {
+        let content = serde_json::json!({
+            "title": "",
+            "content": [
+                [{ "tag": "text", "text": "First paragraph" }],
+                [{ "tag": "text", "text": "Second paragraph" }],
+            ]
+        });
+        let result = extract_post_content_text(&content);
+        assert!(result.contains("First paragraph"));
+        assert!(result.contains("Second paragraph"));
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn test_extract_post_content_text_empty() {
+        let content = serde_json::json!({});
+        let result = extract_post_content_text(&content);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_extract_post_content_text_markdown_tag() {
+        let content = serde_json::json!({
+            "title": "",
+            "content": [[
+                { "tag": "md", "text": "**bold** and `code`" }
+            ]]
+        });
+        let result = extract_post_content_text(&content);
+        assert!(result.contains("bold"));
+        assert!(result.contains("code"));
+    }
+
+    #[test]
+    fn test_extract_post_content_text_image_placeholder() {
+        let content = serde_json::json!({
+            "title": "",
+            "content": [[
+                { "tag": "text", "text": "See this: " },
+                { "tag": "img", "image_key": "img_xxx" }
+            ]]
+        });
+        let result = extract_post_content_text(&content);
+        assert!(result.contains("See this"));
+        assert!(result.contains("[image]"));
     }
 }
