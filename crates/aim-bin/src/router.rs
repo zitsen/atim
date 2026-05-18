@@ -2,10 +2,12 @@ use aim_core::message::{MessageTarget, WindowId};
 use aim_core::session::ThreadBinding;
 
 /// Routes IM events to tmux windows based on thread bindings.
+#[allow(dead_code)]
 pub struct Router {
     bindings: Vec<ThreadBinding>,
 }
 
+#[allow(dead_code)]
 impl Router {
     pub fn new(bindings: Vec<ThreadBinding>) -> Self {
         Self { bindings }

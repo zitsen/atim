@@ -56,4 +56,17 @@ pub trait ImAdapter: Send + Sync {
         msg_id: &MessageId,
         buttons: &[Vec<Button>],
     ) -> Result<()>;
+
+    /// Send a chat action (typing indicator, etc.).
+    ///
+    /// Used as a lightweight probe to check if a topic exists — Telegram
+    /// returns an error for deleted topics.
+    async fn send_chat_action(&self, target: &MessageTarget) -> Result<()>;
+
+    /// Answer a callback query with a brief notification.
+    ///
+    /// Shows a toast/modal to the user and dismisses the loading state on the
+    /// inline keyboard button. The `callback_query_id` comes from the original
+    /// `CallbackQuery` event.
+    async fn answer_callback(&self, callback_query_id: &str, text: &str) -> Result<()>;
 }

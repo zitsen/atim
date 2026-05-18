@@ -18,3 +18,5 @@ aim-state = { path = "../aim-state" }
 aim-im = { path = "../aim-im" }
 aim-queue = { path = "../aim-queue" }
 aim-monitor = { path = "../aim-monitor" }
+reqwest = { version = "0.12", features = ["json", "multipart"] }
+dotenvy = "0.15"

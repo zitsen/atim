@@ -189,6 +189,7 @@ impl FeishuAdapter {
     }
 
     /// Look up the original Feishu open_id for a UserId.
+    #[allow(dead_code)]
     async fn resolve_user(&self, uid: &UserId) -> Option<String> {
         let map = self.id_map.read().await;
         map.user_ids.get(&uid.0).cloned()
@@ -407,6 +408,37 @@ impl ImAdapter for FeishuAdapter {
         }
         Ok(())
     }
+
+    async fn answer_callback(&self, _callback_query_id: &str, _text: &str) -> Result<()> {
+        // Feishu card actions don't have a direct "answer" mechanism.
+        // The card can be updated via PATCH if needed.
+        Ok(())
+    }
+
+    async fn send_chat_action(&self, target: &MessageTarget) -> Result<()> {
+        let chat_id = self.resolve_chat(&target.chat_id)
+            .await
+            .ok_or_else(|| Error::Feishu("unknown chat_id".into()))?;
+
+        // Feishu doesn't have a direct "typing" indicator API for open messages.
+        // Use get_message to check if the chat still exists.
+        let token = self.get_token().await?;
+        let url = format!("https://open.feishu.cn/open-apis/im/v1/messages?container_id_type=chat&container_id={chat_id}");
+        let resp = self.client.get(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .send().await
+            .map_err(|e| Error::Feishu(format!("chat action probe error: {e}")))?;
+
+        let json: serde_json::Value = resp.json().await
+            .map_err(|e| Error::Feishu(format!("JSON decode: {e}")))?;
+
+        let code = json["code"].as_i64().unwrap_or(-1);
+        if code != 0 && code != 10000 && code != 99991663 {
+            let msg = json["msg"].as_str().unwrap_or("unknown");
+            return Err(Error::Feishu(format!("chat/probe error ({code}): {msg}")));
+        }
+        Ok(())
+    }
 }
 
 impl Clone for FeishuAdapter {
@@ -551,6 +583,11 @@ async fn handle_card_action(adapter: &FeishuAdapter, payload: &serde_json::Value
         thread_id: None,
     };
 
+    // Feishu action_token is the equivalent of Telegram's callback_query_id
+    let action_token = event["action"]["token"].as_str()
+        .or_else(|| event["action_token"].as_str())
+        .map(String::from);
+
     if let Some(tx) = adapter.event_tx.read().await.as_ref() {
         let _ = tx.send(ImEvent {
             user_id,
@@ -558,6 +595,7 @@ async fn handle_card_action(adapter: &FeishuAdapter, payload: &serde_json::Value
             kind: ImEventKind::CallbackQuery {
                 data,
                 msg_id: MessageId(message_id.to_string()),
+                callback_query_id: action_token,
             },
         });
     }
@@ -689,9 +727,11 @@ mod tests {
         assert_eq!(card["header"]["title"]["content"], "Aim — Agent Response");
         assert_eq!(card["elements"].as_array().unwrap().len(), 3); // markdown + 2 action rows
 
-        let actions = card["elements"][1]["actions"].as_array().unwrap();
-        assert_eq!(actions[0]["text"]["content"], "Yes");
-        assert_eq!(actions[0]["type"], "primary");
-        assert_eq!(actions[1]["type"], "danger");
+        let actions_row0 = card["elements"][1]["actions"].as_array().unwrap();
+        assert_eq!(actions_row0[0]["text"]["content"], "Yes");
+        assert_eq!(actions_row0[0]["type"], "primary");
+        let actions_row1 = card["elements"][2]["actions"].as_array().unwrap();
+        assert_eq!(actions_row1[0]["text"]["content"], "No");
+        assert_eq!(actions_row1[0]["type"], "danger");
     }
 }

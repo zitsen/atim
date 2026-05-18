@@ -64,6 +64,8 @@ pub enum ImEventKind {
     CallbackQuery {
         data: String,
         msg_id: MessageId,
+        /// The IM platform's internal callback query ID (for answerCallbackQuery).
+        callback_query_id: Option<String>,
     },
     /// Forum topic was created.
     TopicCreated { name: String },

@@ -30,5 +30,6 @@ chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
 async-trait = "0.1"
 pulldown-cmark = "0.12"
+libc = "0.2"
 moka = "0.12"
 aiofiles = "0.1"  # not needed, we use tokio::fs

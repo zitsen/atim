@@ -16,6 +16,7 @@ pub struct WindowInfo {
 /// Manages tmux windows for agent sessions.
 ///
 /// All operations shell out to the `tmux` CLI via `tokio::process::Command`.
+#[derive(Clone)]
 pub struct TmuxManager {
     pub session_name: String,
     send_delay: Duration,
@@ -199,7 +200,6 @@ impl TmuxManager {
             &window_id.0,
             "-p",  // print to stdout
             "-e",  // preserve ANSI
-            "-J",  // join wrapped lines
         ])
         .await
     }
@@ -262,6 +262,15 @@ impl TmuxManager {
             self.create_session().await?;
         }
         Ok(())
+    }
+
+    /// Capture the pane content and render it as a PNG screenshot.
+    ///
+    /// Returns the PNG bytes.
+    pub async fn screenshot(&self, window_id: &WindowId) -> Result<Vec<u8>> {
+        let ansi_text = self.capture_pane(window_id).await?;
+        // Get actual pane width from tmux for correct layout
+        crate::screenshot::render_ansi_to_png(&ansi_text)
     }
 
     /// Get the current working directory of a pane.

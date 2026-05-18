@@ -234,14 +234,16 @@ impl SessionMonitor {
 
                 let mut messages = Vec::new();
                 for entry in entries {
+                    let is_complete = matches!(
+                        entry.content_type,
+                        aim_core::message::ContentType::ToolResult
+                            | aim_core::message::ContentType::Text
+                            | aim_core::message::ContentType::ToolUse
+                    );
                     messages.push(NewMessage {
                         session_id: SessionId(session_id.clone()),
                         text: entry.text,
-                        is_complete: matches!(
-                            entry.content_type,
-                            aim_core::message::ContentType::ToolResult
-                                | aim_core::message::ContentType::Text
-                        ),
+                        is_complete,
                         content_type: entry.content_type,
                         tool_use_id: entry.tool_use_id,
                         role: entry.role,

@@ -45,6 +45,12 @@ pub enum Error {
     #[error("Agent error: {0}")]
     Agent(String),
 
+    #[error("Font error: {0}")]
+    Font(String),
+
+    #[error("PNG encoding error: {0}")]
+    PngEncoding(String),
+
     #[error("Not found: {0}")]
     NotFound(String),
 
