@@ -1,0 +1,14 @@
+/target
+*.env
+.env.*
+state.json
+session_map.json
+monitor_state.json
+*.lock
+*.log
+# IDE
+.vscode/
+.idea/
+# OS
+.DS_Store
+Thumbs.db
