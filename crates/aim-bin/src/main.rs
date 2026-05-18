@@ -3,14 +3,53 @@ use std::sync::Arc;
 
 use aim_core::config::Config;
 use aim_core::im::ImAdapter;
+use clap::{Parser, Subcommand};
 use tokio::sync::{mpsc, Mutex};
 
 mod browser;
+mod hook;
 mod router;
 mod server;
 
+#[derive(Parser)]
+#[command(name = "aim", about = "IM-to-Claude-Code bridge via tmux")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Claude Code SessionStart hook — registers session_id → window_id mappings
+    Hook {
+        /// Install the hook script to ~/.config/claude/hooks/SessionStart
+        #[arg(long, short)]
+        install: bool,
+    },
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Some(Command::Hook { install }) => {
+            let cmd = if install {
+                hook::HookCommand::Install
+            } else {
+                hook::HookCommand::Run
+            };
+            if let Err(e) = hook::run_hook(cmd) {
+                eprintln!("aim hook error: {e}");
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
+        None => {
+            // Run the server (default)
+        }
+    }
+
     // 0. Load environment from ~/.aim/.env if it exists
     if let Ok(home) = std::env::var("HOME") {
         let env_path = PathBuf::from(home).join(".aim").join(".env");

@@ -8,7 +8,6 @@ members = [
     "crates/aim-queue",
     "crates/aim-state",
     "crates/aim-monitor",
-    "crates/aim-hook",
     "crates/aim-bin",
 ]
 

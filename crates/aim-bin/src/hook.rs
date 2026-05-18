@@ -3,9 +3,9 @@ use std::io::Read;
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 
-/// Aim Hook — Claude Code SessionStart hook.
+/// Run the Aim Hook — Claude Code SessionStart hook.
 ///
-/// Claude Code invokes this script at the start of each session, piping a JSON
+/// Claude Code invokes this at the start of each session, piping a JSON
 /// payload to stdin with `{ "session_id": "uuid" }`.
 ///
 /// The hook:
@@ -13,22 +13,22 @@ use std::path::PathBuf;
 ///   2. Validates the session_id
 ///   3. Gets the current tmux window_id via `tmux display-message`
 ///   4. Writes the mapping to `session_map.json` atomically
-///
-/// Install with: `aim-hook --install`
-fn main() {
-    if std::env::args().any(|a| a == "--install" || a == "install") {
-        install_hook();
-        return;
-    }
-
-    if let Err(e) = run() {
-        eprintln!("aim-hook error: {e}");
-        std::process::exit(1);
+pub fn run_hook(cmd: HookCommand) -> Result<(), Box<dyn std::error::Error>> {
+    match cmd {
+        HookCommand::Install => {
+            install_hook();
+            Ok(())
+        }
+        HookCommand::Run => run(),
     }
 }
 
+pub enum HookCommand {
+    Install,
+    Run,
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Read stdin
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
     let input = input.trim().to_string();
@@ -37,22 +37,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err("no input from stdin".into());
     }
 
-    // 2. Parse JSON
     let payload: serde_json::Value = serde_json::from_str(&input)?;
     let session_id = payload
         .get("session_id")
         .and_then(|v| v.as_str())
         .ok_or("missing session_id field")?;
 
-    // Validate UUID format (basic)
     if !is_valid_uuid(session_id) {
         return Err(format!("invalid session_id format: {session_id}").into());
     }
 
-    // 3. Get tmux window ID
     let window_id = get_tmux_window_id()?;
 
-    // 4. Read existing session map
     let map_path = session_map_path();
     let mut map: HashMap<String, String> = if map_path.exists() {
         let data = std::fs::read_to_string(&map_path)?;
@@ -61,7 +57,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         HashMap::new()
     };
 
-    // 5. Update and write
     map.insert(window_id, session_id.to_string());
     atomic_write_json(&map_path, &map)?;
 
@@ -75,7 +70,6 @@ fn get_tmux_window_id() -> Result<String, Box<dyn std::error::Error>> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        // May not be running in tmux — that's ok for testing
         eprintln!("warning: not in tmux? {stderr}");
         return Ok("unknown".into());
     }
@@ -93,7 +87,6 @@ fn session_map_path() -> PathBuf {
 }
 
 fn is_valid_uuid(s: &str) -> bool {
-    // Basic UUID format: 8-4-4-4-12 hex digits
     let parts: Vec<&str> = s.split('-').collect();
     if parts.len() != 5 {
         return false;
@@ -104,14 +97,12 @@ fn is_valid_uuid(s: &str) -> bool {
 fn atomic_write_json(path: &PathBuf, data: &HashMap<String, String>) -> std::io::Result<()> {
     let json = serde_json::to_string_pretty(data)?;
 
-    // Ensure parent directory exists
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
     let tmp_path = path.with_extension("tmp");
     let file = std::fs::File::create(&tmp_path)?;
-    // Exclusive flock for concurrent-safe writes with aim-server
     let fd = file.as_raw_fd();
     unsafe { libc::flock(fd, libc::LOCK_EX) };
     std::fs::write(&tmp_path, &json)?;
@@ -124,7 +115,7 @@ fn atomic_write_json(path: &PathBuf, data: &HashMap<String, String>) -> std::io:
 }
 
 fn install_hook() {
-    let hook_dir = dirs::config_dir()
+    let hook_dir = config_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join("claude")
         .join("hooks");
@@ -139,7 +130,7 @@ fn install_hook() {
 
     match &binary_path {
         Some(path) => {
-            let script = format!("#!/bin/sh\nexec {} \"$@\"\n", path.display());
+            let script = format!("#!/bin/sh\nexec {} hook \"$@\"\n", path.display());
             if std::fs::write(&hook_path, &script).is_err() {
                 eprintln!("Could not write hook script to {:?}", hook_path);
                 std::process::exit(1);
@@ -158,18 +149,13 @@ fn install_hook() {
     }
 }
 
-// Use minimal dirs-like approach to avoid extra dependency
-mod dirs {
-    use std::path::PathBuf;
-
-    pub fn config_dir() -> Option<PathBuf> {
-        std::env::var("XDG_CONFIG_HOME")
-            .ok()
-            .map(PathBuf::from)
-            .or_else(|| {
-                std::env::var("HOME")
-                    .ok()
-                    .map(|h| PathBuf::from(h).join(".config"))
-            })
-    }
+fn config_dir() -> Option<PathBuf> {
+    std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| PathBuf::from(h).join(".config"))
+        })
 }

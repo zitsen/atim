@@ -41,13 +41,12 @@ docs: document Telegram proxy configuration
 - `aim-queue`: Per-user async message queues with ordering
 - `aim-state`: State persistence (thread bindings, window states)
 - `aim-tmux`: tmux window lifecycle management
-- `aim-hook`: Claude Code hook to capture session metadata
-- `aim-bin`: HTTP server + router, wires everything together
+- `aim`: Main binary — `aim` runs the server, `aim hook` is the Claude Code session hook
 
 ### Response Pipeline
 ```
-IM → aim-bin → tmux send-keys → Claude Code → JSONL log → 
-aim-monitor → aim-bin → ImAdapter::send_message → IM
+IM → aim → tmux send-keys → Claude Code → JSONL log → 
+aim-monitor → aim → ImAdapter::send_message → IM
 ```
 
 ## Key Decisions

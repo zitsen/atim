@@ -95,7 +95,7 @@ For session tracking, install the hook so Claude Code registers each session:
 
 ```bash
 # Run once — creates ~/.config/claude/hooks/SessionStart
-aim-hook --install
+aim hook --install
 ```
 
 This writes a `session_map.json` when Claude Code starts a new session, mapping tmux window IDs to session UUIDs. The monitor uses this to know which JSONL files to watch.

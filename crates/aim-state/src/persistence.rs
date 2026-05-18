@@ -62,7 +62,7 @@ impl StateManager {
 
     /// Read the session map (window_id → session_id JSON object).
     ///
-    /// The session map is written by the `aim-hook` binary when Claude Code
+    /// The session map is written by `aim hook` when Claude Code
     /// creates a new session. It maps tmux window IDs to active session IDs.
     pub async fn load_session_map(&self) -> Result<std::collections::HashMap<String, String>> {
         if !self.session_map_file.exists() {

@@ -56,8 +56,7 @@
 | **aim-queue** | Message Pipeline | aim-core, aim-im | 500 |
 | **aim-state** | Persistence | aim-core | 700 |
 | **aim-monitor** | Session Watching | aim-parser, aim-state, aim-queue | 400 |
-| **aim-hook** | Session Hook | aim-state | 200 |
-| **aim-bin** | Entry Point | everything | 300 |
+| **aim** | Entry Point | everything | 300 |
 
 ## Trait Design
 

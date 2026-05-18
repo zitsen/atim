@@ -91,19 +91,19 @@ Rust rewrite of CCBot with multi-agent and multi-IM support. Total estimated eff
 - [ ] Flood control pause/resume
 - [ ] Graceful shutdown (drain queue)
 
-### Step 1.8 — Hook Binary (Day 11)
+### Step 1.8 — Hook Subcommand (Day 11)
 
-**Files**: `crates/aim-hook/src/main.rs`
+**Files**: `crates/aim-bin/src/hook.rs`
 
 - [ ] Read JSON from stdin (Claude Code SessionStart)
 - [ ] Validate session_id (UUID format)
 - [ ] Get tmux window_id via `display-message`
 - [ ] Atomic write to session_map.json with file locking
-- [ ] `--install` subcommand for auto-config
+- [ ] `--install` flag for auto-config
 
 ### Step 1.9 — Main Binary & Integration (Days 12-14)
 
-**Files**: `crates/aim-bin/src/{main,config}.rs`
+**Files**: `crates/aim-bin/src/{main,hook,config}.rs`
 
 - [ ] Config loading (env, .env, CLI args)
 - [ ] Logging setup (tracing + env-filter)
@@ -203,8 +203,8 @@ Rust rewrite of CCBot with multi-agent and multi-IM support. Total estimated eff
 | 1.5 | aim-im | ~1200 |
 | 1.6 | aim-monitor | ~400 |
 | 1.7 | aim-queue | ~500 |
-| 1.8 | aim-hook | ~200 |
-| 1.9 | aim-bin | ~300 |
+| 1.8 | aim hook subcommand | ~200 | (merged into aim crate)
+| 1.9 | aim | ~300 |
 | 2 | Multi-Agent | ~1500 |
 | 3 | Feishu IM | ~2000 |
 | 4 | Polish | ~500 |
