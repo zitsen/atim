@@ -1,14 +1,14 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/aim-core",
-    "crates/aim-tmux",
-    "crates/aim-parser",
-    "crates/aim-im",
-    "crates/aim-queue",
-    "crates/aim-state",
-    "crates/aim-monitor",
-    "crates/aim-bin",
+    "crates/atim-core",
+    "crates/atim-tmux",
+    "crates/atim-parser",
+    "crates/atim-im",
+    "crates/atim-queue",
+    "crates/atim-state",
+    "crates/atim-monitor",
+    "crates/atim-bin",
 ]
 
 [workspace.package]

@@ -1,0 +1,14 @@
+[package]
+name = "atim-monitor"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio = { workspace = true, features = ["fs", "sync"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+atim-core = { path = "../atim-core" }
+atim-parser = { path = "../atim-parser" }
