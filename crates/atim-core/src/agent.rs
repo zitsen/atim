@@ -4,7 +4,7 @@ use crate::message::{AgentKind, InteractiveUi};
 ///
 /// Each agent (Claude Code, Copilot CLI, Codex CLI) has slightly different
 /// terminal output formats. Implementations of this trait normalize them
-/// into Aim's unified types.
+/// into Atim's unified types.
 pub trait AgentParser: Send + Sync {
     /// Detect which agent is running based on pane text and process name.
     fn detect(pane_text: &str, process_name: &str) -> AgentKind

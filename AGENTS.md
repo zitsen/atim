@@ -31,22 +31,22 @@ docs: document Telegram proxy configuration
 
 ## Project Overview
 
-**aim** — Rust IM-to-Claude-Code bridge. Telegram/Feishu messages routed to Claude Code sessions running in tmux windows.
+**atim** — Rust IM-to-Claude-Code bridge. Telegram/Feishu messages routed to Claude Code sessions running in tmux windows.
 
 ### Key Architecture
-- `aim-core`: Error types, IM trait, message types, config, agent abstraction
-- `aim-im`: Telegram + Feishu adapters (Markdown→HTML rendering)
-- `aim-monitor`: Polls Claude Code JSONL session logs for new responses
-- `aim-parser`: JSONL and terminal output parsers
-- `aim-queue`: Per-user async message queues with ordering
-- `aim-state`: State persistence (thread bindings, window states)
-- `aim-tmux`: tmux window lifecycle management
-- `aim`: Main binary — `aim` runs the server, `aim hook` is the Claude Code session hook
+- `atim-core`: Error types, IM trait, message types, config, agent abstraction
+- `atim-im`: Telegram + Feishu adapters (Markdown→HTML rendering)
+- `atim-monitor`: Polls Claude Code JSONL session logs for new responses
+- `atim-parser`: JSONL and terminal output parsers
+- `atim-queue`: Per-user async message queues with ordering
+- `atim-state`: State persistence (thread bindings, window states)
+- `atim-tmux`: tmux window lifecycle management
+- `atim`: Main binary — `atim` runs the server, `atim hook` is the Claude Code session hook
 
 ### Response Pipeline
 ```
-IM → aim → tmux send-keys → Claude Code → JSONL log → 
-aim-monitor → aim → ImAdapter::send_message → IM
+IM → atim → tmux send-keys → Claude Code → JSONL log → 
+atim-monitor → atim → ImAdapter::send_message → IM
 ```
 
 ## Key Decisions
@@ -55,4 +55,4 @@ aim-monitor → aim → ImAdapter::send_message → IM
 - **pulldown-cmark 0.12**: For Markdown→Telegram-HTML conversion, event-based rendering
 - **JSONL format v2.1.143**: Nested `{type, message: {role, content: [...]}}` structure
 - **Byte-offset tracking**: Per-session, persisted in `monitor_state.json`
-- **State files** under `~/.aim/`: `state.json`, `session_map.json`, `monitor_state.json`
+- **State files** under `~/.atim/`: `state.json`, `session_map.json`, `monitor_state.json`

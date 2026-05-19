@@ -241,7 +241,7 @@ impl TmuxManager {
 
     // ── Utility ──
 
-    /// Check whether the aim tmux session exists.
+    /// Check whether the atim tmux session exists.
     pub async fn session_exists(&self) -> bool {
         self.tmux(&["has-session", "-t", &self.session_name])
             .await

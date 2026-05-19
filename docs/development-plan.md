@@ -1,6 +1,6 @@
-# Aim Development Plan
+# Atim Development Plan
 
-> **Aim** = AI Agent through IM
+> **Atim** = AI Agent through IM
 
 ## Overview
 
@@ -12,7 +12,7 @@ Rust rewrite of CCBot with multi-agent and multi-IM support. Total estimated eff
 
 ### Step 1.1 — Workspace & Core Types (Day 1)
 
-**Files**: `crates/aim-core/src/{lib,im,agent,message,session,error}.rs`
+**Files**: `crates/atim-core/src/{lib,im,agent,message,session,error}.rs`
 
 - [ ] Cargo workspace with all crates
 - [ ] Core type definitions (`ImAdapter`, `AgentParser` traits)
@@ -22,7 +22,7 @@ Rust rewrite of CCBot with multi-agent and multi-IM support. Total estimated eff
 
 ### Step 1.2 — Tmux Manager (Days 2-3)
 
-**Files**: `crates/aim-tmux/src/lib.rs`
+**Files**: `crates/atim-tmux/src/lib.rs`
 
 - [ ] `TmuxManager` — async wrapper around tmux CLI commands
 - [ ] List windows, find by ID/name
@@ -33,7 +33,7 @@ Rust rewrite of CCBot with multi-agent and multi-IM support. Total estimated eff
 
 ### Step 1.3 — JSONL & Terminal Parser (Days 3-5)
 
-**Files**: `crates/aim-parser/src/{lib,jsonl,terminal}.rs`
+**Files**: `crates/atim-parser/src/{lib,jsonl,terminal}.rs`
 
 - [ ] `JsonlParser` — read Claude Code session JSONL files
 - [ ] Byte-offset incremental reading
@@ -47,7 +47,7 @@ Rust rewrite of CCBot with multi-agent and multi-IM support. Total estimated eff
 
 ### Step 1.4 — Session State & Persistence (Days 5-6)
 
-**Files**: `crates/aim-state/src/lib.rs`
+**Files**: `crates/atim-state/src/lib.rs`
 
 - [ ] `WindowState`, `ClaudeSession` types
 - [ ] Thread binding: topic → window_id mapping
@@ -59,9 +59,9 @@ Rust rewrite of CCBot with multi-agent and multi-IM support. Total estimated eff
 
 ### Step 1.5 — IM Adapter Trait + Telegram (Days 6-9)
 
-**Files**: `crates/aim-im/src/{lib,telegram,feishu}.rs`
+**Files**: `crates/atim-im/src/{lib,telegram,feishu}.rs`
 
-- [ ] `ImAdapter` trait definition (in aim-core)
+- [ ] `ImAdapter` trait definition (in atim-core)
 - [ ] Telegram adapter using `teloxide`
 - [ ] Inline keyboard support for interactive UI
 - [ ] Photo download and forwarding
@@ -71,7 +71,7 @@ Rust rewrite of CCBot with multi-agent and multi-IM support. Total estimated eff
 
 ### Step 1.6 — Session Monitor (Days 9-10)
 
-**Files**: `crates/aim-monitor/src/lib.rs`
+**Files**: `crates/atim-monitor/src/lib.rs`
 
 - [ ] Async polling loop (configurable interval)
 - [ ] mtime cache to skip unchanged files
@@ -82,7 +82,7 @@ Rust rewrite of CCBot with multi-agent and multi-IM support. Total estimated eff
 
 ### Step 1.7 — Message Queue (Days 10-11)
 
-**Files**: `crates/aim-queue/src/lib.rs`
+**Files**: `crates/atim-queue/src/lib.rs`
 
 - [ ] Per-user message queue + worker
 - [ ] Content message merging (3800 char limit)
@@ -93,7 +93,7 @@ Rust rewrite of CCBot with multi-agent and multi-IM support. Total estimated eff
 
 ### Step 1.8 — Hook Subcommand (Day 11)
 
-**Files**: `crates/aim-bin/src/hook.rs`
+**Files**: `crates/atim-bin/src/hook.rs`
 
 - [ ] Read JSON from stdin (Claude Code SessionStart)
 - [ ] Validate session_id (UUID format)
@@ -103,7 +103,7 @@ Rust rewrite of CCBot with multi-agent and multi-IM support. Total estimated eff
 
 ### Step 1.9 — Main Binary & Integration (Days 12-14)
 
-**Files**: `crates/aim-bin/src/{main,hook,config}.rs`
+**Files**: `crates/atim-bin/src/{main,hook,config}.rs`
 
 - [ ] Config loading (env, .env, CLI args)
 - [ ] Logging setup (tracing + env-filter)
@@ -116,7 +116,7 @@ Rust rewrite of CCBot with multi-agent and multi-IM support. Total estimated eff
 - [ ] Integration test: end-to-end message flow
 - [ ] Integration test: session recovery after restart
 
-**Deliverable**: `aim` binary that replaces `ccbot` for Telegram + Claude Code.
+**Deliverable**: `atim` binary that replaces `ccbot` for Telegram + Claude Code.
 
 ---
 
@@ -148,7 +148,7 @@ Rust rewrite of CCBot with multi-agent and multi-IM support. Total estimated eff
 - [ ] Agent-specific hook registration
 - [ ] Agent-specific command prefix
 
-**Deliverable**: User can configure `AGENT_TYPE=claude|copilot|codex` and Aim adapts automatically.
+**Deliverable**: User can configure `AGENT_TYPE=claude|copilot|codex` and Atim adapts automatically.
 
 ---
 
@@ -196,15 +196,15 @@ Rust rewrite of CCBot with multi-agent and multi-IM support. Total estimated eff
 
 | Phase | Crate | New Code (Rust) |
 |-------|-------|----------------|
-| 1.1 | aim-core | ~500 |
-| 1.2 | aim-tmux | ~600 |
-| 1.3 | aim-parser | ~800 |
-| 1.4 | aim-state | ~700 |
-| 1.5 | aim-im | ~1200 |
-| 1.6 | aim-monitor | ~400 |
-| 1.7 | aim-queue | ~500 |
-| 1.8 | aim hook subcommand | ~200 | (merged into aim crate)
-| 1.9 | aim | ~300 |
+| 1.1 | atim-core | ~500 |
+| 1.2 | atim-tmux | ~600 |
+| 1.3 | atim-parser | ~800 |
+| 1.4 | atim-state | ~700 |
+| 1.5 | atim-im | ~1200 |
+| 1.6 | atim-monitor | ~400 |
+| 1.7 | atim-queue | ~500 |
+| 1.8 | atim hook subcommand | ~200 | (merged into atim crate)
+| 1.9 | atim | ~300 |
 | 2 | Multi-Agent | ~1500 |
 | 3 | Feishu IM | ~2000 |
 | 4 | Polish | ~500 |

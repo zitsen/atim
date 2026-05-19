@@ -1,10 +1,10 @@
-# Aim Architecture
+# Atim Architecture
 
-**Aim** (AI Agent through IM) — Rust rewrite of CCBot. A multi-IM bridge that remotely controls AI coding CLI agents (Claude Code, Copilot CLI, Codex CLI) via tmux.
+**Atim** (AI Agent through IM) — Rust rewrite of CCBot. A multi-IM bridge that remotely controls AI coding CLI agents (Claude Code, Copilot CLI, Codex CLI) via tmux.
 
 ## Core Design Principle
 
-> **tmux as the universal control layer** — Aim operates on tmux, not on SDKs. Any CLI agent can be controlled without code changes, because we read its output and send keystrokes at the terminal level.
+> **tmux as the universal control layer** — Atim operates on tmux, not on SDKs. Any CLI agent can be controlled without code changes, because we read its output and send keystrokes at the terminal level.
 
 ## Architecture Diagram
 
@@ -15,7 +15,7 @@
   └─────────────────┘    └──────────┬──────────┘    └─────────────────┘
                                     │
                       ┌─────────────┴─────────────┐
-                      │       aim-queue            │
+                      │       atim-queue            │
                       │  Message Queue + Merging   │
                       └─────────────┬─────────────┘
                                     │
@@ -23,14 +23,14 @@
          │                          │                          │
          ▼                          ▼                          ▼
   ┌──────────────┐       ┌──────────────────┐       ┌────────────────┐
-  │  aim-tmux    │       │  aim-monitor     │       │  aim-state     │
+  │  atim-tmux    │       │  atim-monitor     │       │  atim-state     │
   │  Tmux Ctrl    │       │  Session Monitor  │       │  Session State  │
   │  + Parser     │       │  (async poll)     │       │  + Persistence  │
   └──────┬───────┘       └────────┬─────────┘       └────────────────┘
          │                        │
          ▼                        ▼
   ┌──────────────┐       ┌────────────────┐
-  │  aim-parser │       │  aim-parser   │
+  │  atim-parser │       │  atim-parser   │
   │  Terminal UI │       │  JSONL Parser  │
   │  Detection   │       │  (agent output)│
   └──────────────┘       └────────────────┘
@@ -49,18 +49,18 @@
 
 | Crate | Layer | Dependencies | Lines (est.) |
 |-------|-------|-------------|-------------|
-| **aim-core** | Foundation | — | 500 |
-| **aim-tmux** | Terminal I/O | aim-core | 600 |
-| **aim-parser** | Output Parsing | aim-core | 800 |
-| **aim-im** | IM Adapter | aim-core | 1200 |
-| **aim-queue** | Message Pipeline | aim-core, aim-im | 500 |
-| **aim-state** | Persistence | aim-core | 700 |
-| **aim-monitor** | Session Watching | aim-parser, aim-state, aim-queue | 400 |
-| **aim** | Entry Point | everything | 300 |
+| **atim-core** | Foundation | — | 500 |
+| **atim-tmux** | Terminal I/O | atim-core | 600 |
+| **atim-parser** | Output Parsing | atim-core | 800 |
+| **atim-im** | IM Adapter | atim-core | 1200 |
+| **atim-queue** | Message Pipeline | atim-core, atim-im | 500 |
+| **atim-state** | Persistence | atim-core | 700 |
+| **atim-monitor** | Session Watching | atim-parser, atim-state, atim-queue | 400 |
+| **atim** | Entry Point | everything | 300 |
 
 ## Trait Design
 
-### IM Adapter (`aim-core`)
+### IM Adapter (`atim-core`)
 
 ```rust
 /// Unified IM interface — Telegram and Feishu are impls.
@@ -86,7 +86,7 @@ pub trait ImAdapter: Send + Sync {
 }
 ```
 
-### Agent Parser (`aim-core`)
+### Agent Parser (`atim-core`)
 
 ```rust
 /// Agent-specific output format detection and parsing.
@@ -105,7 +105,7 @@ pub trait AgentParser: Send + Sync {
 }
 ```
 
-### Core Types (`aim-core`)
+### Core Types (`atim-core`)
 
 ```rust
 pub struct MessageTarget {
@@ -162,7 +162,7 @@ User sends "fix the bug" in Telegram topic
   → IM Adapter receives Message(text)
   → Emits ImEvent { kind: Text, text: "fix the bug" }
   → State router resolves thread_binding → window_id
-  → aim-tmux.send_keys(window_id, "fix the bug")
+  → atim-tmux.send_keys(window_id, "fix the bug")
   → Agent sees input in tmux pane
 ```
 
@@ -170,21 +170,21 @@ User sends "fix the bug" in Telegram topic
 
 ```
 Agent writes to session.jsonl
-  → aim-monitor polls JSONL (byte offset tracking)
-  → aim-parser parses new entries (text, tool_use, tool_result)
+  → atim-monitor polls JSONL (byte offset tracking)
+  → atim-parser parses new entries (text, tool_use, tool_result)
   → Formats response parts
-  → aim-queue enqueues for delivery
+  → atim-queue enqueues for delivery
   → IM Adapter sends message to correct topic
 
 Concurrently:
-  aim-monitor also captures tmux pane text
+  atim-monitor also captures tmux pane text
   → Detects interactive UI
   → Sends interactive UI with inline keyboard via IM Adapter
 ```
 
 ## Multi-Agent Strategy
 
-Each tmux window runs exactly one agent CLI. Aim detects the agent type by:
+Each tmux window runs exactly one agent CLI. Atim detects the agent type by:
 
 1. **Pane process inspection** — read `pane_current_command` from tmux
 2. **Directory detection** — `.claude/` → Claude Code, `.github/copilot/` → Copilot CLI
@@ -222,7 +222,7 @@ AgentParser trait implementations:
 
 ## Error Handling
 
-- `aim-core` defines `Error` enum with typed variants
+- `atim-core` defines `Error` enum with typed variants
 - Each crate has its own error type, converting to/from core Error via `From`
 - Network failures in IM adapter: exponential backoff, message queued to disk
 - Tmux failures (window gone): clear binding, notify user
@@ -230,7 +230,7 @@ AgentParser trait implementations:
 
 ## Persistence
 
-All state in `~/.aim/` directory (`AIM_DIR` env var override):
+All state in `~/.atim/` directory (`AIM_DIR` env var override):
 
 | File | Purpose |
 |------|---------|
@@ -241,7 +241,7 @@ All state in `~/.aim/` directory (`AIM_DIR` env var override):
 
 ## Startup Recovery
 
-1. Load persisted state from `~/.aim/`
+1. Load persisted state from `~/.atim/`
 2. Re-resolve stale window IDs against live tmux windows
 3. Clean up session_map entries for dead windows
 4. Initialize monitor byte offsets (prevent duplicate notifications)

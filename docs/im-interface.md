@@ -1,11 +1,11 @@
-# IM Interface Documentation — Aim
+# IM Interface Documentation — Atim
 
-**Aim** (AI Agent through IM) is a bridge between IM platforms and AI coding agents.
+**Atim** (AI Agent through IM) is a bridge between IM platforms and AI coding agents.
 This document describes how to add a new IM backend.
 
 ## Trait Definition
 
-All IM backends implement the `ImAdapter` trait defined in `aim-core/src/im.rs`:
+All IM backends implement the `ImAdapter` trait defined in `atim-core/src/im.rs`:
 
 ```rust
 #[async_trait]
@@ -80,7 +80,7 @@ pub struct Button {
 
 ## Adding a New IM Backend
 
-1. **Create a new module** in `crates/aim-im/src/`, e.g. `feishu.rs` or `discord.rs`
+1. **Create a new module** in `crates/atim-im/src/`, e.g. `feishu.rs` or `discord.rs`
 
 2. **Implement `ImAdapter`** — all 7 methods are required:
    - `run()` — enter the event loop, parse inbound messages into `ImEvent`, forward through `tx`
@@ -91,7 +91,7 @@ pub struct Button {
    - `delete_message()` — remove a message
    - `edit_keyboard()` — update buttons on an existing message
 
-3. **Register the backend** in `crates/aim-bin/src/main.rs`:
+3. **Register the backend** in `crates/atim-bin/src/main.rs`:
    ```rust
    let im_adapter: Box<dyn ImAdapter> = match im_backend {
        "telegram" => Box::new(TelegramAdapter::new(token)),
@@ -146,7 +146,7 @@ pub struct Config {
 
 | Backend   | Module              | Status     |
 |-----------|---------------------|------------|
-| Telegram  | `aim-im::telegram`  | Implemented (long-polling, inline keyboards, topic support) |
+| Telegram  | `atim-im::telegram`  | Implemented (long-polling, inline keyboards, topic support) |
 | Feishu    | —                   | Planned (Phase 3) |
 | Discord   | —                   | Future     |
 | Slack     | —                   | Future     |

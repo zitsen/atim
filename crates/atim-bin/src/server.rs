@@ -45,6 +45,8 @@ pub struct Server {
     pub status_consumed: Arc<Mutex<HashSet<(i64, i64)>>>,
     /// Interactive UI detection cache: window_id -> hash of last detected UI content.
     pub last_ui_states: Arc<Mutex<HashMap<String, String>>>,
+    /// Last pane output per window (for non-Claude agents without JSONL logs).
+    pub last_pane_output: Arc<Mutex<HashMap<String, String>>>,
 }
 
 /// Maximum Telegram message length for merged content.
@@ -558,10 +560,10 @@ impl Server {
                     ).await;
                     return Ok(());
                 }
-                Ok(info) if info.current_command != self.config.agent_command => {
-                    // Window exists but agent isn't running (e.g. Claude Code exited)
+                Ok(info) if is_shell_process(&info.current_command) => {
+                    // Window exists but agent exited to shell (e.g. Claude Code / Copilot finished)
                     tracing::warn!(
-                        "Window {} has '{}' running instead of '{}', clearing binding",
+                        "Window {} has shell '{}' running instead of '{}', clearing binding",
                         binding.window_id, info.current_command, self.config.agent_command
                     );
                     let _ = self.tmux_mgr.kill_window(&window_id).await;
@@ -1455,9 +1457,14 @@ impl Server {
     ///
     /// When a new interactive UI is detected, sends an inline keyboard
     /// so the user can respond without typing.
+    ///
+    /// For non-Claude agents (Copilot CLI, Codex CLI), captures terminal
+    /// output and forwards new lines back to the IM since they don't
+    /// write JSONL session logs.
     async fn probe_interactive_uis(&self) -> Result<()> {
         let state = self.state_mgr.load_state().await?;
         let mut ui_states = self.last_ui_states.lock().await;
+        let mut pane_outputs = self.last_pane_output.lock().await;
 
         for binding in &state.thread_bindings {
             let wid = WindowId(binding.window_id.clone());
@@ -1478,7 +1485,11 @@ impl Server {
 
             let prev = ui_states.get(&binding.window_id);
             if prev == Some(&content_hash) {
-                continue; // unchanged
+                // UI unchanged — still check for pane output if non-Claude
+                if agent != atim_core::message::AgentKind::ClaudeCode {
+                    self.forward_new_pane_output(&binding, &clean, &mut pane_outputs).await;
+                }
+                continue;
             }
             ui_states.insert(binding.window_id.clone(), content_hash);
 
@@ -1493,9 +1504,80 @@ impl Server {
                 let text = format!("{header}\n{content}", content = truncate_ui_content(&interactive.content, 200));
                 let _ = self.im_adapter.send_keyboard(&target, &text, &buttons).await;
             }
+
+            // For non-Claude agents, forward terminal output
+            if agent != atim_core::message::AgentKind::ClaudeCode {
+                self.forward_new_pane_output(&binding, &clean, &mut pane_outputs).await;
+            }
         }
 
         Ok(())
+    }
+
+    /// Forward new terminal output for a non-Claude agent window.
+    ///
+    /// Compares the current pane text against the last known snapshot
+    /// (by line count) and sends any new lines to the bound IM chat.
+    /// Stops forwarding when a shell prompt is detected (agent exited).
+    async fn forward_new_pane_output(
+        &self,
+        binding: &ThreadBinding,
+        clean: &str,
+        pane_outputs: &mut HashMap<String, String>,
+    ) {
+        let last = pane_outputs.get(&binding.window_id);
+        let current_lines: Vec<&str> = clean.lines().collect();
+        let current_count = current_lines.len();
+
+        let last_count = last.map(|s| s.lines().count()).unwrap_or(0);
+
+        if current_count <= last_count {
+            // No new lines, but update snapshot in case content changed in-place
+            if last_count == 0 {
+                pane_outputs.insert(binding.window_id.clone(), clean.to_string());
+            }
+            return;
+        }
+
+        // Extract new lines
+        let new_lines: Vec<&str> = current_lines.iter().copied().skip(last_count).collect();
+        let joined = new_lines.join("\n").trim().to_string();
+        if joined.is_empty() || joined.len() < 3 {
+            pane_outputs.insert(binding.window_id.clone(), clean.to_string());
+            return;
+        }
+
+        // Update last known state
+        pane_outputs.insert(binding.window_id.clone(), clean.to_string());
+
+        // Check if output ends with a shell prompt (agent likely finished)
+        let has_prompt = is_shell_prompt(&joined);
+        let display = if joined.len() > MAX_MSG_LEN {
+            let truncated: String = joined.chars().take(MAX_MSG_LEN).collect();
+            format!("```\n{}…\n```", truncated)
+        } else {
+            format!("```\n{}\n```", joined)
+        };
+
+        let target = MessageTarget {
+            chat_id: ChatId(binding.group_chat_id.unwrap_or(binding.chat_id)),
+            thread_id: Some(ThreadId(binding.thread_id)),
+        };
+
+        if joined.len() > 400 {
+            let _ = self.im_adapter.send_message(&target, &display).await;
+        } else {
+            // Short output: send inline, not in code block
+            let _ = self.im_adapter.send_message(&target, &joined).await;
+        }
+
+        if has_prompt {
+            // Agent returned to shell — next poll will re-baseline
+            tracing::debug!(
+                "Agent output cycle complete for window {} (shell prompt detected)",
+                binding.window_id
+            );
+        }
     }
 }
 
@@ -1581,6 +1663,11 @@ async fn run_capture_loop(
     }
 
     Ok(())
+}
+
+/// Check if a process name is a shell (agent has likely exited).
+fn is_shell_process(process: &str) -> bool {
+    matches!(process, "zsh" | "bash" | "sh" | "fish" | "dash" | "ksh")
 }
 
 /// Detect whether the tail of command output contains a shell/agent prompt.

@@ -2,13 +2,13 @@
 
 ## Overview
 
-Feishu (Lark) is the second IM backend for Aim. Unlike Telegram's long-polling model, Feishu uses **webhooks** — events are pushed to a public HTTP endpoint.
+Feishu (Lark) is the second IM backend for Atim. Unlike Telegram's long-polling model, Feishu uses **webhooks** — events are pushed to a public HTTP endpoint.
 
 ```
 Feishu Open Platform
   │  POST /webhook/feishu (events)
   ▼
-axum HTTP server (embedded in Aim)
+axum HTTP server (embedded in Atim)
   │  verify → parse → ImEvent
   ▼
 tx channel → Server event loop → tmux agent
@@ -36,7 +36,7 @@ Feishu Open Platform API
 
 ## Architecture
 
-### New Dependencies (`aim-im/Cargo.toml`)
+### New Dependencies (`atim-im/Cargo.toml`)
 
 ```toml
 axum = "0.8"           # HTTP server for webhook
@@ -46,7 +46,7 @@ tower-http = { version = "0.6", features = ["cors"] }  # CORS for dev
 
 ### ID Mapping
 
-Feishu IDs are strings (`ou_xxx`, `oc_xxx`). To fit Aim's `ChatId(i64)` / `UserId(i64)`:
+Feishu IDs are strings (`ou_xxx`, `oc_xxx`). To fit Atim's `ChatId(i64)` / `UserId(i64)`:
 
 - **Stable hash**: `hash_string_to_i64(feishu_id) -> i64` using a deterministic hash (e.g. CRC-64 or std::collections::hash_map::DefaultHasher)
 - **Reverse lookup**: store `HashMap<i64, String>` in the adapter for outbound API calls
@@ -147,7 +147,7 @@ Feishu does not have Telegram-style forum topics. Strategy:
   - `thread_id` = hash of sender's `open_id` (unique per user within the group)
   - Messages are routed by (chat_id, thread_id) → window
 
-## Config (in `aim-core`)
+## Config (in `atim-core`)
 
 Add to `Config`:
 
@@ -165,7 +165,7 @@ Env vars:
 
 ## Runtime Wiring
 
-In `aim-bin/src/main.rs`, the IM backend is selected at startup:
+In `atim-bin/src/main.rs`, the IM backend is selected at startup:
 
 ```rust
 let im_adapter: Box<dyn ImAdapter> = match im_backend {
@@ -182,7 +182,7 @@ let im_adapter: Box<dyn ImAdapter> = match im_backend {
 ## File Structure
 
 ```
-crates/aim-im/src/
+crates/atim-im/src/
 ├── lib.rs           # pub mod feishu;
 ├── telegram.rs      # existing
 └── feishu/
@@ -213,7 +213,7 @@ In group chats, the bot only responds when @-mentioned, or when the message star
 
 ### File Structure
 ```
-crates/aim-im/src/
+crates/atim-im/src/
 ├── lib.rs           # pub mod feishu;
 ├── telegram.rs      # Telegram adapter
 └── feishu.rs        # All Feishu logic (~740 lines)

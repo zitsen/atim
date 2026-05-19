@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-/// Unified error type for all Aim operations.
+/// Unified error type for all Atim operations.
 #[derive(Error, Debug)]
 pub enum Error {
     // ── IM layer ──

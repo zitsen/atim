@@ -200,6 +200,7 @@ async fn main() -> anyhow::Result<()> {
         tool_use_msg_ids: Arc::new(Mutex::new(std::collections::HashMap::new())),
         status_consumed: Arc::new(Mutex::new(std::collections::HashSet::new())),
         last_ui_states: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        last_pane_output: Arc::new(Mutex::new(std::collections::HashMap::new())),
     };
 
     server.run(im_rx, &mut monitor_rx).await?;

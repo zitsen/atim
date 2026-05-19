@@ -1,8 +1,8 @@
-# Aim Usage Guide
+# Atim Usage Guide
 
 ## What It Does
 
-Aim bridges an IM chat (Telegram topic) directly to a tmux window running an AI coding agent. You type in Telegram — it reaches the agent's terminal. The agent responds — you see it in Telegram.
+Atim bridges an IM chat (Telegram topic) directly to a tmux window running an AI coding agent. You type in Telegram — it reaches the agent's terminal. The agent responds — you see it in Telegram.
 
 ```
 Telegram topic  ↔  tmux window  ↔  Claude Code / Copilot CLI / Codex CLI
@@ -21,9 +21,9 @@ export AIM_TELEGRAM_TOKEN="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
 export AIM_ALLOWED_USERS="123456789"
 
 # 4. Make sure tmux is running
-tmux new-session -d -s aim
+tmux new-session -d -s atim
 
-# 5. Start Aim
+# 5. Start Atim
 cargo run --release
 ```
 
@@ -31,7 +31,7 @@ cargo run --release
 
 | Requirement | Notes |
 |-------------|-------|
-| **tmux** | Aim controls agents through tmux windows. Must have a running session. |
+| **tmux** | Atim controls agents through tmux windows. Must have a running session. |
 | **Telegram Bot Token** | Create one via [@BotFather](https://t.me/botfather). Enable **Inline Mode** and **Groups** if needed. |
 | **Rust 1.85+** | Edition 2024. Check with `rustc --version`. |
 | **Your Telegram User ID** | Message [@userinfobot](https://t.me/userinfobot) to get it. |
@@ -51,8 +51,8 @@ All config is through environment variables. Create a `.env` file or export dire
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AIM_DIR` | `~/.aim` | Data directory for state files |
-| `AIM_TMUX_SESSION` | `aim` | Target tmux session name |
+| `AIM_DIR` | `~/.atim` | Data directory for state files |
+| `AIM_TMUX_SESSION` | `atim` | Target tmux session name |
 | `AIM_AGENT_COMMAND` | `claude` | Command to start the AI agent in new windows |
 | `AIM_MONITOR_POLL_INTERVAL` | `2.0` | Seconds between session log polls |
 | `AIM_SHOW_USER_MESSAGES` | `true` | Echo user messages back in Telegram |
@@ -71,8 +71,8 @@ Add the bot as an admin, and **enable Topics** (Forum mode) in the group setting
 
 ### 2. Open a topic — a tmux window is created
 
-When you send a message in a topic where no binding exists yet, Aim:
-1. Creates a new tmux window named `aim-<user_id>`
+When you send a message in a topic where no binding exists yet, Atim:
+1. Creates a new tmux window named `atim-<user_id>`
 2. Runs `claude` (or your configured agent command) in that window
 3. Sends your message to the agent
 4. Records the binding: topic → window
@@ -95,7 +95,7 @@ For session tracking, install the hook so Claude Code registers each session:
 
 ```bash
 # Run once — creates ~/.config/claude/hooks/SessionStart
-aim hook --install
+atim hook --install
 ```
 
 This writes a `session_map.json` when Claude Code starts a new session, mapping tmux window IDs to session UUIDs. The monitor uses this to know which JSONL files to watch.

@@ -3,7 +3,7 @@ use std::io::Read;
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 
-/// Run the Aim Hook — Claude Code SessionStart hook.
+/// Run the Atim Hook — Claude Code SessionStart hook.
 ///
 /// Claude Code invokes this at the start of each session, piping a JSON
 /// payload to stdin with `{ "session_id": "uuid" }`.

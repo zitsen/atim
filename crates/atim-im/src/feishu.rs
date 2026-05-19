@@ -4,7 +4,7 @@
 //!   - WebSocket-based (Feishu pushes events via WSS persistent connection)
 //!   - openlark crate for WS connection + token management
 //!   - Interactive cards for inline keyboard UI
-//!   - String IDs (open_id, chat_id) hashed to i64 for Aim's core types
+//!   - String IDs (open_id, chat_id) hashed to i64 for Atim's core types
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -49,7 +49,7 @@ struct TokenCache {
     app_secret: String,
 }
 
-/// Bi-directional mapping between Aim i64 IDs and Feishu string IDs.
+/// Bi-directional mapping between Atim i64 IDs and Feishu string IDs.
 struct IdMap {
     user_ids: HashMap<i64, String>, // hash → open_id
     chat_ids: HashMap<i64, String>, // hash → chat_id
@@ -737,7 +737,7 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
     tracing::debug!("Feishu message: type={msg_type} chat={chat_type} from={open_id}");
 
     let user_id = adapter.register_user(open_id).await;
-    let chat_id_aim = adapter.register_chat(chat_id).await;
+    let chat_id_atim = adapter.register_chat(chat_id).await;
 
     // For group chats, use sender's user hash as thread_id
     let thread_id = if chat_type == "group" {
@@ -747,7 +747,7 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
     };
 
     let target = MessageTarget {
-        chat_id: chat_id_aim,
+        chat_id: chat_id_atim,
         thread_id,
     };
 
@@ -988,7 +988,7 @@ fn build_card(text: &str, buttons: &[Vec<Button>]) -> serde_json::Value {
         "header": {
             "title": {
                 "tag": "plain_text",
-                "content": "Aim — Agent Response",
+                "content": "Atim — Agent Response",
             },
             "template": "blue",
         },
@@ -1095,7 +1095,7 @@ mod tests {
         ];
 
         let card = build_card("Proceed?", &buttons);
-        assert_eq!(card["header"]["title"]["content"], "Aim — Agent Response");
+        assert_eq!(card["header"]["title"]["content"], "Atim — Agent Response");
         assert_eq!(card["elements"].as_array().unwrap().len(), 3);
 
         let actions_row0 = card["elements"][1]["actions"].as_array().unwrap();
