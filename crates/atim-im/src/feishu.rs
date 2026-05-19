@@ -220,11 +220,17 @@ impl FeishuAdapter {
     // ── ID mapping ──
 
     /// Deterministically hash a Feishu string ID to i64.
+    ///
+    /// Uses FNV-1a so the output is stable across process restarts.
+    /// `DefaultHasher` (SipHash with random seed) would produce different
+    /// values on every process start, breaking persisted state.
     fn hash_id(id: &str) -> i64 {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        id.hash(&mut hasher);
-        hasher.finish() as i64
+        let mut hash: u64 = 0xcbf29ce484222325; // FNV offset basis
+        for byte in id.bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3); // FNV prime
+        }
+        hash as i64
     }
 
     /// Register a Feishu open_id and return its stable i64 UserId.

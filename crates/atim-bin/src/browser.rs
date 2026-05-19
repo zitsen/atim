@@ -38,6 +38,7 @@ pub enum BrowserMode {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClaudeSession {
     pub id: String,
+    pub project_slug: String,
     pub summary: String,
     pub timestamp: String,
     pub message_count: usize,
@@ -75,6 +76,7 @@ pub struct WindowEntry {
     pub window_id: String,
     pub name: String,
     pub current_command: String,
+    pub agent_type: String,
 }
 
 /// A page of windows from the window picker.
@@ -284,8 +286,8 @@ pub async fn scan_claude_sessions(_path: &Path) -> Vec<ClaudeSession> {
                 if !entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
                     continue;
                 }
-                let session_dir = entry.path();
-                if let Ok(mut jsonl_dir) = tokio::fs::read_dir(&session_dir).await {
+                let project_slug = entry.file_name().to_string_lossy().to_string();
+                if let Ok(mut jsonl_dir) = tokio::fs::read_dir(&entry.path()).await {
                     while let Ok(Some(jsonl_entry)) = jsonl_dir.next_entry().await {
                         let fname = jsonl_entry.file_name().to_string_lossy().to_string();
                         if !fname.ends_with(".jsonl") {
@@ -298,6 +300,7 @@ pub async fn scan_claude_sessions(_path: &Path) -> Vec<ClaudeSession> {
                         let message_count = estimate_message_count(&file_path).await;
                         sessions.push(ClaudeSession {
                             id: session_id,
+                            project_slug: project_slug.clone(),
                             summary,
                             timestamp,
                             message_count,
@@ -447,8 +450,8 @@ mod tests {
             page: 0,
             mode: BrowserMode::SessionPick {
                 sessions: vec![
-                    ClaudeSession { id: "a".into(), summary: "A".into(), timestamp: "2026-01-01".into(), message_count: 1 },
-                    ClaudeSession { id: "b".into(), summary: "B".into(), timestamp: "2026-01-02".into(), message_count: 2 },
+                    ClaudeSession { id: "a".into(), project_slug: "my-proj".into(), summary: "A".into(), timestamp: "2026-01-01".into(), message_count: 1 },
+                    ClaudeSession { id: "b".into(), project_slug: "other-proj".into(), summary: "B".into(), timestamp: "2026-01-02".into(), message_count: 2 },
                 ],
             },
         };
@@ -473,8 +476,8 @@ mod tests {
         rt.block_on(async {
             browser.start_browsing(400, &std::env::temp_dir()).await;
             let windows = vec![
-                WindowEntry { window_id: "@1".into(), name: "atim-400".into(), current_command: "claude".into() },
-                WindowEntry { window_id: "@2".into(), name: "dev".into(), current_command: "nvim".into() },
+                WindowEntry { window_id: "@1".into(), name: "atim-400".into(), current_command: "claude".into(), agent_type: "claude".into() },
+                WindowEntry { window_id: "@2".into(), name: "dev".into(), current_command: "nvim".into(), agent_type: String::new() },
             ];
             browser.show_window_picker(400, windows.clone()).await;
             let state = browser.get_state(400).await.unwrap();
@@ -489,8 +492,8 @@ mod tests {
     #[test]
     fn test_window_picker_page() {
         let windows = vec![
-            WindowEntry { window_id: "@1".into(), name: "w1".into(), current_command: "claude".into() },
-            WindowEntry { window_id: "@2".into(), name: "w2".into(), current_command: "bash".into() },
+            WindowEntry { window_id: "@1".into(), name: "w1".into(), current_command: "claude".into(), agent_type: "claude".into() },
+            WindowEntry { window_id: "@2".into(), name: "w2".into(), current_command: "bash".into(), agent_type: String::new() },
         ];
         let state = BrowserState {
             current_path: PathBuf::from("/tmp"),

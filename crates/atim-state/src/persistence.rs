@@ -204,6 +204,7 @@ mod tests {
                     session_id: "sess_1".into(),
                     cwd: "/home".into(),
                     window_name: "test".into(),
+                    agent_type: String::new(),
                 },
             )]),
             thread_bindings: vec![],

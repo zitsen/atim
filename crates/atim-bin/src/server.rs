@@ -369,6 +369,12 @@ impl Server {
                 let mut synced = 0;
                 for (window_id, session_id) in &session_map {
                     if let Some(ws) = state.window_states.get_mut(window_id) {
+                        // Only assign session_ids for Claude Code windows — other
+                        // agents (Copilot, Codex) don't produce JSONL logs.
+                        let at = ws.agent_type.as_str();
+                        if !at.is_empty() && at != "claude" {
+                            continue;
+                        }
                         if ws.session_id.is_empty() {
                             ws.session_id = session_id.clone();
                             synced += 1;
@@ -477,6 +483,26 @@ impl Server {
             return Ok(());
         }
 
+        // Check for /esc (send Escape key to dismiss modals/help screens)
+        if text.trim() == "/esc" || text.trim() == "/dismiss" {
+            if let Some(binding) = state.thread_bindings.iter().find(|b| {
+                b.user_id == user_id
+                    && b.thread_id == target.thread_id.map(|t| t.0).unwrap_or(0)
+            }) {
+                let window_id = atim_core::message::WindowId(binding.window_id.clone());
+                if !self.tmux_mgr.window_exists(&window_id).await {
+                    let _ = self.im_adapter.send_message(&target, "Window no longer exists.").await;
+                    return Ok(());
+                }
+                let _ = self.im_adapter.send_chat_action(&target).await;
+                self.tmux_mgr.send_key(&window_id, "Escape").await?;
+                let _ = self.im_adapter.send_message(&target, "Sent Escape key.").await;
+            } else {
+                let _ = self.im_adapter.send_message(&target, "No active session.").await;
+            }
+            return Ok(());
+        }
+
         // Check for ! command capture
         if let Some(cmd) = text.strip_prefix('!') {
             let cmd = cmd.trim();
@@ -561,7 +587,20 @@ impl Server {
                     return Ok(());
                 }
                 Ok(info) if is_shell_process(&info.current_command) => {
-                    // Window exists but agent exited to shell (e.g. Claude Code / Copilot finished)
+                    // Agent might still be starting — retry briefly before giving up
+                    for _ in 0..6 {
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        if let Ok(info2) = self.tmux_mgr.find_window(&window_id).await {
+                            if !is_shell_process(&info2.current_command) {
+                                self.tmux_mgr.send_line(&window_id, text).await?;
+                                let sc_chat_id = binding.group_chat_id.unwrap_or(binding.chat_id);
+                                self.status_consumed.lock().await.remove(&(sc_chat_id, binding.thread_id));
+                                return Ok(());
+                            }
+                        } else {
+                            break;
+                        }
+                    }
                     tracing::warn!(
                         "Window {} has shell '{}' running instead of '{}', clearing binding",
                         binding.window_id, info.current_command, self.config.agent_command
@@ -646,10 +685,16 @@ impl Server {
             Ok(windows) => windows
                 .into_iter()
                 .filter(|w| !bound_ids.contains(&w.window_id.0))
-                .map(|w| browser::WindowEntry {
-                    window_id: w.window_id.0,
-                    name: w.name,
-                    current_command: w.current_command,
+                .map(|w| {
+                    let agent_type = state.window_states.get(&w.window_id.0)
+                        .map(|ws| ws.agent_type.as_str())
+                        .unwrap_or("");
+                    browser::WindowEntry {
+                        window_id: w.window_id.0,
+                        name: w.name,
+                        current_command: w.current_command,
+                        agent_type: agent_type.to_string(),
+                    }
                 })
                 .collect(),
             Err(_) => vec![],
@@ -733,9 +778,14 @@ impl Server {
                 let mut buttons: Vec<Vec<Button>> = Vec::new();
 
                 for (i, session) in page.sessions.iter().enumerate() {
-                    let summary = if session.summary.len() > 50 {
+                    let timestamp_short = if session.timestamp.len() > 16 {
+                        &session.timestamp[..16]
+                    } else {
+                        &session.timestamp
+                    };
+                    let summary = if session.summary.len() > 40 {
                         let end = session.summary.char_indices()
-                            .nth(47)
+                            .nth(37)
                             .map(|(i, _)| i)
                             .unwrap_or(session.summary.len());
                         format!("{}…", &session.summary[..end])
@@ -746,7 +796,7 @@ impl Server {
                     };
                     let token = Self::make_callback_token(&mut ctx_lock, user_id, target.chat_id.0, thread_id);
                     buttons.push(vec![Button {
-                        text: format!("🔄 {}", summary),
+                        text: format!("🔄 {} {} | {}", timestamp_short, session.project_slug, summary),
                         callback_data: format!("cb:{token}:browse:sel:{i}"),
                     }]);
                 }
@@ -778,11 +828,12 @@ impl Server {
                 let mut buttons: Vec<Vec<Button>> = Vec::new();
 
                 for (i, win) in page.windows.iter().enumerate() {
-                    let label = if win.current_command == "claude" || win.current_command == "node" {
-                        format!("💬 {} (claude)", win.name)
+                    let agent = if win.agent_type.is_empty() {
+                        &win.current_command
                     } else {
-                        format!("⬜ {} ({})", win.name, win.current_command)
+                        &win.agent_type
                     };
+                    let label = format!("💬 {} [{}]", win.name, agent);
                     let token = Self::make_callback_token(&mut ctx_lock, user_id, target.chat_id.0, thread_id);
                     buttons.push(vec![Button {
                         text: label,
@@ -955,6 +1006,19 @@ impl Server {
         timeout: Duration,
         cwd_hint: Option<&str>,
     ) -> Option<String> {
+        // Only Claude Code produces JSONL session logs — skip for other agents.
+        // Check via stored agent_type first, fall back to tmux current_command.
+        let agent_type = self.state_mgr.load_state().await.ok()
+            .and_then(|s| s.window_states.get(window_id).cloned())
+            .map(|ws| ws.agent_type)
+            .unwrap_or_default();
+        if !agent_type.is_empty() && agent_type != "claude" {
+            tracing::debug!(
+                "Window {window_id} agent_type is '{agent_type}' — not Claude Code, skipping session_id resolution"
+            );
+            return None;
+        }
+
         let start = std::time::Instant::now();
 
         // Phase 1: Poll session_map.json for the hook's entry (every 300ms)
@@ -1021,8 +1085,18 @@ impl Server {
         let agent_cmd = &self.config.agent_command;
         self.tmux_mgr.send_line(&window_id, agent_cmd).await?;
 
-        // Notify user the session is ready instead of sending the first line to Claude
-        let _ = self.im_adapter.send_message(target, "✅ Claude session ready! Send your message to start chatting.").await;
+        // Wait for agent process to actually start (non-shell process appears)
+        for _ in 0..10 {
+            if let Ok(info) = self.tmux_mgr.find_window(&window_id).await {
+                if !is_shell_process(&info.current_command) {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+
+        // Notify user the session is ready
+        let _ = self.im_adapter.send_message(target, "✅ Session ready! Send your message to start chatting.").await;
 
         let mut state = self.state_mgr.load_state().await?;
         state.thread_bindings.push(ThreadBinding {
@@ -1040,6 +1114,7 @@ impl Server {
                 session_id: String::new(),
                 cwd: cwd.to_string_lossy().to_string(),
                 window_name: window_name.to_string(),
+                agent_type: self.config.agent_type().to_string(),
             },
         );
         self.state_mgr.save_state(&state).await?;
@@ -1078,7 +1153,7 @@ impl Server {
         self.tmux_mgr.send_line(&window_id, &resume_cmd).await?;
 
         // Notify user the session is ready instead of sending the first line to Claude
-        let _ = self.im_adapter.send_message(target, "✅ Claude session ready! Send your message to start chatting.").await;
+        let _ = self.im_adapter.send_message(target, "✅ Session ready! Send your message to start chatting.").await;
 
         let mut state = self.state_mgr.load_state().await?;
         state.thread_bindings.push(ThreadBinding {
@@ -1096,6 +1171,7 @@ impl Server {
                 session_id: session_id.to_string(),
                 cwd: cwd.to_string_lossy().to_string(),
                 window_name: window_name.to_string(),
+                agent_type: self.config.agent_type().to_string(),
             },
         );
         self.state_mgr.save_state(&state).await?;
@@ -1103,6 +1179,9 @@ impl Server {
     }
 
     /// Bind an existing tmux window to a user/thread and notify the user.
+    ///
+    /// If the window is running a shell (agent not started), sends the agent
+    /// command and waits for it to launch before notifying the user.
     async fn bind_window(
         &self,
         target: &MessageTarget,
@@ -1120,8 +1199,25 @@ impl Server {
         // Rename to reflect the new binding
         let _ = self.tmux_mgr.rename_window(&wid, &window_name).await;
 
+        // If the pane is running a shell (agent hasn't started), launch it now
+        if let Ok(info) = self.tmux_mgr.find_window(&wid).await {
+            if is_shell_process(&info.current_command) {
+                let agent_cmd = &self.config.agent_command;
+                self.tmux_mgr.send_line(&wid, agent_cmd).await?;
+                // Wait for agent process to start
+                for _ in 0..10 {
+                    if let Ok(info) = self.tmux_mgr.find_window(&wid).await {
+                        if !is_shell_process(&info.current_command) {
+                            break;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            }
+        }
+
         // Notify user the session is ready instead of sending the first line to Claude
-        let _ = self.im_adapter.send_message(target, "✅ Claude session ready! Send your message to start chatting.").await;
+        let _ = self.im_adapter.send_message(target, "✅ Session ready! Send your message to start chatting.").await;
 
         // Persist the binding
         let mut state = self.state_mgr.load_state().await?;
@@ -1131,6 +1227,7 @@ impl Server {
             session_id: String::new(),
             cwd,
             window_name: window_name.clone(),
+            agent_type: self.config.agent_type().to_string(),
         });
         state.thread_bindings.push(ThreadBinding {
             user_id,
@@ -1171,8 +1268,18 @@ impl Server {
         let agent_cmd = &self.config.agent_command;
         self.tmux_mgr.send_line(&window_id, agent_cmd).await?;
 
-        // Notify user the session is ready instead of sending the first line to Claude
-        let _ = self.im_adapter.send_message(target, "✅ Claude session ready! Send your message to start chatting.").await;
+        // Wait for agent process to actually start (non-shell process appears)
+        for _ in 0..10 {
+            if let Ok(info) = self.tmux_mgr.find_window(&window_id).await {
+                if !is_shell_process(&info.current_command) {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+
+        // Notify user the session is ready
+        let _ = self.im_adapter.send_message(target, "✅ Session ready! Send your message to start chatting.").await;
 
         // Persist the binding
         let mut state = self.state_mgr.load_state().await?;
@@ -1191,6 +1298,7 @@ impl Server {
                 session_id: String::new(),
                 cwd: cwd.clone(),
                 window_name: window_name.to_string(),
+                agent_type: self.config.agent_type().to_string(),
             },
         );
         self.state_mgr.save_state(&state).await?;
@@ -1516,9 +1624,10 @@ impl Server {
 
     /// Forward new terminal output for a non-Claude agent window.
     ///
-    /// Compares the current pane text against the last known snapshot
-    /// (by line count) and sends any new lines to the bound IM chat.
-    /// Stops forwarding when a shell prompt is detected (agent exited).
+    /// TUI-based agents (Copilot CLI, Codex CLI) redraw the screen in-place
+    /// rather than appending lines, so line-count-based diffing doesn't work.
+    /// Instead, compares the full pane content hash and forwards any
+    /// newly-appeared lines that aren't TUI chrome (borders, prompts, etc.).
     async fn forward_new_pane_output(
         &self,
         binding: &ThreadBinding,
@@ -1526,58 +1635,74 @@ impl Server {
         pane_outputs: &mut HashMap<String, String>,
     ) {
         let last = pane_outputs.get(&binding.window_id);
-        let current_lines: Vec<&str> = clean.lines().collect();
-        let current_count = current_lines.len();
 
-        let last_count = last.map(|s| s.lines().count()).unwrap_or(0);
-
-        if current_count <= last_count {
-            // No new lines, but update snapshot in case content changed in-place
-            if last_count == 0 {
-                pane_outputs.insert(binding.window_id.clone(), clean.to_string());
-            }
-            return;
-        }
-
-        // Extract new lines
-        let new_lines: Vec<&str> = current_lines.iter().copied().skip(last_count).collect();
-        let joined = new_lines.join("\n").trim().to_string();
-        if joined.is_empty() || joined.len() < 3 {
+        // First call: establish baseline
+        let Some(prev) = last else {
             pane_outputs.insert(binding.window_id.clone(), clean.to_string());
             return;
-        }
-
-        // Update last known state
-        pane_outputs.insert(binding.window_id.clone(), clean.to_string());
-
-        // Check if output ends with a shell prompt (agent likely finished)
-        let has_prompt = is_shell_prompt(&joined);
-        let display = if joined.len() > MAX_MSG_LEN {
-            let truncated: String = joined.chars().take(MAX_MSG_LEN).collect();
-            format!("```\n{}…\n```", truncated)
-        } else {
-            format!("```\n{}\n```", joined)
         };
 
+        if prev == clean {
+            return; // No change
+        }
+
+        // Content changed — find lines in new pane text that weren't in old
+        // Trim trailing whitespace from each line to avoid terminal padding noise
+        fn trim_trailing(s: &str) -> &str { s.trim_end() }
+        let old_lines: Vec<&str> = prev.lines().map(trim_trailing).collect();
+        let new_lines: Vec<&str> = clean.lines().map(trim_trailing).collect();
+        let old_set: std::collections::HashSet<&str> = old_lines.iter().copied().collect();
+        let added: Vec<&str> = new_lines.iter().copied().filter(|l| !old_set.contains(l)).collect();
+
+        // Update baseline even if we don't forward (so future diffs are accurate)
+        pane_outputs.insert(binding.window_id.clone(), clean.to_string());
+
+        if added.is_empty() {
+            return;
+        }
+
+        // Filter out TUI chrome (borders, empty lines, status bars)
+        let significant: Vec<&str> = added
+            .iter()
+            .filter(|l| {
+                let t = l.trim();
+                if t.is_empty() {
+                    return false;
+                }
+                let c = t.chars().next().unwrap();
+                // Skip box-drawing, block, and shade characters
+                if matches!(c, '│' | '╭' | '╮' | '╰' | '╯' | '─' | '▔' | '▁' | '░' | '█' | '▝' | '▘' | '▖' | '▗') {
+                    return false;
+                }
+                // Skip lines that are purely decorative
+                if t.chars().all(|c| c.is_ascii_punctuation() || c.is_whitespace()) {
+                    return false;
+                }
+                true
+            })
+            .copied()
+            .collect();
+
+        if significant.is_empty() {
+            return;
+        }
+
+        let joined = significant.join("\n");
         let target = MessageTarget {
             chat_id: ChatId(binding.group_chat_id.unwrap_or(binding.chat_id)),
             thread_id: Some(ThreadId(binding.thread_id)),
         };
 
-        if joined.len() > 400 {
-            let _ = self.im_adapter.send_message(&target, &display).await;
+        let display = if joined.len() > MAX_MSG_LEN {
+            let truncated: String = joined.chars().take(MAX_MSG_LEN).collect();
+            format!("```\n{}…\n```", truncated)
+        } else if joined.len() > 400 {
+            format!("```\n{}\n```", joined)
         } else {
-            // Short output: send inline, not in code block
-            let _ = self.im_adapter.send_message(&target, &joined).await;
-        }
+            joined
+        };
 
-        if has_prompt {
-            // Agent returned to shell — next poll will re-baseline
-            tracing::debug!(
-                "Agent output cycle complete for window {} (shell prompt detected)",
-                binding.window_id
-            );
-        }
+        let _ = self.im_adapter.send_message(&target, &display).await;
     }
 }
 

@@ -8,6 +8,9 @@ pub struct WindowState {
     pub session_id: String,
     pub cwd: String,
     pub window_name: String,
+    /// Agent type: "claude", "copilot", "codex", or "" (defaults to "claude" for backward compat).
+    #[serde(default)]
+    pub agent_type: String,
 }
 
 impl Default for WindowState {
@@ -16,6 +19,7 @@ impl Default for WindowState {
             session_id: String::new(),
             cwd: String::new(),
             window_name: String::new(),
+            agent_type: String::new(),
         }
     }
 }

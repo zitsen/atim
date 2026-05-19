@@ -41,6 +41,9 @@ impl TmuxManager {
     }
 
     /// Run `tmux` with the given args and return stdout as a String.
+    ///
+    /// Automatically recovers from a dead tmux server: if the server socket
+    /// is stale ("no server running"), creates a new session and retries.
     async fn tmux(&self, args: &[&str]) -> Result<String> {
         let output = Command::new("tmux")
             .args(args)
@@ -50,10 +53,32 @@ impl TmuxManager {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(Error::Tmux(format!(
-                "tmux {} failed: {stderr}",
-                args.join(" ")
-            )));
+            let err_msg = format!("tmux {} failed: {stderr}", args.join(" "));
+
+            // Recover from a dead tmux server
+            if stderr.contains("no server running") {
+                tracing::warn!("tmux server not running, re-creating session \"{}\"", self.session_name);
+                let _ = Command::new("tmux")
+                    .args(["new-session", "-d", "-s", &self.session_name])
+                    .output()
+                    .await;
+                // Retry the original command
+                let retry = Command::new("tmux")
+                    .args(args)
+                    .output()
+                    .await
+                    .map_err(|e| Error::Tmux(format!("failed to execute tmux: {e}")))?;
+                if retry.status.success() {
+                    return Ok(String::from_utf8_lossy(&retry.stdout).to_string());
+                }
+                let retry_stderr = String::from_utf8_lossy(&retry.stderr);
+                return Err(Error::Tmux(format!(
+                    "tmux {} failed (after server restart): {retry_stderr}",
+                    args.join(" ")
+                )));
+            }
+
+            return Err(Error::Tmux(err_msg));
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).to_string())

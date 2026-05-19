@@ -99,13 +99,42 @@ async fn main() -> anyhow::Result<()> {
         .clean_session_map(|window_id| windows.contains_key(window_id))
         .await?;
 
-    // 4b. Discover session_ids for windows with empty session_id
+    // 4b. Sync known session_ids from window_states to session_map.
+    //     This covers windows where the SessionStart hook didn't run
+    //     (e.g. plugin-managed hooks, sessions started before hook install).
+    if let Ok(mut map) = state_mgr.load_session_map().await {
+        let mut changed = false;
+        for (wid, ws) in &resolved_state.window_states {
+            if !ws.session_id.is_empty() && !map.contains_key(wid) {
+                map.insert(wid.clone(), ws.session_id.clone());
+                changed = true;
+                tracing::info!("Synced session {} to session_map for window {wid}", ws.session_id);
+            }
+        }
+        if changed {
+            state_mgr.save_session_map(&map).await?;
+        }
+    }
+
+    // 4c. Discover session_ids for windows with empty session_id
     //     (e.g. windows created before the SessionStart hook was installed)
     let empty_windows: Vec<(String, String)> = resolved_state.window_states.iter()
         .filter(|(_, ws)| ws.session_id.is_empty())
         .map(|(wid, ws)| (wid.clone(), ws.cwd.clone()))
         .collect();
     for (wid, cwd) in &empty_windows {
+        // Only discover session_ids for Claude Code windows — other agents
+        // (Copilot, Codex) don't produce JSONL logs.
+        let agent_type = resolved_state.window_states.get(wid)
+            .map(|ws| ws.agent_type.as_str())
+            .unwrap_or("");
+        if !agent_type.is_empty() && agent_type != "claude" {
+            tracing::debug!(
+                "Window {wid} agent_type is '{agent_type}' — not Claude Code, skipping session discovery"
+            );
+            continue;
+        }
+
         tracing::info!("No session_id for window {wid}, attempting to discover via pane PID...");
         if let Some(sid) = discover_session_for_window(wid).await {
             tracing::info!("Discovered session {sid} for window {wid}, syncing to state and session_map");
@@ -407,7 +436,7 @@ mod tests {
 
         let state = ServerState {
             window_states: HashMap::from([
-                ("@0".into(), WindowState { session_id: "sess_a".into(), cwd: "/home".into(), window_name: "atim-100".into() }),
+                ("@0".into(), WindowState { session_id: "sess_a".into(), cwd: "/home".into(), window_name: "atim-100".into(), agent_type: String::new() }),
             ]),
             thread_bindings: vec![
                 ThreadBinding {
@@ -432,7 +461,7 @@ mod tests {
         let windows = HashMap::new(); // no windows at all
         let state = ServerState {
             window_states: HashMap::from([
-                ("@9".into(), WindowState { session_id: "sess_x".into(), cwd: "/tmp".into(), window_name: "ghost".into() }),
+                ("@9".into(), WindowState { session_id: "sess_x".into(), cwd: "/tmp".into(), window_name: "ghost".into(), agent_type: String::new() }),
             ]),
             thread_bindings: vec![
                 ThreadBinding {
@@ -463,7 +492,7 @@ mod tests {
         // Stale window_id "@old" — should be re-resolved to "@42" by matching display_name / window_name
         let state = ServerState {
             window_states: HashMap::from([
-                ("@old".into(), WindowState { session_id: "sess_y".into(), cwd: "/projects".into(), window_name: "atim-300".into() }),
+                ("@old".into(), WindowState { session_id: "sess_y".into(), cwd: "/projects".into(), window_name: "atim-300".into(), agent_type: String::new() }),
             ]),
             thread_bindings: vec![
                 ThreadBinding {
@@ -500,8 +529,8 @@ mod tests {
 
         let state = ServerState {
             window_states: HashMap::from([
-                ("@10".into(), WindowState { session_id: "sess_keep".into(), cwd: "/a".into(), window_name: "alive".into() }),
-                ("@99".into(), WindowState { session_id: "sess_dead".into(), cwd: "/b".into(), window_name: "dead".into() }),
+                ("@10".into(), WindowState { session_id: "sess_keep".into(), cwd: "/a".into(), window_name: "alive".into(), agent_type: String::new() }),
+                ("@99".into(), WindowState { session_id: "sess_dead".into(), cwd: "/b".into(), window_name: "dead".into(), agent_type: String::new() }),
             ]),
             thread_bindings: vec![
                 ThreadBinding {
@@ -541,6 +570,7 @@ mod tests {
                     session_id: "sess_alpha".into(),
                     cwd: "/alpha".into(),
                     window_name: "project-alpha".into(),
+                    agent_type: String::new(),
                 }),
             ]),
             thread_bindings: vec![],

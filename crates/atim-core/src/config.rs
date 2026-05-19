@@ -149,6 +149,18 @@ impl Config {
     pub fn is_user_allowed(&self, user_id: i64) -> bool {
         self.allowed_users.is_empty() || self.allowed_users.contains(&user_id)
     }
+
+    /// Derive the agent type ("claude", "copilot", "codex") from the agent command.
+    pub fn agent_type(&self) -> &'static str {
+        let cmd = self.agent_command.to_lowercase();
+        if cmd.contains("copilot") {
+            "copilot"
+        } else if cmd.contains("codex") {
+            "codex"
+        } else {
+            "claude"
+        }
+    }
 }
 
 fn resolve_atim_dir() -> PathBuf {

@@ -42,6 +42,11 @@ const UI_PATTERNS: &[UiPatternDef] = &[
         kind: UiKind::AskUserQuestion,
         contains: &["? ", "Suggest"],
     },
+    // ── Main TUI screen / overlay (dismissable with Escape) ──
+    UiPatternDef {
+        kind: UiKind::Unknown,
+        contains: &["esc close"],
+    },
 ];
 
 /// Parser for Copilot CLI terminal output.
