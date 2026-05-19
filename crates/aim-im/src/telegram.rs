@@ -506,7 +506,7 @@ fn parse_message(msg: &serde_json::Value) -> Option<ImEvent> {
 	} else if msg.get("forum_topic_closed").is_some() {
 	    ImEventKind::TopicClosed
 	} else if let Some(text) = msg.get("text").and_then(|v| v.as_str()) {
-	    ImEventKind::Text(text.to_string())
+	    ImEventKind::Text { text: text.to_string(), is_mention: false, is_group: false }
 	} else if msg.get("photo").is_some() {
 	    ImEventKind::Photo {
 	        caption: msg.get("caption").and_then(|v| v.as_str()).map(String::from),

@@ -97,16 +97,24 @@ impl Server {
         loop {
             tokio::select! {
                 Some(event) = im_rx.recv() => {
-                    self.handle_im_event(event).await?;
+                    if let Err(e) = self.handle_im_event(event).await {
+                        tracing::error!("handle_im_event error: {e}");
+                    }
                 }
                 Some(event) = monitor_rx.recv() => {
-                    self.handle_monitor_event(event).await?;
+                    if let Err(e) = self.handle_monitor_event(event).await {
+                        tracing::error!("handle_monitor_event error: {e}");
+                    }
                 }
                 _ = probe_interval.tick() => {
-                    self.probe_topic_deletions().await?;
+                    if let Err(e) = self.probe_topic_deletions().await {
+                        tracing::error!("probe_topic_deletions error: {e}");
+                    }
                 }
                 _ = ui_interval.tick() => {
-                    self.probe_interactive_uis().await?;
+                    if let Err(e) = self.probe_interactive_uis().await {
+                        tracing::error!("probe_interactive_uis error: {e}");
+                    }
                 }
                 else => break,
             }
@@ -115,6 +123,8 @@ impl Server {
     }
 
     async fn handle_im_event(&self, event: ImEvent) -> Result<()> {
+        tracing::debug!("[Feishu] handle_im_event: user_id={:?} kind={}", event.user_id, event.kind.variant_name());
+
         // Check user authorization
         if !self.config.is_user_allowed(event.user_id.0) {
             tracing::warn!("Unauthorized user: {:?}", event.user_id);
@@ -122,8 +132,8 @@ impl Server {
         }
 
         match event.kind {
-            ImEventKind::Text(text) => {
-                self.handle_text_message(event.target, event.user_id.0, &text)
+            ImEventKind::Text { text, is_mention, is_group } => {
+                self.handle_text_message(event.target, event.user_id.0, &text, is_mention, is_group)
                     .await?;
             }
             ImEventKind::CallbackQuery { data, msg_id, callback_query_id } => {
@@ -387,6 +397,8 @@ impl Server {
         target: MessageTarget,
         user_id: i64,
         text: &str,
+        is_mention: bool,
+        is_group: bool,
     ) -> Result<()> {
         // Load current state to find thread binding
         let state = self.state_mgr.load_state().await?;
@@ -529,28 +541,56 @@ impl Server {
             b.user_id == user_id
                 && b.thread_id == target.thread_id.map(|t| t.0).unwrap_or(0)
         }) {
+            tracing::debug!("[Feishu] Found binding for user {user_id}: window={}", binding.window_id);
             // Forward to existing window
             let window_id = aim_core::message::WindowId(binding.window_id.clone());
 
-            // Verify window is still alive
-            if !self.tmux_mgr.window_exists(&window_id).await {
-                // Window died — clear binding
-                let mut new_state = state;
-                new_state.thread_bindings.retain(|b| b.window_id != window_id.0);
-                self.state_mgr.save_state(&new_state).await?;
-
-                // Notify user
-                let _ = self.tmux_mgr; // TODO: send notification message
+            // Verify window is alive and agent (Claude Code) is actually running
+            match self.tmux_mgr.find_window(&window_id).await {
+                Err(_) => {
+                    // Window died — clear binding and notify user
+                    tracing::warn!("Window {} died, clearing binding for user {}", binding.window_id, user_id);
+                    let mut new_state = state.clone();
+                    new_state.thread_bindings.retain(|b| b.window_id != window_id.0);
+                    self.state_mgr.save_state(&new_state).await?;
+                    let _ = self.im_adapter.send_message(&target,
+                        "Session window no longer exists. Please send your message again to start a new session."
+                    ).await;
+                    return Ok(());
+                }
+                Ok(info) if info.current_command != self.config.agent_command => {
+                    // Window exists but agent isn't running (e.g. Claude Code exited)
+                    tracing::warn!(
+                        "Window {} has '{}' running instead of '{}', clearing binding",
+                        binding.window_id, info.current_command, self.config.agent_command
+                    );
+                    let _ = self.tmux_mgr.kill_window(&window_id).await;
+                    let mut new_state = state.clone();
+                    new_state.thread_bindings.retain(|b| b.window_id != window_id.0);
+                    new_state.window_states.remove(&binding.window_id);
+                    self.state_mgr.save_state(&new_state).await?;
+                    let _ = self.im_adapter.send_message(&target,
+                        "Session expired. Please send your message again to start a new session."
+                    ).await;
+                    return Ok(());
+                }
+                Ok(_) => {
+                    // Agent is running — send text
+                    self.tmux_mgr.send_line(&window_id, text).await?;
+                    let sc_chat_id = binding.group_chat_id.unwrap_or(binding.chat_id);
+                    self.status_consumed.lock().await.remove(&(sc_chat_id, binding.thread_id));
+                    return Ok(());
+                }
+            }
+        } else {
+            // In group chat without @-mention and no active binding, silently ignore
+            if is_group && !is_mention {
+                tracing::debug!("Ignoring group message from user {user_id} (no binding, no @-mention)");
                 return Ok(());
             }
 
-            // Send text to the agent via tmux
-            self.tmux_mgr.send_line(&window_id, text).await?;
+            tracing::debug!("[Feishu] No binding for user {user_id}, showing picker (is_mention={is_mention}, is_group={is_group})");
 
-            // Clear status consumption so the next response gets a fresh status
-            let sc_chat_id = binding.group_chat_id.unwrap_or(binding.chat_id);
-            self.status_consumed.lock().await.remove(&(sc_chat_id, binding.thread_id));
-        } else {
             // No binding — save pending text, then show picker or browser
             let key = (user_id, target.chat_id.0, target.thread_id.map(|t| t.0).unwrap_or(0));
             {
@@ -900,6 +940,69 @@ impl Server {
         Ok(())
     }
 
+    /// After starting Claude in a new window, wait for the session_id to be
+    /// registered — first by polling session_map.json (the SessionStart hook),
+    /// then falling back to tracing the pane PID with lsof, then by
+    /// project-slug matching.
+    ///
+    /// `cwd_hint` is the working directory of the pane — used for the
+    /// project-slug fallback when lsof fails.
+    async fn resolve_session_id(
+        &self,
+        window_id: &str,
+        timeout: Duration,
+        cwd_hint: Option<&str>,
+    ) -> Option<String> {
+        let start = std::time::Instant::now();
+
+        // Phase 1: Poll session_map.json for the hook's entry (every 300ms)
+        while start.elapsed() < timeout {
+            if let Ok(map) = self.state_mgr.load_session_map().await {
+                if let Some(sid) = map.get(window_id) {
+                    if !sid.is_empty() {
+                        tracing::info!("Found session {sid} for window {window_id} via session_map");
+                        return Some(sid.clone());
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+
+        // Phase 2: Fallback — trace the pane PID with lsof
+        tracing::warn!(
+            "SessionStart hook didn't register session_id for window {window_id} within {timeout:?}, trying lsof"
+        );
+        if let Some(sid) = session_by_pane_lsof(window_id).await {
+            return Some(sid);
+        }
+
+        // Phase 3: Fallback — project-slug matching using cwd_hint
+        if let Some(cwd) = cwd_hint {
+            tracing::warn!(
+                "lsof failed for window {window_id}, trying project-slug matching with cwd={cwd}"
+            );
+            let state = self.state_mgr.load_state().await.ok()?;
+            let mut known_ids: std::collections::HashSet<String> = state.window_states
+                .values()
+                .map(|ws| ws.session_id.clone())
+                .filter(|sid| !sid.is_empty())
+                .collect();
+            // Also include session_map entries
+            if let Ok(map) = self.state_mgr.load_session_map().await {
+                for sid in map.values() {
+                    if !sid.is_empty() {
+                        known_ids.insert(sid.clone());
+                    }
+                }
+            }
+            if let Some(sid) = discover_session_by_project_slug(cwd, &known_ids).await {
+                return Some(sid);
+            }
+        }
+
+        None
+    }
+
     /// Create a new tmux window and agent session in a specific directory.
     async fn create_and_bind_in_dir(
         &self,
@@ -938,6 +1041,19 @@ impl Server {
             },
         );
         self.state_mgr.save_state(&state).await?;
+
+        // Try to resolve session_id so the monitor can track responses.
+        // This is best-effort: if it fails, the SessionMapChanged handler
+        // in the monitor loop will discover it later (after a restart or hook re-run).
+        let wid = window_id.0.clone();
+        if let Some(sid) = self.resolve_session_id(&wid, Duration::from_secs(15), Some(cwd.to_str().unwrap_or_default())).await {
+            let mut state = self.state_mgr.load_state().await?;
+            if let Some(ws) = state.window_states.get_mut(&wid) {
+                ws.session_id = sid;
+            }
+            self.state_mgr.save_state(&state).await?;
+        }
+
         Ok(())
     }
 
@@ -1071,11 +1187,21 @@ impl Server {
             window_id.0.clone(),
             WindowState {
                 session_id: String::new(),
-                cwd,
+                cwd: cwd.clone(),
                 window_name: window_name.to_string(),
             },
         );
         self.state_mgr.save_state(&state).await?;
+
+        // Try to resolve session_id so the monitor can track responses.
+        let wid = window_id.0.clone();
+        if let Some(sid) = self.resolve_session_id(&wid, Duration::from_secs(15), Some(&cwd)).await {
+            let mut state = self.state_mgr.load_state().await?;
+            if let Some(ws) = state.window_states.get_mut(&wid) {
+                ws.session_id = sid;
+            }
+            self.state_mgr.save_state(&state).await?;
+        }
 
         Ok(())
     }
@@ -1796,6 +1922,139 @@ async fn zoxide_query(text: &str) -> anyhow::Result<Option<PathBuf>> {
     }
     Ok(None)
 }
+
+/// Discover the session_id for a tmux window — first by tracing the process
+/// tree with `lsof`, then by project-slug matching as a fallback.
+///
+/// `cwd_hint` is the working directory of the session; when provided and lsof
+/// fails, we compute the Claude project slug from cwd and look for the most
+/// recently modified JSONL file in the matching `~/.claude/projects/<slug>/`
+/// directory, excluding any session_ids already known in `known_ids`.
+async fn session_by_pane_lsof(window_id: &str) -> Option<String> {
+    use std::process::Command;
+
+    let output = Command::new("tmux")
+        .args(["display-message", "-t", window_id, "-p", "#{pane_pid}"])
+        .output().ok()?;
+    let pane_pid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if pane_pid.is_empty() || pane_pid == "0" {
+        return None;
+    }
+
+    // Collect process tree
+    let mut all_pids = vec![pane_pid];
+    let mut idx = 0;
+    while idx < all_pids.len() {
+        if let Ok(child_out) = Command::new("pgrep")
+            .args(["-P", &all_pids[idx]])
+            .output()
+        {
+            for child in String::from_utf8_lossy(&child_out.stdout).lines() {
+                let c = child.trim().to_string();
+                if !c.is_empty() && !all_pids.contains(&c) {
+                    all_pids.push(c);
+                }
+            }
+        }
+        idx += 1;
+    }
+
+    for pid in &all_pids {
+        if let Ok(lsof_out) = Command::new("lsof")
+            .args(["-p", pid, "-F", "n"])
+            .output()
+        {
+            let out = String::from_utf8_lossy(&lsof_out.stdout);
+            for line in out.lines() {
+                if line.starts_with('n') {
+                    let path = &line[1..];
+                    if path.ends_with(".jsonl") && path.contains(".claude") {
+                        if let Some(stem) = std::path::Path::new(path).file_stem() {
+                            let sid = stem.to_string_lossy().to_string();
+                            if sid.len() == 36 && sid.contains('-') {
+                                tracing::info!(
+                                    "Discovered session {sid} for window {window_id} via lsof (PID {pid})"
+                                );
+                                return Some(sid);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    tracing::warn!("Could not discover session for window {window_id} via lsof");
+    None
+}
+
+/// Fallback: derive the Claude project slug from `cwd` (e.g. `/home/user/proj`
+/// → `-home-user-proj`) and scan `~/.claude/projects/<slug>/` for JSONL files
+/// whose session_ids are not in `known_ids`. Returns the most recently modified
+/// untracked session_id, if any.
+async fn discover_session_by_project_slug(
+    cwd: &str,
+    known_ids: &std::collections::HashSet<String>,
+) -> Option<String> {
+    let slug: String = cwd.split('/').collect::<Vec<_>>().join("-");
+    let proj_dir = match claude_projects_dir() {
+        Some(d) => d.join("projects").join(&slug),
+        None => return None,
+    };
+    if !proj_dir.is_dir() {
+        tracing::debug!("No claude project dir at {:?} for cwd {cwd}", proj_dir);
+        return None;
+    }
+
+    let mut candidates: Vec<(std::time::SystemTime, String)> = Vec::new();
+    let entries = match std::fs::read_dir(&proj_dir) {
+        Ok(e) => e,
+        Err(_) => return None,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let stem = match path.file_stem().and_then(|s| s.to_str()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        // Must be a UUID-like session_id
+        if stem.len() != 36 || !stem.contains('-') {
+            continue;
+        }
+        if known_ids.contains(&stem) {
+            continue;
+        }
+        let mtime = entry.metadata().ok().and_then(|m| m.modified().ok()).unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        candidates.push((mtime, stem));
+    }
+
+    // Sort by mtime descending — newest first
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+
+    if let Some((_, sid)) = candidates.into_iter().next() {
+        tracing::info!("Discovered session {sid} via project-slug matching (cwd={cwd}, slug={slug})");
+        return Some(sid);
+    }
+
+    tracing::warn!("No untracked JSONL session found via project-slug matching (cwd={cwd}, slug={slug})");
+    None
+}
+
+/// Resolve the claude projects directory: `~/.claude` or `$CLAUDE_DIR`.
+fn claude_projects_dir() -> Option<PathBuf> {
+    let base = std::env::var("CLAUDE_DIR")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".claude"))
+        })?;
+    Some(base)
+}
+
 
 #[cfg(test)]
 mod tests {

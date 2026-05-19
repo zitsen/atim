@@ -93,11 +93,45 @@ async fn main() -> anyhow::Result<()> {
     tmux_mgr.ensure_session().await?;
 
     let windows = tmux_mgr.window_map().await?;
-    let resolved_state = re_resolve_state(server_state, &windows);
+    let mut resolved_state = re_resolve_state(server_state, &windows);
     state_mgr.save_state(&resolved_state).await?;
     state_mgr
         .clean_session_map(|window_id| windows.contains_key(window_id))
         .await?;
+
+    // 4b. Discover session_ids for windows with empty session_id
+    //     (e.g. windows created before the SessionStart hook was installed)
+    let empty_windows: Vec<(String, String)> = resolved_state.window_states.iter()
+        .filter(|(_, ws)| ws.session_id.is_empty())
+        .map(|(wid, ws)| (wid.clone(), ws.cwd.clone()))
+        .collect();
+    for (wid, cwd) in &empty_windows {
+        tracing::info!("No session_id for window {wid}, attempting to discover via pane PID...");
+        if let Some(sid) = discover_session_for_window(wid).await {
+            tracing::info!("Discovered session {sid} for window {wid}, syncing to state and session_map");
+            if let Some(ws) = resolved_state.window_states.get_mut(wid) {
+                ws.session_id = sid.clone();
+            }
+            if let Ok(mut map) = state_mgr.load_session_map().await {
+                map.insert(wid.clone(), sid);
+                let _ = state_mgr.save_session_map(&map).await;
+            }
+        } else if !cwd.is_empty() {
+            // lsof failed — try project-slug matching
+            tracing::info!("lsof failed for window {wid}, trying project-slug matching (cwd={cwd})");
+            if let Some(sid) = discover_session_by_project_slug_for_wid(wid, cwd, &resolved_state).await {
+                tracing::info!("Discovered session {sid} for window {wid} via project-slug matching");
+                if let Some(ws) = resolved_state.window_states.get_mut(wid) {
+                    ws.session_id = sid.clone();
+                }
+                if let Ok(mut map) = state_mgr.load_session_map().await {
+                    map.insert(wid.clone(), sid);
+                    let _ = state_mgr.save_session_map(&map).await;
+                }
+            }
+        }
+    }
+    state_mgr.save_state(&resolved_state).await?;
 
     // 5. Start the IM adapter
     let (im_tx, im_rx) = mpsc::unbounded_channel();
@@ -110,7 +144,6 @@ async fn main() -> anyhow::Result<()> {
                 let adapter = aim_im::feishu::FeishuAdapter::new(
                     config.feishu_app_id.clone(),
                     config.feishu_app_secret.clone(),
-                    config.feishu_webhook_port,
                 );
                 Arc::new(adapter)
             }
@@ -177,6 +210,130 @@ async fn main() -> anyhow::Result<()> {
     monitor_handle.abort();
 
     Ok(())
+}
+
+/// Project-slug matching: derive the slug from cwd and look for untracked
+/// JSONL files in ~/.claude/projects/<slug>/.
+async fn discover_session_by_project_slug(
+    cwd: &str,
+    known_ids: &std::collections::HashSet<String>,
+) -> Option<String> {
+    let slug: String = cwd.split('/').collect::<Vec<_>>().join("-");
+    let home = std::env::var("HOME").ok()?;
+    let proj_dir = std::path::PathBuf::from(home).join(".claude").join("projects").join(&slug);
+    if !proj_dir.is_dir() {
+        tracing::debug!("No claude project dir at {:?}", proj_dir);
+        return None;
+    }
+
+    let mut candidates: Vec<(std::time::SystemTime, String)> = Vec::new();
+    let entries = std::fs::read_dir(&proj_dir).ok()?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let stem = match path.file_stem().and_then(|s| s.to_str()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        if stem.len() != 36 || !stem.contains('-') {
+            continue;
+        }
+        if known_ids.contains(&stem) {
+            continue;
+        }
+        let mtime = entry.metadata().ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        candidates.push((mtime, stem));
+    }
+
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    let result = candidates.into_iter().next().map(|(_, sid)| sid);
+    if result.is_some() {
+        tracing::info!("Discovered session via project-slug matching (cwd={cwd}, slug={slug})");
+    } else {
+        tracing::warn!("No untracked JSONL session found via project-slug matching (cwd={cwd}, slug={slug})");
+    }
+    result
+}
+
+/// Wrapper that builds known_ids set from resolved_state.
+async fn discover_session_by_project_slug_for_wid(
+    _window_id: &str,
+    cwd: &str,
+    state: &aim_core::session::ServerState,
+) -> Option<String> {
+    let known_ids: std::collections::HashSet<String> = state.window_states
+        .values()
+        .map(|ws| ws.session_id.clone())
+        .filter(|s| !s.is_empty())
+        .collect();
+    discover_session_by_project_slug(cwd, &known_ids).await
+}
+
+/// Discover the session_id for a specific tmux window by tracing its process
+/// tree with `lsof` to find the JSONL file that Claude Code has open.
+async fn discover_session_for_window(window_id: &str) -> Option<String> {
+    use std::process::Command;
+
+    // Get pane PID from tmux
+    let output = Command::new("tmux")
+        .args(["display-message", "-t", window_id, "-p", "#{pane_pid}"])
+        .output().ok()?;
+    let pane_pid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if pane_pid.is_empty() || pane_pid == "0" {
+        return None;
+    }
+
+    // Collect all descendant PIDs (process tree)
+    let mut all_pids = vec![pane_pid.clone()];
+    let mut idx = 0;
+    while idx < all_pids.len() {
+        if let Ok(child_out) = Command::new("pgrep")
+            .args(["-P", &all_pids[idx]])
+            .output()
+        {
+            for child in String::from_utf8_lossy(&child_out.stdout).lines() {
+                let c = child.trim().to_string();
+                if !c.is_empty() && !all_pids.contains(&c) {
+                    all_pids.push(c);
+                }
+            }
+        }
+        idx += 1;
+    }
+
+    // Check each PID for open JSONL files via lsof
+    for pid in &all_pids {
+        if let Ok(lsof_out) = Command::new("lsof")
+            .args(["-p", pid, "-F", "n"])
+            .output()
+        {
+            let out = String::from_utf8_lossy(&lsof_out.stdout);
+            for line in out.lines() {
+                if line.starts_with('n') {
+                    let path = &line[1..];
+                    if path.ends_with(".jsonl") {
+                        if let Some(stem) = std::path::Path::new(path).file_stem() {
+                            let sid = stem.to_string_lossy().to_string();
+                            if sid.len() == 36 && sid.contains('-') {
+                                tracing::info!(
+                                    "Discovered session {sid} for window {window_id} via lsof (PID {pid})"
+                                );
+                                return Some(sid);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    tracing::warn!("Could not discover session for window {window_id} via lsof");
+    None
 }
 
 /// Re-resolve stale window IDs in persisted state against live tmux windows.

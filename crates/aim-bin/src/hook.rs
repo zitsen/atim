@@ -130,7 +130,7 @@ fn install_hook() {
 
     match &binary_path {
         Some(path) => {
-            let script = format!("#!/bin/sh\nexec {} hook \"$@\"\n", path.display());
+            let script = format!("#!/bin/sh\nexec {} hook\n", path.display());
             if std::fs::write(&hook_path, &script).is_err() {
                 eprintln!("Could not write hook script to {:?}", hook_path);
                 std::process::exit(1);

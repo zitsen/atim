@@ -1,20 +1,16 @@
 //! Feishu (Lark) IM adapter.
 //!
 //! Architecture:
-//!   - Webhook-based (Feishu pushes events to an axum HTTP server)
-//!   - Token auth via app_id + app_secret (auto-refresh every 2 hours)
+//!   - WebSocket-based (Feishu pushes events via WSS persistent connection)
+//!   - openlark crate for WS connection + token management
 //!   - Interactive cards for inline keyboard UI
 //!   - String IDs (open_id, chat_id) hashed to i64 for Aim's core types
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use axum::extract::State;
-use axum::routing::post;
-use axum::{Json, Router};
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 
@@ -24,74 +20,83 @@ use aim_core::message::{
     Button, ChatId, ImEvent, ImEventKind, MessageId, MessageTarget, ThreadId, UserId,
 };
 
+use open_lark::ws_client::{EventDispatcherHandler, LarkWsClient};
+use open_lark::Config;
+
+const FEISHU_BASE_URL: &str = "https://open.feishu.cn";
+
 // ── FeishuAdapter ──
 
 pub struct FeishuAdapter {
     app_id: String,
     app_secret: String,
-    port: u16,
     client: reqwest::Client,
-    token_mgr: Arc<RwLock<TokenManager>>,
+    token_cache: Arc<RwLock<TokenCache>>,
     /// Stable hash → original Feishu string ID (for outbound API calls).
     id_map: Arc<RwLock<IdMap>>,
     event_tx: Arc<RwLock<Option<mpsc::UnboundedSender<ImEvent>>>>,
+    /// Bot's own open_id, used to detect @-mentions in group chats.
+    bot_open_id: Arc<RwLock<Option<String>>>,
+    /// Bot's display name, also used for @-mention detection.
+    bot_name: Arc<RwLock<Option<String>>>,
 }
 
-/// Cached tenant access token with expiry.
-struct TokenManager {
-    app_id: String,
-    app_secret: String,
+/// Cached tenant access token with auto-refresh via AuthService.
+struct TokenCache {
     token: String,
     expires_at: Instant,
+    app_id: String,
+    app_secret: String,
 }
 
 /// Bi-directional mapping between Aim i64 IDs and Feishu string IDs.
 struct IdMap {
-    user_ids: HashMap<i64, String>,  // hash → open_id
-    chat_ids: HashMap<i64, String>,  // hash → chat_id
+    user_ids: HashMap<i64, String>, // hash → open_id
+    chat_ids: HashMap<i64, String>, // hash → chat_id
 }
 
 impl FeishuAdapter {
-    pub fn new(app_id: String, app_secret: String, port: u16) -> Self {
+    pub fn new(app_id: String, app_secret: String) -> Self {
         Self {
             app_id: app_id.clone(),
             app_secret: app_secret.clone(),
-            port,
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
                 .build()
                 .expect("valid reqwest client"),
-            token_mgr: Arc::new(RwLock::new(TokenManager {
-                app_id,
-                app_secret,
+            token_cache: Arc::new(RwLock::new(TokenCache {
                 token: String::new(),
                 expires_at: Instant::now(),
+                app_id,
+                app_secret,
             })),
             id_map: Arc::new(RwLock::new(IdMap {
                 user_ids: HashMap::new(),
                 chat_ids: HashMap::new(),
             })),
             event_tx: Arc::new(RwLock::new(None)),
+            bot_open_id: Arc::new(RwLock::new(None)),
+            bot_name: Arc::new(RwLock::new(None)),
         }
     }
 
-    // ── Token management ──
+    // ── Token management (via openlark AuthService) ──
 
     /// Get a valid tenant_access_token, refreshing if needed.
     async fn get_token(&self) -> Result<String> {
-        let mut mgr = self.token_mgr.write().await;
-        if mgr.token.is_empty() || Instant::now() >= mgr.expires_at {
-            mgr.refresh(&self.client).await?;
+        let mut cache = self.token_cache.write().await;
+        if cache.token.is_empty() || Instant::now() >= cache.expires_at {
+            cache.refresh().await?;
         }
-        Ok(mgr.token.clone())
+        Ok(cache.token.clone())
     }
 
-    // ── API helpers ──
+    // ── API helpers (keep reqwest for REST calls) ──
 
     /// Send an authenticated POST request to the Feishu API.
     async fn api_post(&self, path: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
         let token = self.get_token().await?;
-        let url = format!("https://open.feishu.cn/open-apis{path}");
+        let url = format!("{FEISHU_BASE_URL}/open-apis{path}");
         let resp = self
             .client
             .post(&url)
@@ -101,7 +106,33 @@ impl FeishuAdapter {
             .await
             .map_err(|e| Error::Feishu(format!("HTTP error: {e}")))?;
 
-        let json: serde_json::Value = resp.json().await
+        let json: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| Error::Feishu(format!("JSON decode: {e}")))?;
+
+        if json["code"].as_i64().unwrap_or(-1) != 0 {
+            let msg = json["msg"].as_str().unwrap_or("unknown");
+            return Err(Error::Feishu(format!("API error: {msg}")));
+        }
+        Ok(json["data"].clone())
+    }
+
+    /// Send an authenticated GET request to the Feishu API.
+    async fn api_get(&self, path: &str) -> Result<serde_json::Value> {
+        let token = self.get_token().await?;
+        let url = format!("{FEISHU_BASE_URL}/open-apis{path}");
+        let resp = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .map_err(|e| Error::Feishu(format!("HTTP error: {e}")))?;
+
+        let json: serde_json::Value = resp
+            .json()
+            .await
             .map_err(|e| Error::Feishu(format!("JSON decode: {e}")))?;
 
         if json["code"].as_i64().unwrap_or(-1) != 0 {
@@ -112,9 +143,10 @@ impl FeishuAdapter {
     }
 
     /// Send an authenticated DELETE request (message recall).
+    /// Only used when `AIM_FEISHU_ENABLE_DELETE` is set — otherwise recall is skipped.
     async fn api_delete(&self, path: &str) -> Result<serde_json::Value> {
         let token = self.get_token().await?;
-        let url = format!("https://open.feishu.cn/open-apis{path}");
+        let url = format!("{FEISHU_BASE_URL}/open-apis{path}");
         let resp = self
             .client
             .delete(&url)
@@ -123,7 +155,9 @@ impl FeishuAdapter {
             .await
             .map_err(|e| Error::Feishu(format!("HTTP error: {e}")))?;
 
-        let json: serde_json::Value = resp.json().await
+        let json: serde_json::Value = resp
+            .json()
+            .await
             .map_err(|e| Error::Feishu(format!("JSON decode: {e}")))?;
 
         let code = json["code"].as_i64().unwrap_or(-1);
@@ -138,6 +172,11 @@ impl FeishuAdapter {
         Ok(json["data"].clone())
     }
 
+    /// Check whether message deletion/recall is enabled via env var.
+    fn delete_enabled() -> bool {
+        std::env::var("AIM_FEISHU_ENABLE_DELETE").is_ok()
+    }
+
     /// Upload image data and return the image_key.
     async fn upload_image(&self, data: &[u8], filename: &str) -> Result<String> {
         let token = self.get_token().await?;
@@ -145,26 +184,37 @@ impl FeishuAdapter {
         let mime = mime_guess::from_path(filename).first_or_octet_stream();
 
         let form = reqwest::multipart::Form::new()
-            .part("image", reqwest::multipart::Part::bytes(data.to_vec())
-                .file_name(filename.to_string())
-                .mime_str(mime.as_ref())
-                .map_err(|e| Error::Feishu(format!("mime error: {e}")))?)
+            .part(
+                "image",
+                reqwest::multipart::Part::bytes(data.to_vec())
+                    .file_name(filename.to_string())
+                    .mime_str(mime.as_ref())
+                    .map_err(|e| Error::Feishu(format!("mime error: {e}")))?,
+            )
             .text("image_type", "message");
 
-        let resp = self.client.post(url)
+        let resp = self
+            .client
+            .post(url)
             .header("Authorization", format!("Bearer {token}"))
             .multipart(form)
-            .send().await
+            .send()
+            .await
             .map_err(|e| Error::Feishu(format!("upload error: {e}")))?;
 
-        let json: serde_json::Value = resp.json().await
+        let json: serde_json::Value = resp
+            .json()
+            .await
             .map_err(|e| Error::Feishu(format!("JSON decode: {e}")))?;
 
         if json["code"].as_i64().unwrap_or(-1) != 0 {
             let msg = json["msg"].as_str().unwrap_or("unknown");
             return Err(Error::Feishu(format!("image upload error: {msg}")));
         }
-        Ok(json["data"]["image_key"].as_str().unwrap_or("").to_string())
+        Ok(json["data"]["image_key"]
+            .as_str()
+            .unwrap_or("")
+            .to_string())
     }
 
     // ── ID mapping ──
@@ -193,54 +243,75 @@ impl FeishuAdapter {
         ChatId(cid)
     }
 
-    /// Look up the original Feishu open_id for a UserId.
-    #[allow(dead_code)]
-    async fn resolve_user(&self, uid: &UserId) -> Option<String> {
-        let map = self.id_map.read().await;
-        map.user_ids.get(&uid.0).cloned()
-    }
-
     /// Look up the original Feishu chat_id for a ChatId.
     async fn resolve_chat(&self, cid: &ChatId) -> Option<String> {
         let map = self.id_map.read().await;
         map.chat_ids.get(&cid.0).cloned()
     }
+
+    /// Fetch bot info (app name, open_id) from Feishu API.
+    async fn get_bot_info(&self) -> Result<serde_json::Value> {
+        self.api_get("/bot/v3/info").await
+    }
+
+    /// Process a raw WS event payload (schema 2.0).
+    async fn handle_raw_payload(&self, payload: &[u8]) -> Result<()> {
+        let value: serde_json::Value = serde_json::from_slice(payload)
+            .map_err(|e| Error::Feishu(format!("payload JSON: {e}")))?;
+
+        let event_type = value["header"]["event_type"].as_str().unwrap_or("");
+        if event_type == "card.action.trigger" {
+            tracing::debug!("Card payload top keys: {:?}", value.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+            tracing::debug!("Card payload event: {}", &value["event"].to_string().chars().take(500).collect::<String>());
+        }
+        match event_type {
+            "im.message.receive_v1" => handle_message_event(self, &value).await,
+            "card.action.trigger" => handle_card_action(self, &value).await,
+            _ => {
+                tracing::debug!("Unhandled Feishu event type: {event_type}");
+                Ok(())
+            }
+        }
+    }
 }
 
-// ── Token refresh ──
+// ── Token refresh via direct API call ──
 
-impl TokenManager {
-    async fn refresh(&mut self, client: &reqwest::Client) -> Result<()> {
+impl TokenCache {
+    async fn refresh(&mut self) -> Result<()> {
+        let url = format!("{}/open-apis/auth/v3/app_access_token/internal", FEISHU_BASE_URL);
         let body = serde_json::json!({
             "app_id": self.app_id,
             "app_secret": self.app_secret,
         });
 
-        let resp = client
-            .post("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal")
+        let resp = reqwest::Client::new()
+            .post(&url)
             .json(&body)
             .send()
             .await
-            .map_err(|e| Error::Feishu(format!("token refresh HTTP error: {e}")))?;
+            .map_err(|e| Error::Feishu(format!("token request failed: {e}")))?;
 
-        let json: serde_json::Value = resp
+        let value: serde_json::Value = resp
             .json()
             .await
-            .map_err(|e| Error::Feishu(format!("token refresh JSON error: {e}")))?;
+            .map_err(|e| Error::Feishu(format!("token response parse: {e}")))?;
 
-        if json["code"].as_i64().unwrap_or(-1) != 0 {
-            let msg = json["msg"].as_str().unwrap_or("unknown");
-            return Err(Error::Feishu(format!("token refresh failed: {msg}")));
+        let code = value["code"].as_i64().unwrap_or(-1);
+        if code != 0 {
+            let msg = value["msg"].as_str().unwrap_or("unknown");
+            return Err(Error::Feishu(format!("token API error: code={code} msg={msg}")));
         }
 
-        self.token = json["tenant_access_token"]
+        // Feishu returns app_access_token at top level (not nested under "data")
+        let token = value["app_access_token"]
             .as_str()
-            .unwrap_or("")
+            .ok_or_else(|| Error::Feishu("token response missing app_access_token".into()))?
             .to_string();
-        let expire = json["expire"].as_i64().unwrap_or(7200);
+        let expire = value["expire"].as_i64().unwrap_or(7200) as u64;
 
-        // Refresh 5 minutes early
-        self.expires_at = Instant::now() + Duration::from_secs(expire as u64 - 300);
+        self.token = token;
+        self.expires_at = Instant::now() + Duration::from_secs(expire.saturating_sub(300));
 
         tracing::info!("Feishu token refreshed, expires in {expire}s");
         Ok(())
@@ -252,65 +323,99 @@ impl TokenManager {
 #[async_trait]
 impl ImAdapter for FeishuAdapter {
     async fn run(&self, tx: mpsc::UnboundedSender<ImEvent>) -> Result<()> {
-        // Store the event sender so webhook handlers can emit events
+        // Store the event sender so WS event handlers can emit events
         {
             let mut stored = self.event_tx.write().await;
             *stored = Some(tx);
         }
 
-        let addr = SocketAddr::from(([0, 0, 0, 0], self.port));
-        tracing::info!("Feishu webhook listening on {addr}");
+        tracing::info!("Feishu adapter starting (openlark WebSocket)");
 
-        let app_state = WebhookState {
-            adapter: self.clone(),
-        };
+        // Fetch bot's own info for @-mention detection
+        match self.get_bot_info().await {
+            Ok(info) => {
+                tracing::debug!("Feishu bot info response: {info}");
+                if let Some(open_id) = info["app_open_id"].as_str() {
+                    *self.bot_open_id.write().await = Some(open_id.to_string());
+                    tracing::info!("Feishu bot open_id: {open_id}");
+                } else {
+                    tracing::warn!("Feishu bot info response missing app_open_id");
+                }
+                if let Some(name) = info["app_name"].as_str() {
+                    *self.bot_name.write().await = Some(name.to_string());
+                    tracing::info!("Feishu bot name: {name}");
+                } else {
+                    tracing::warn!("Feishu bot info response missing app_name");
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to fetch Feishu bot info: {e}");
+            }
+        }
 
-        let app = Router::new()
-            .route("/webhook/feishu", post(handle_webhook))
-            .route("/health", post(|| async { Json(serde_json::json!({"status": "ok"})) }))
-            .with_state(app_state);
+        // Reconnection loop: keep the adapter alive across disconnects
+        let mut backoff = 1u64;
+        loop {
+            let (payload_tx, payload_rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
-        let listener = tokio::net::TcpListener::bind(addr)
-            .await
-            .map_err(|e| Error::Feishu(format!("bind failed: {e}")))?;
+            let event_handler = EventDispatcherHandler::builder()
+                .payload_sender(payload_tx)
+                .build();
 
-        axum::serve(listener, app)
-            .await
-            .map_err(|e| Error::Feishu(format!("server error: {e}")))?;
+            // Spawn payload processing in background task
+            let this = self.clone();
+            tokio::spawn(async move {
+                Self::payload_loop(this, payload_rx).await;
+            });
 
-        Ok(())
+            // Build openlark config for WS connection
+            let cfg = Config::builder()
+                .app_id(&self.app_id)
+                .app_secret(&self.app_secret)
+                .base_url(FEISHU_BASE_URL)
+                .timeout(Duration::from_secs(30))
+                .build()
+                .map_err(|e| Error::Feishu(format!("config build: {e}")))?;
+
+            tracing::info!("Connecting to Feishu WS via openlark");
+            let result = LarkWsClient::open(Arc::new(cfg), event_handler).await;
+
+            match result {
+                Ok(()) => {
+                    backoff = 1;
+                    tracing::info!("Feishu WS disconnected gracefully, reconnecting");
+                }
+                Err(e) => {
+                    tracing::error!("Feishu WS error: {e}, reconnecting in {backoff}s");
+                    backoff = backoff.saturating_mul(2).min(60);
+                }
+            }
+
+            // If the event channel is closed, the server is shutting down
+            if self
+                .event_tx
+                .read()
+                .await
+                .as_ref()
+                .map(|tx| tx.is_closed())
+                .unwrap_or(true)
+            {
+                tracing::info!("Feishu adapter shutting down");
+                return Ok(());
+            }
+
+            tokio::time::sleep(Duration::from_secs(backoff)).await;
+        }
     }
 
     async fn send_message(&self, target: &MessageTarget, text: &str) -> Result<MessageId> {
-        let chat_id = self.resolve_chat(&target.chat_id)
+        let chat_id = self
+            .resolve_chat(&target.chat_id)
             .await
             .ok_or_else(|| Error::Feishu("unknown chat_id".into()))?;
 
-        let content = serde_json::json!({"text": text});
-        let body = serde_json::json!({
-            "receive_id": chat_id,
-            "msg_type": "text",
-            "content": content.to_string(),
-        });
-
-        let data = self.api_post("/im/v1/messages?receive_id_type=chat_id", &body).await?;
-        let msg_id = data["message_id"].as_str().unwrap_or("").to_string();
-        Ok(MessageId(msg_id))
-    }
-
-    async fn edit_message(&self, target: &MessageTarget, msg_id: &MessageId, text: &str) -> Result<()> {
-        // Feishu cannot edit text messages in-place. Recall the old message
-        // and send a new one as a single card for a richer display.
-        let _ = msg_id; // best-effort recall below
-
-        // Recall old message (best-effort)
-        self.api_delete(&format!("/im/v1/messages/{}", msg_id.0)).await.ok();
-
-        // Send as interactive card so future edits can use PATCH
-        let chat_id = self.resolve_chat(&target.chat_id)
-            .await
-            .ok_or_else(|| Error::Feishu("unknown chat_id".into()))?;
-
+        // Send as interactive card so Feishu renders markdown and future edits
+        // can use PATCH (instead of recall+resend).
         let card = serde_json::json!({
             "config": { "wide_screen_mode": true },
             "elements": [
@@ -325,12 +430,77 @@ impl ImAdapter for FeishuAdapter {
                 .map_err(|e| Error::Feishu(format!("card serialization: {e}")))?,
         });
 
-        self.api_post("/im/v1/messages?receive_id_type=chat_id", &body).await?;
-        Ok(())
+        let data = self
+            .api_post("/im/v1/messages?receive_id_type=chat_id", &body)
+            .await?;
+        let msg_id = data["message_id"].as_str().unwrap_or("").to_string();
+        Ok(MessageId(msg_id))
+    }
+
+    async fn edit_message(&self, target: &MessageTarget, msg_id: &MessageId, text: &str) -> Result<()> {
+        let chat_id = self
+            .resolve_chat(&target.chat_id)
+            .await
+            .ok_or_else(|| Error::Feishu("unknown chat_id".into()))?;
+
+        let card = serde_json::json!({
+            "config": { "wide_screen_mode": true },
+            "elements": [
+                { "tag": "markdown", "content": text },
+            ],
+        });
+        let card_str = serde_json::to_string(&card)
+            .map_err(|e| Error::Feishu(format!("card serialization: {e}")))?;
+
+        // Try PATCH in-place first (works on card messages we sent earlier).
+        // Only sends `content` per Feishu PATCH API spec.
+        let token = self.get_token().await?;
+        let url = format!(
+            "{FEISHU_BASE_URL}/open-apis/im/v1/messages/{}",
+            msg_id.0
+        );
+        let patch_body = serde_json::json!({ "content": &card_str });
+        let resp = self
+            .client
+            .patch(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .json(&patch_body)
+            .send()
+            .await
+            .map_err(|e| Error::Feishu(format!("HTTP error: {e}")))?;
+
+        let json: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| Error::Feishu(format!("JSON decode: {e}")))?;
+
+        if json["code"].as_i64().unwrap_or(-1) == 0 {
+            return Ok(());
+        }
+
+        // PATCH failed — try delete+resend as fallback, but only if delete is enabled
+        let msg = json["msg"].as_str().unwrap_or("unknown");
+        tracing::warn!("edit PATCH failed ({msg}), trying delete+resend");
+        if Self::delete_enabled() {
+            self.api_delete(&format!("/im/v1/messages/{}", msg_id.0))
+                .await
+                .ok();
+            let post_body = serde_json::json!({
+                "receive_id": chat_id,
+                "msg_type": "interactive",
+                "content": &card_str,
+            });
+            self.api_post("/im/v1/messages?receive_id_type=chat_id", &post_body)
+                .await?;
+            Ok(())
+        } else {
+            Err(Error::Feishu(format!("edit PATCH failed ({msg})")))
+        }
     }
 
     async fn send_photo(&self, target: &MessageTarget, filename: &str, data: &[u8]) -> Result<MessageId> {
-        let chat_id = self.resolve_chat(&target.chat_id)
+        let chat_id = self
+            .resolve_chat(&target.chat_id)
             .await
             .ok_or_else(|| Error::Feishu("unknown chat_id".into()))?;
 
@@ -346,7 +516,9 @@ impl ImAdapter for FeishuAdapter {
             "content": content.to_string(),
         });
 
-        let data = self.api_post("/im/v1/messages?receive_id_type=chat_id", &body).await?;
+        let data = self
+            .api_post("/im/v1/messages?receive_id_type=chat_id", &body)
+            .await?;
         let msg_id = data["message_id"].as_str().unwrap_or("").to_string();
         Ok(MessageId(msg_id))
     }
@@ -357,9 +529,17 @@ impl ImAdapter for FeishuAdapter {
         text: &str,
         buttons: &[Vec<Button>],
     ) -> Result<MessageId> {
-        let chat_id = self.resolve_chat(&target.chat_id)
+        let chat_id = self
+            .resolve_chat(&target.chat_id)
             .await
             .ok_or_else(|| Error::Feishu("unknown chat_id".into()))?;
+
+        tracing::debug!(
+            "send_keyboard to chat_id={chat_id} target_chat={:?} target_thread={:?} text={}",
+            target.chat_id.0,
+            target.thread_id,
+            &text[..text.len().min(50)]
+        );
 
         let card = build_card(text, buttons);
 
@@ -370,16 +550,21 @@ impl ImAdapter for FeishuAdapter {
                 .map_err(|e| Error::Feishu(format!("card serialization: {e}")))?,
         });
 
-        let data = self.api_post("/im/v1/messages?receive_id_type=chat_id", &body).await?;
+        let data = self
+            .api_post("/im/v1/messages?receive_id_type=chat_id", &body)
+            .await?;
         let msg_id = data["message_id"].as_str().unwrap_or("").to_string();
         Ok(MessageId(msg_id))
     }
 
     async fn delete_message(&self, _target: &MessageTarget, msg_id: &MessageId) -> Result<()> {
-        // Feishu DELETE /im/v1/messages/:message_id recalls the message within 24h
-        match self.api_delete(&format!("/im/v1/messages/{}", msg_id.0)).await {
-            Ok(_) => tracing::debug!("Feishu message {} recalled", msg_id.0),
-            Err(e) => tracing::warn!("Feishu message recall failed: {e}"),
+        if Self::delete_enabled() {
+            match self.api_delete(&format!("/im/v1/messages/{}", msg_id.0)).await {
+                Ok(_) => tracing::debug!("Feishu message {} recalled", msg_id.0),
+                Err(e) => tracing::warn!("Feishu message recall failed: {e}"),
+            }
+        } else {
+            tracing::debug!("Feishu delete_message skipped (AIM_FEISHU_ENABLE_DELETE not set, msg_id={})", msg_id.0);
         }
         Ok(())
     }
@@ -390,12 +575,11 @@ impl ImAdapter for FeishuAdapter {
         msg_id: &MessageId,
         buttons: &[Vec<Button>],
     ) -> Result<()> {
-        let _chat_id = self.resolve_chat(&target.chat_id)
+        let _chat_id = self
+            .resolve_chat(&target.chat_id)
             .await
             .ok_or_else(|| Error::Feishu("unknown chat_id".into()))?;
 
-        // Feishu PATCH /im/v1/messages/:message_id updates interactive card content.
-        // Re-send the same card with updated buttons.
         let card = build_card("(updated)", buttons);
         let body = serde_json::json!({
             "content": serde_json::to_string(&card)
@@ -403,19 +587,26 @@ impl ImAdapter for FeishuAdapter {
         });
 
         let token = self.get_token().await?;
-        let url = format!("https://open.feishu.cn/open-apis/im/v1/messages/{}", msg_id.0);
-        let resp = self.client.patch(&url)
+        let url = format!(
+            "{FEISHU_BASE_URL}/open-apis/im/v1/messages/{}",
+            msg_id.0
+        );
+        let resp = self
+            .client
+            .patch(&url)
             .header("Authorization", format!("Bearer {token}"))
             .json(&body)
-            .send().await
+            .send()
+            .await
             .map_err(|e| Error::Feishu(format!("HTTP error: {e}")))?;
 
-        let json: serde_json::Value = resp.json().await
+        let json: serde_json::Value = resp
+            .json()
+            .await
             .map_err(|e| Error::Feishu(format!("JSON decode: {e}")))?;
 
         if json["code"].as_i64().unwrap_or(-1) != 0 {
             let msg = json["msg"].as_str().unwrap_or("unknown");
-            // Fall back to send+delete if PATCH fails (e.g. message is not a card)
             tracing::warn!("Feishu edit_keyboard PATCH failed ({msg}), falling back to new message");
             let _ = self.send_keyboard(target, "(updated)", buttons).await?;
         }
@@ -424,26 +615,30 @@ impl ImAdapter for FeishuAdapter {
 
     async fn answer_callback(&self, _callback_query_id: &str, _text: &str) -> Result<()> {
         // Feishu card actions don't have a direct "answer" mechanism.
-        // The card can be updated via PATCH if needed.
         Ok(())
     }
 
     async fn send_chat_action(&self, target: &MessageTarget) -> Result<()> {
-        // Feishu doesn't have a typing indicator or similar API.
-        // Use a lightweight presence check by resolving the chat ID.
-        // If the chat doesn't exist or the bot can't access it, this returns an error.
-        let chat_id = self.resolve_chat(&target.chat_id)
+        let chat_id = self
+            .resolve_chat(&target.chat_id)
             .await
             .ok_or_else(|| Error::Feishu("unknown chat_id".into()))?;
 
         let token = self.get_token().await?;
-        let url = format!("https://open.feishu.cn/open-apis/im/v1/messages?container_id_type=chat&container_id={chat_id}&page_size=1");
-        let resp = self.client.get(&url)
+        let url = format!(
+            "{FEISHU_BASE_URL}/open-apis/im/v1/messages?container_id_type=chat&container_id={chat_id}&page_size=1"
+        );
+        let resp = self
+            .client
+            .get(&url)
             .header("Authorization", format!("Bearer {token}"))
-            .send().await
+            .send()
+            .await
             .map_err(|e| Error::Feishu(format!("chat probe error: {e}")))?;
 
-        let json: serde_json::Value = resp.json().await
+        let json: serde_json::Value = resp
+            .json()
+            .await
             .map_err(|e| Error::Feishu(format!("JSON decode: {e}")))?;
 
         let code = json["code"].as_i64().unwrap_or(-1);
@@ -455,60 +650,70 @@ impl ImAdapter for FeishuAdapter {
     }
 }
 
+// ── Payload processing loop ──
+
+impl FeishuAdapter {
+    /// Background task: drain raw WS payloads and dispatch to event handlers.
+    async fn payload_loop(
+        adapter: FeishuAdapter,
+        mut payload_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    ) {
+        while let Some(payload) = payload_rx.recv().await {
+            if let Err(e) = adapter.handle_raw_payload(&payload).await {
+                tracing::error!("Feishu payload handler: {e}");
+            }
+        }
+    }
+}
+
+// ── Image download ──
+
+impl FeishuAdapter {
+    /// Download an image by its image_key from Feishu.
+    async fn download_image(&self, image_key: &str) -> Result<Vec<u8>> {
+        let token = self.get_token().await?;
+        let url = format!(
+            "{FEISHU_BASE_URL}/open-apis/im/v1/images/{image_key}/download"
+        );
+        let resp = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .map_err(|e| Error::Feishu(format!("image download error: {e}")))?;
+
+        if !resp.status().is_success() {
+            return Err(Error::Feishu(format!(
+                "image download failed: HTTP {}",
+                resp.status()
+            )));
+        }
+
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| Error::Feishu(format!("image read error: {e}")))?;
+        Ok(bytes.to_vec())
+    }
+}
+
 impl Clone for FeishuAdapter {
     fn clone(&self) -> Self {
         Self {
             app_id: self.app_id.clone(),
             app_secret: self.app_secret.clone(),
-            port: self.port,
             client: self.client.clone(),
-            token_mgr: self.token_mgr.clone(),
+            token_cache: self.token_cache.clone(),
             id_map: self.id_map.clone(),
             event_tx: self.event_tx.clone(),
+            bot_open_id: self.bot_open_id.clone(),
+            bot_name: self.bot_name.clone(),
         }
     }
 }
 
-// ── Webhook ──
-
-#[derive(Clone)]
-struct WebhookState {
-    adapter: FeishuAdapter,
-}
-
-/// Handle incoming webhook events from Feishu.
-async fn handle_webhook(
-    State(state): State<WebhookState>,
-    Json(payload): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    // Feishu webhook URL verification challenge
-    if let Some(challenge) = payload.get("challenge").and_then(|v| v.as_str()) {
-        tracing::debug!("Feishu webhook challenge");
-        return Json(serde_json::json!({"challenge": challenge}));
-    }
-
-    let event_type = payload["header"]["event_type"].as_str().unwrap_or("");
-    tracing::debug!("Feishu event: {event_type}");
-
-    match event_type {
-        "im.message.receive_v1" => {
-            if let Err(e) = handle_message_event(&state.adapter, &payload).await {
-                tracing::error!("Feishu message handler: {e}");
-            }
-        }
-        "card.action.trigger" => {
-            if let Err(e) = handle_card_action(&state.adapter, &payload).await {
-                tracing::error!("Feishu card action handler: {e}");
-            }
-        }
-        _ => {
-            tracing::debug!("Unhandled Feishu event type: {event_type}");
-        }
-    }
-
-    // Always return OK to Feishu
-    Json(serde_json::json!({}))
-}
+// ── Event handlers ──
 
 async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Value) -> Result<()> {
     let event = &payload["event"];
@@ -521,10 +726,15 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
     let chat_id = message["chat_id"]
         .as_str()
         .ok_or_else(|| Error::Feishu("missing chat_id".into()))?;
-    let msg_type = message["msg_type"].as_str().unwrap_or("");
+    let msg_type = message["message_type"]
+        .as_str()
+        .or_else(|| message["msg_type"].as_str())
+        .unwrap_or("");
     let _message_id = message["message_id"].as_str().unwrap_or("");
     let chat_type = message["chat_type"].as_str().unwrap_or("p2p");
-    let root_id = message["root_id"].as_str();  // thread root (if any)
+    let root_id = message["root_id"].as_str(); // thread root (if any)
+
+    tracing::debug!("Feishu message: type={msg_type} chat={chat_type} from={open_id}");
 
     let user_id = adapter.register_user(open_id).await;
     let chat_id_aim = adapter.register_chat(chat_id).await;
@@ -543,7 +753,8 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
 
     let parsed_content: serde_json::Value = serde_json::from_str(
         message["content"].as_str().unwrap_or("{}"),
-    ).unwrap_or_default();
+    )
+    .unwrap_or_default();
 
     let mut text = String::new();
     let mut has_mention = false;
@@ -552,11 +763,29 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
         "text" => {
             let raw = parsed_content["text"].as_str().unwrap_or("").to_string();
             text = raw.clone();
-            // Check for @bot mention in group chat
+            // Check for @-mention of the bot in group chats
             if chat_type == "group" {
-                if let Some(mentions) = message["mentions"].as_array() {
+                let bot_id = adapter.bot_open_id.read().await;
+                let bot_name = adapter.bot_name.read().await;
+                let mentions = message["mentions"].as_array();
+                if let Some(mentions) = mentions {
                     for mention in mentions {
-                        if mention["name"].as_str().map(|n| n.contains("bot")).unwrap_or(false) {
+                        // Check by bot open_id (preferred)
+                        let is_bot = match bot_id.as_ref() {
+                            Some(bid) => mention["id"]["open_id"].as_str() == Some(bid),
+                            None => false,
+                        };
+                        // Fallback: check by name
+                        let is_bot = is_bot || bot_name.as_ref().map_or(false, |name| {
+                            mention["name"].as_str().map_or(false, |n| {
+                                n.contains(name) || name.contains(n)
+                            })
+                        });
+                        // Broader fallback: any mention named "bot" or the app_id prefix
+                        let is_bot = is_bot || mention["name"].as_str().map_or(false, |n| {
+                            n.contains("bot") || adapter.app_id.contains(n)
+                        });
+                        if is_bot {
                             has_mention = true;
                         }
                         // Strip mention placeholder from text
@@ -565,16 +794,27 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
                         }
                     }
                 }
+                // Permissive fallback: if mentions array exists and is non-empty but we
+                // couldn't match the bot's identity, treat any mention as a bot mention
+                if !has_mention && message["mentions"].as_array().map_or(0, |m| m.len()) > 0 {
+                    tracing::debug!("Mentions present but no bot match — permissive fallback, treating as @mention");
+                    has_mention = true;
+                }
             }
-            ImEventKind::Text(text.clone())
+            ImEventKind::Text { text: text.clone(), is_mention: has_mention, is_group: chat_type == "group" }
         }
         "post" => {
             // Rich text: extract from locale-aware content
             let content = &parsed_content;
-            let locale = if content["zh_cn"].is_object() { "zh_cn" }
-                else if content["en_us"].is_object() { "en_us" }
-                else if content["ja_jp"].is_object() { "ja_jp" }
-                else { "" };
+            let locale = if content["zh_cn"].is_object() {
+                "zh_cn"
+            } else if content["en_us"].is_object() {
+                "en_us"
+            } else if content["ja_jp"].is_object() {
+                "ja_jp"
+            } else {
+                ""
+            };
 
             if !locale.is_empty() {
                 text = extract_post_text(&content[locale]);
@@ -582,7 +822,7 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
             if text.is_empty() {
                 text = parsed_content["text"].as_str().unwrap_or("").to_string();
             }
-            ImEventKind::Text(text.clone())
+            ImEventKind::Text { text: text.clone(), is_mention: has_mention, is_group: chat_type == "group" }
         }
         "image" => {
             let image_key = parsed_content["image_key"].as_str().unwrap_or("");
@@ -593,19 +833,13 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
                 mime_type: "image/png".into(),
             }
         }
-        _ => return Ok(()),  // skip audio, file, sticker, etc.
+        _ => {
+            tracing::debug!("Skipping unknown msg_type: {msg_type}");
+            return Ok(()); // skip audio, file, sticker, etc.
+        }
     };
 
-    // In group chats, only process messages that @mentioned the bot
-    if chat_type == "group" && !has_mention {
-        // The bot was not @-mentioned — only respond if the message holds
-        // an explicit command (e.g. /ss) or we match "direct" patterns.
-        let is_command = text.starts_with('/') || text.starts_with('!');
-        if !is_command {
-            return Ok(());  // skip unmentioned messages in groups
-        }
-    }
-
+    tracing::debug!("Forwarding Feishu message to event loop");
     if let Some(tx) = adapter.event_tx.read().await.as_ref() {
         let _ = tx.send(ImEvent {
             user_id,
@@ -620,28 +854,67 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
 async fn handle_card_action(adapter: &FeishuAdapter, payload: &serde_json::Value) -> Result<()> {
     let event = &payload["event"];
     let action_value = &event["action"]["value"];
-    let message_id = event["message_id"]
+
+    // WS mode: fields are nested under operator/context, not at event top level.
+    // Webhook mode: fields are at event top level.
+    let operator = &event["operator"];
+    let context = &event["context"];
+
+    let open_id = operator["open_id"]
         .as_str()
-        .unwrap_or("");
-    let open_id = event["open_id"]
-        .as_str()
-        .unwrap_or("");
-    let chat_id = event["chat_id"]
-        .as_str()
+        .filter(|s| !s.is_empty())
+        .or_else(|| event["open_id"].as_str())
         .unwrap_or("");
 
-    let data = serde_json::to_string(action_value)
-        .map_err(|e| Error::Feishu(format!("action value serialization: {e}")))?;
+    let chat_id = context["open_chat_id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .or_else(|| event["chat_id"].as_str())
+        .unwrap_or(open_id); // fallback to open_id for p2p
+
+    let message_id = context["open_message_id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .or_else(|| event["message_id"].as_str())
+        .unwrap_or("");
+
+    // Determine chat_type from explicit field or infer from chat_id prefix
+    let explicit_chat_type = event["chat_type"].as_str().unwrap_or("p2p");
+    let is_group = explicit_chat_type == "group" || chat_id.starts_with("oc_");
+    let chat_type = if is_group { "group" } else { "p2p" };
+
+    tracing::debug!(
+        "Card action event: open_id={open_id} chat_id={chat_id} chat_type={chat_type} msg_id={message_id}"
+    );
+
+    // Feishu card action values are JSON objects — extract the "action" field
+    let data = match action_value["action"].as_str() {
+        Some(a) => a.to_string(),
+        None => action_value["data"]
+            .as_str()
+            .map(String::from)
+            .unwrap_or_else(|| {
+                serde_json::to_string(action_value).unwrap_or_default()
+            }),
+    };
+    tracing::debug!("Card action: data={data} chat_type={chat_type}");
 
     let user_id = adapter.register_user(open_id).await;
 
-    let target = MessageTarget {
-        chat_id: adapter.register_chat(chat_id).await,
-        thread_id: None,
+    // For group chats, use sender's user hash as thread_id
+    let thread_id = if is_group {
+        Some(ThreadId(adapter.register_user(open_id).await.0))
+    } else {
+        None
     };
 
-    // Feishu action_token is the equivalent of Telegram's callback_query_id
-    let action_token = event["action"]["token"].as_str()
+    let target = MessageTarget {
+        chat_id: adapter.register_chat(chat_id).await,
+        thread_id,
+    };
+
+    let action_token = event["action"]["token"]
+        .as_str()
         .or_else(|| event["action_token"].as_str())
         .map(String::from);
 
@@ -660,44 +933,14 @@ async fn handle_card_action(adapter: &FeishuAdapter, payload: &serde_json::Value
     Ok(())
 }
 
-// ── Image download ──
-
-impl FeishuAdapter {
-    /// Download an image by its image_key from Feishu.
-    async fn download_image(&self, image_key: &str) -> Result<Vec<u8>> {
-        let token = self.get_token().await?;
-        let url = format!("https://open.feishu.cn/open-apis/im/v1/images/{image_key}/download");
-        let resp = self.client
-            .get(&url)
-            .header("Authorization", format!("Bearer {token}"))
-            .send()
-            .await
-            .map_err(|e| Error::Feishu(format!("image download error: {e}")))?;
-
-        if !resp.status().is_success() {
-            return Err(Error::Feishu(format!(
-                "image download failed: HTTP {}",
-                resp.status()
-            )));
-        }
-
-        let bytes = resp.bytes()
-            .await
-            .map_err(|e| Error::Feishu(format!("image read error: {e}")))?;
-        Ok(bytes.to_vec())
-    }
-}
-
 // ── Card builder ──
 
 /// Build a Feishu interactive card JSON for permission prompts / choices.
 fn build_card(text: &str, buttons: &[Vec<Button>]) -> serde_json::Value {
-    let mut elements: Vec<serde_json::Value> = vec![
-        serde_json::json!({
-            "tag": "markdown",
-            "content": text,
-        }),
-    ];
+    let mut elements: Vec<serde_json::Value> = vec![serde_json::json!({
+        "tag": "markdown",
+        "content": text,
+    })];
 
     for row in buttons {
         let actions: Vec<serde_json::Value> = row
@@ -754,16 +997,9 @@ fn build_card(text: &str, buttons: &[Vec<Button>]) -> serde_json::Value {
 }
 
 /// Extract plain text from a Feishu `post` rich-text block.
-///
-/// Feishu post content has the structure:
-/// ```json
-/// { "title": "optional", "content": [[{ "tag": "text", "text": "hello" }, { "tag": "a", "text": "link", "href": "..." }]] }
-/// ```
-/// The inner array contains paragraphs; each paragraph is an array of inline elements.
 fn extract_post_content_text(content: &serde_json::Value) -> String {
     let mut result = String::new();
 
-    // title
     if let Some(title) = content["title"].as_str() {
         if !title.is_empty() {
             result.push_str(title);
@@ -771,7 +1007,6 @@ fn extract_post_content_text(content: &serde_json::Value) -> String {
         }
     }
 
-    // paragraphs (content is an array of paragraphs)
     if let Some(paragraphs) = content["content"].as_array() {
         for (i, para) in paragraphs.iter().enumerate() {
             if i > 0 {
@@ -861,7 +1096,7 @@ mod tests {
 
         let card = build_card("Proceed?", &buttons);
         assert_eq!(card["header"]["title"]["content"], "Aim — Agent Response");
-        assert_eq!(card["elements"].as_array().unwrap().len(), 3); // markdown + 2 action rows
+        assert_eq!(card["elements"].as_array().unwrap().len(), 3);
 
         let actions_row0 = card["elements"][1]["actions"].as_array().unwrap();
         assert_eq!(actions_row0[0]["text"]["content"], "Yes");

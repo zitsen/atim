@@ -51,7 +51,13 @@ pub struct ImEvent {
 #[derive(Debug, Clone)]
 pub enum ImEventKind {
     /// Plain text message.
-    Text(String),
+    Text {
+        text: String,
+        /// True if the user explicitly @-mentioned the bot (relevant for group chats).
+        is_mention: bool,
+        /// True if the message was sent in a group chat (vs P2P).
+        is_group: bool,
+    },
     /// Photo with optional caption.
     Photo {
         caption: Option<String>,
@@ -73,6 +79,20 @@ pub enum ImEventKind {
     TopicClosed,
     /// Forum topic was renamed (topic title changed).
     TopicEdited { new_name: String },
+}
+
+impl ImEventKind {
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            ImEventKind::Text { .. } => "Text",
+            ImEventKind::Photo { .. } => "Photo",
+            ImEventKind::Voice(..) => "Voice",
+            ImEventKind::CallbackQuery { .. } => "CallbackQuery",
+            ImEventKind::TopicCreated { .. } => "TopicCreated",
+            ImEventKind::TopicClosed => "TopicClosed",
+            ImEventKind::TopicEdited { .. } => "TopicEdited",
+        }
+    }
 }
 
 // ── IM UI widgets ──
