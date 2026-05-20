@@ -7,6 +7,7 @@
 //!   - String IDs (open_id, chat_id) hashed to i64 for Atim's core types
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -34,6 +35,8 @@ pub struct FeishuAdapter {
     token_cache: Arc<RwLock<TokenCache>>,
     /// Stable hash → original Feishu string ID (for outbound API calls).
     id_map: Arc<RwLock<IdMap>>,
+    /// Persistence file for id_map (survives restarts).
+    id_map_file: PathBuf,
     event_tx: Arc<RwLock<Option<mpsc::UnboundedSender<ImEvent>>>>,
     /// Bot's own open_id, used to detect @-mentions in group chats.
     bot_open_id: Arc<RwLock<Option<String>>>,
@@ -56,8 +59,9 @@ struct IdMap {
 }
 
 impl FeishuAdapter {
-    pub fn new(app_id: String, app_secret: String) -> Self {
-        Self {
+    pub fn new(app_id: String, app_secret: String, atim_dir: PathBuf) -> Self {
+        let id_map_file = atim_dir.join("feishu_id_map.json");
+        let adapter = Self {
             app_id: app_id.clone(),
             app_secret: app_secret.clone(),
             client: reqwest::Client::builder()
@@ -74,10 +78,14 @@ impl FeishuAdapter {
                 user_ids: HashMap::new(),
                 chat_ids: HashMap::new(),
             })),
+            id_map_file,
             event_tx: Arc::new(RwLock::new(None)),
             bot_open_id: Arc::new(RwLock::new(None)),
             bot_name: Arc::new(RwLock::new(None)),
-        }
+        };
+        // Load persisted id_map so previously-registered chat_ids resolve on restart
+        let _ = adapter.load_id_map_sync();
+        adapter
     }
 
     // ── Token management (via openlark AuthService) ──
@@ -233,20 +241,26 @@ impl FeishuAdapter {
     /// Register a Feishu open_id and return its stable i64 UserId.
     async fn register_user(&self, open_id: &str) -> UserId {
         let uid = Self::hash_id(open_id);
-        let mut map = self.id_map.write().await;
-        map.user_ids
-            .entry(uid)
-            .or_insert_with(|| open_id.to_string());
+        {
+            let mut map = self.id_map.write().await;
+            map.user_ids
+                .entry(uid)
+                .or_insert_with(|| open_id.to_string());
+        }
+        self.save_id_map().await;
         UserId(uid)
     }
 
     /// Register a Feishu chat_id and return its stable i64 ChatId.
     async fn register_chat(&self, chat_id: &str) -> ChatId {
         let cid = Self::hash_id(chat_id);
-        let mut map = self.id_map.write().await;
-        map.chat_ids
-            .entry(cid)
-            .or_insert_with(|| chat_id.to_string());
+        {
+            let mut map = self.id_map.write().await;
+            map.chat_ids
+                .entry(cid)
+                .or_insert_with(|| chat_id.to_string());
+        }
+        self.save_id_map().await;
         ChatId(cid)
     }
 
@@ -254,6 +268,49 @@ impl FeishuAdapter {
     async fn resolve_chat(&self, cid: &ChatId) -> Option<String> {
         let map = self.id_map.read().await;
         map.chat_ids.get(&cid.0).cloned()
+    }
+
+    /// Persist the current id_map to disk.
+    async fn save_id_map(&self) {
+        let map = self.id_map.read().await;
+        let data = serde_json::json!({
+            "user_ids": map.user_ids,
+            "chat_ids": map.chat_ids,
+        });
+        let json = serde_json::to_string_pretty(&data).unwrap_or_default();
+        // Use std::fs for simplicity (called infrequently)
+        let _ = std::fs::create_dir_all(self.id_map_file.parent().unwrap_or(&self.id_map_file));
+        let _ = std::fs::write(&self.id_map_file, &json);
+    }
+
+    /// Load id_map from disk synchronously (called once at construction).
+    fn load_id_map_sync(&self) {
+        let data = match std::fs::read_to_string(&self.id_map_file) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let parsed: serde_json::Value = match serde_json::from_str(&data) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let mut map = match self.id_map.try_write().ok() {
+            Some(m) => m,
+            None => return,
+        };
+        if let Some(users) = parsed["user_ids"].as_object() {
+            for (k, v) in users {
+                if let (Some(k), Some(v)) = (k.parse::<i64>().ok(), v.as_str()) {
+                    map.user_ids.entry(k).or_insert_with(|| v.to_string());
+                }
+            }
+        }
+        if let Some(chats) = parsed["chat_ids"].as_object() {
+            for (k, v) in chats {
+                if let (Some(k), Some(v)) = (k.parse::<i64>().ok(), v.as_str()) {
+                    map.chat_ids.entry(k).or_insert_with(|| v.to_string());
+                }
+            }
+        }
     }
 
     /// Fetch bot info (app name, open_id) from Feishu API.
@@ -738,6 +795,7 @@ impl Clone for FeishuAdapter {
             client: self.client.clone(),
             token_cache: self.token_cache.clone(),
             id_map: self.id_map.clone(),
+            id_map_file: self.id_map_file.clone(),
             event_tx: self.event_tx.clone(),
             bot_open_id: self.bot_open_id.clone(),
             bot_name: self.bot_name.clone(),

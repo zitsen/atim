@@ -176,6 +176,7 @@ async fn main() -> anyhow::Result<()> {
                 let adapter = atim_im::feishu::FeishuAdapter::new(
                     config.feishu_app_id.clone(),
                     config.feishu_app_secret.clone(),
+                    config.atim_dir.clone(),
                 );
                 Arc::new(adapter)
             }
