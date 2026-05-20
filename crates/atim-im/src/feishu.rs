@@ -56,6 +56,7 @@ struct TokenCache {
 struct IdMap {
     user_ids: HashMap<i64, String>, // hash → open_id
     chat_ids: HashMap<i64, String>, // hash → chat_id
+    thread_ids: HashMap<i64, String>, // hash → root_id (for topic-based groups)
 }
 
 impl FeishuAdapter {
@@ -77,6 +78,7 @@ impl FeishuAdapter {
             id_map: Arc::new(RwLock::new(IdMap {
                 user_ids: HashMap::new(),
                 chat_ids: HashMap::new(),
+                thread_ids: HashMap::new(),
             })),
             id_map_file,
             event_tx: Arc::new(RwLock::new(None)),
@@ -264,10 +266,38 @@ impl FeishuAdapter {
         ChatId(cid)
     }
 
+    /// Register a Feishu topic root_id and return its stable i64 thread_id.
+    async fn register_thread(&self, root_id: &str) -> ThreadId {
+        let tid = Self::hash_id(root_id);
+        {
+            let mut map = self.id_map.write().await;
+            map.thread_ids
+                .entry(tid)
+                .or_insert_with(|| root_id.to_string());
+        }
+        self.save_id_map().await;
+        ThreadId(tid)
+    }
+
+    /// Look up the original Feishu root_id for a ThreadId.
+    async fn get_thread_root_id(&self, tid: &ThreadId) -> Option<String> {
+        let map = self.id_map.read().await;
+        map.thread_ids.get(&tid.0).cloned()
+    }
+
     /// Look up the original Feishu chat_id for a ChatId.
     async fn resolve_chat(&self, cid: &ChatId) -> Option<String> {
         let map = self.id_map.read().await;
         map.chat_ids.get(&cid.0).cloned()
+    }
+
+    /// Add thread_id to a request body if the target has one.
+    async fn add_thread_id(&self, body: &mut serde_json::Value, target: &MessageTarget) {
+        if let Some(ref thread_id) = target.thread_id {
+            if let Some(root_id) = self.get_thread_root_id(thread_id).await {
+                body["thread_id"] = serde_json::json!(root_id);
+            }
+        }
     }
 
     /// Persist the current id_map to disk.
@@ -276,6 +306,7 @@ impl FeishuAdapter {
         let data = serde_json::json!({
             "user_ids": map.user_ids,
             "chat_ids": map.chat_ids,
+            "thread_ids": map.thread_ids,
         });
         let json = serde_json::to_string_pretty(&data).unwrap_or_default();
         // Use std::fs for simplicity (called infrequently)
@@ -308,6 +339,13 @@ impl FeishuAdapter {
             for (k, v) in chats {
                 if let (Some(k), Some(v)) = (k.parse::<i64>().ok(), v.as_str()) {
                     map.chat_ids.entry(k).or_insert_with(|| v.to_string());
+                }
+            }
+        }
+        if let Some(threads) = parsed["thread_ids"].as_object() {
+            for (k, v) in threads {
+                if let (Some(k), Some(v)) = (k.parse::<i64>().ok(), v.as_str()) {
+                    map.thread_ids.entry(k).or_insert_with(|| v.to_string());
                 }
             }
         }
@@ -502,12 +540,14 @@ impl ImAdapter for FeishuAdapter {
             ],
         });
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "receive_id": chat_id,
             "msg_type": "interactive",
             "content": serde_json::to_string(&card)
                 .map_err(|e| Error::Feishu(format!("card serialization: {e}")))?,
         });
+
+        self.add_thread_id(&mut body, target).await;
 
         let data = self
             .api_post("/im/v1/messages?receive_id_type=chat_id", &body)
@@ -566,11 +606,12 @@ impl ImAdapter for FeishuAdapter {
             self.api_delete(&format!("/im/v1/messages/{}", msg_id.0))
                 .await
                 .ok();
-            let post_body = serde_json::json!({
+            let mut post_body = serde_json::json!({
                 "receive_id": chat_id,
                 "msg_type": "interactive",
                 "content": &card_str,
             });
+            self.add_thread_id(&mut post_body, target).await;
             self.api_post("/im/v1/messages?receive_id_type=chat_id", &post_body)
                 .await?;
             Ok(())
@@ -596,11 +637,12 @@ impl ImAdapter for FeishuAdapter {
         }
 
         let content = serde_json::json!({"image_key": image_key});
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "receive_id": chat_id,
             "msg_type": "image",
             "content": content.to_string(),
         });
+        self.add_thread_id(&mut body, target).await;
 
         let data = self
             .api_post("/im/v1/messages?receive_id_type=chat_id", &body)
@@ -629,12 +671,13 @@ impl ImAdapter for FeishuAdapter {
 
         let card = build_card(text, buttons);
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "receive_id": chat_id,
             "msg_type": "interactive",
             "content": serde_json::to_string(&card)
                 .map_err(|e| Error::Feishu(format!("card serialization: {e}")))?,
         });
+        self.add_thread_id(&mut body, target).await;
 
         let data = self
             .api_post("/im/v1/messages?receive_id_type=chat_id", &body)
@@ -829,11 +872,14 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
     let user_id = adapter.register_user(open_id).await;
     let chat_id_atim = adapter.register_chat(chat_id).await;
 
-    // For group chats, use sender's user hash as thread_id
-    let thread_id = if chat_type == "group" {
+    // For topic/thread messages, use root_id as thread_id (consistent per-topic routing).
+    // For non-topic group chats, use sender's user hash as thread_id.
+    let thread_id = if let Some(root_id) = root_id {
+        Some(adapter.register_thread(root_id).await)
+    } else if chat_type == "group" {
         Some(ThreadId(adapter.register_user(open_id).await.0))
     } else {
-        root_id.map(|id| ThreadId(FeishuAdapter::hash_id(id)))
+        None
     };
 
     let target = MessageTarget {
@@ -999,8 +1045,15 @@ async fn handle_card_action(adapter: &FeishuAdapter, payload: &serde_json::Value
 
     let user_id = adapter.register_user(open_id).await;
 
-    // For group chats, use sender's user hash as thread_id
-    let thread_id = if is_group {
+    // Check for thread_id in the card action context (Feishu may include it
+    // for messages sent to topic threads), or root_id in the event envelope.
+    let root_id = event["root_id"].as_str().filter(|s| !s.is_empty());
+    let ctx_thread_id = context["thread_id"].as_str().filter(|s| !s.is_empty());
+
+    let thread_id = if let Some(tid) = ctx_thread_id.or(root_id) {
+        Some(adapter.register_thread(tid).await)
+    } else if is_group {
+        // Fallback: use sender's user hash as thread_id (non-topic groups)
         Some(ThreadId(adapter.register_user(open_id).await.0))
     } else {
         None
