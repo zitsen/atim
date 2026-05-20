@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use atim_core::agent::types::AgentHandle;
 use atim_core::agent::OutputSource;
 use atim_core::config::Config;
 use atim_core::error::Result;
@@ -46,6 +47,8 @@ pub struct Server {
     /// Status message tracking for status→content conversion:
     /// key = (chat_id, thread_id) -> whether status has been consumed by first content.
     pub status_consumed: Arc<Mutex<HashSet<(i64, i64)>>>,
+    /// Pending agent selection per (user_id, chat_id, thread_id) during setup workflow.
+    pub pending_agents: Arc<Mutex<HashMap<(i64, i64, i64), String>>>,
     /// Interactive UI detection cache: window_id -> hash of last detected UI content.
     pub last_ui_states: Arc<Mutex<HashMap<String, String>>>,
     /// Last pane output per window (for non-Claude agents without JSONL logs).
@@ -909,7 +912,7 @@ impl Server {
                 "[Feishu] No binding for user {user_id}, showing picker (is_mention={is_mention}, is_group={is_group})"
             );
 
-            // No binding — save pending text, then show picker or browser
+            // No binding — save pending text, then show agent picker
             let key = (
                 user_id,
                 target.chat_id.0,
@@ -920,30 +923,12 @@ impl Server {
                 pending.insert(key, text.to_string());
             }
 
-            let unbound = self.unbound_windows(&state).await;
-            if !unbound.is_empty() {
-                self.show_window_picker(
-                    &target,
-                    user_id,
-                    &unbound,
-                    target.thread_id.map(|t| t.0).unwrap_or(0),
-                )
-                .await?;
-            } else {
-                let topic_name = self
-                    .topic_names
-                    .lock()
-                    .await
-                    .remove(&(target.chat_id.0, target.thread_id.map(|t| t.0).unwrap_or(0)));
-                drop(topic_name); // saved in topic_names for later use
-
-                self.show_directory_browser(
-                    &target,
-                    user_id,
-                    target.thread_id.map(|t| t.0).unwrap_or(0),
-                )
-                .await?;
-            }
+            self.send_agent_picker(
+                &target,
+                user_id,
+                target.thread_id.map(|t| t.0).unwrap_or(0),
+            )
+            .await?;
         }
 
         Ok(())
@@ -960,6 +945,73 @@ impl Server {
 
         self.browser.start_browsing(user_id, &start_path).await;
         let _ = self.send_browser_keyboard(target, user_id, thread_id).await;
+        Ok(())
+    }
+
+    /// Show the agent picker inline keyboard with "Choose Agent" title.
+    async fn send_agent_picker(
+        &self,
+        target: &MessageTarget,
+        user_id: i64,
+        thread_id: i64,
+    ) -> Result<()> {
+        let mut ctx_lock = self.callback_contexts.lock().await;
+        let mut buttons: Vec<Vec<Button>> = Vec::new();
+
+        for agent in self.config.agent_registry.iter() {
+            let token = Self::make_callback_token(
+                &mut ctx_lock,
+                user_id,
+                target.chat_id.0,
+                thread_id,
+            );
+            buttons.push(vec![Button {
+                text: format!("🚀 {}", agent.name()),
+                callback_data: format!("cb:{token}:agent:{}", agent.name()),
+            }]);
+        }
+
+        let cancel_token = Self::make_callback_token(
+            &mut ctx_lock,
+            user_id,
+            target.chat_id.0,
+            thread_id,
+        );
+        buttons.push(vec![Button {
+            text: "❌ Cancel".into(),
+            callback_data: format!("cb:{cancel_token}:cancel"),
+        }]);
+
+        drop(ctx_lock);
+
+        let _ = self
+            .im_adapter
+            .send_keyboard(target, "Choose Agent", &buttons)
+            .await;
+        Ok(())
+    }
+
+    /// After agent selection, show window picker or directory browser.
+    async fn show_setup_flow(
+        &self,
+        target: &MessageTarget,
+        user_id: i64,
+        thread_id: i64,
+    ) -> Result<()> {
+        let state = self.state_mgr.load_state().await?;
+        let unbound = self.unbound_windows(&state).await;
+        if !unbound.is_empty() {
+            self.show_window_picker(target, user_id, &unbound, thread_id)
+                .await?;
+        } else {
+            let _ = self
+                .topic_names
+                .lock()
+                .await
+                .remove(&(target.chat_id.0, thread_id));
+            self.show_directory_browser(target, user_id, thread_id)
+                .await?;
+        }
         Ok(())
     }
 
@@ -1506,6 +1558,22 @@ impl Server {
         None
     }
 
+    /// Get the agent selected for this context, or the default agent.
+    /// Consumes the pending agent selection (one-time use).
+    async fn resolve_agent(&self, user_id: i64, chat_id: i64, thread_id: i64) -> AgentHandle {
+        let key = (user_id, chat_id, thread_id);
+        let name = self.pending_agents.lock().await.remove(&key);
+        match name {
+            Some(n) => self
+                .config
+                .agent_registry
+                .get(&n)
+                .cloned()
+                .unwrap_or_else(|| self.config.agent_registry.default().clone()),
+            None => self.config.agent_registry.default().clone(),
+        }
+    }
+
     /// Create a new tmux window and agent session in a specific directory.
     async fn create_and_bind_in_dir(
         &self,
@@ -1522,7 +1590,14 @@ impl Server {
             .new_window(window_name, &cwd.to_string_lossy())
             .await?;
 
-        let launch_cmd = agent_launch_cmd(self.config.agent_registry.default());
+        let agent = self
+            .resolve_agent(
+                user_id,
+                target.chat_id.0,
+                target.thread_id.map(|t| t.0).unwrap_or(0),
+            )
+            .await;
+        let launch_cmd = agent_launch_cmd(&agent);
         self.tmux_mgr.send_line(&window_id, &launch_cmd).await?;
 
         // Wait for agent process to actually start (non-shell process appears)
@@ -1560,7 +1635,7 @@ impl Server {
                 session_id: String::new(),
                 cwd: cwd.to_string_lossy().to_string(),
                 window_name: window_name.to_string(),
-                agent_type: self.config.agent_registry.default().name().to_string(),
+                agent_type: agent.name().to_string(),
             },
         );
         self.state_mgr.save_state(&state).await?;
@@ -1605,7 +1680,13 @@ impl Server {
             .await?;
 
         // Launch agent with resume command
-        let agent = self.config.agent_registry.default();
+        let agent = self
+            .resolve_agent(
+                user_id,
+                target.chat_id.0,
+                target.thread_id.map(|t| t.0).unwrap_or(0),
+            )
+            .await;
         let resume_cmd = match agent.resume_command(session_id) {
             Some(cmd) => cmd,
             None => {
@@ -1644,7 +1725,7 @@ impl Server {
                 session_id: session_id.to_string(),
                 cwd: cwd.to_string_lossy().to_string(),
                 window_name: window_name.to_string(),
-                agent_type: self.config.agent_registry.default().name().to_string(),
+                agent_type: agent.name().to_string(),
             },
         );
         self.state_mgr.save_state(&state).await?;
@@ -1675,7 +1756,14 @@ impl Server {
         // If the pane is running a shell (agent hasn't started), launch it now
         if let Ok(info) = self.tmux_mgr.find_window(&wid).await {
             if is_shell_process(&info.current_command) {
-                let launch_cmd = agent_launch_cmd(self.config.agent_registry.default());
+                let agent = self
+                    .resolve_agent(
+                        user_id,
+                        target.chat_id.0,
+                        target.thread_id.map(|t| t.0).unwrap_or(0),
+                    )
+                    .await;
+                let launch_cmd = agent_launch_cmd(&agent);
                 self.tmux_mgr.send_line(&wid, &launch_cmd).await?;
                 // Wait for agent process to start
                 for _ in 0..10 {
@@ -1702,6 +1790,13 @@ impl Server {
         let mut state = self.state_mgr.load_state().await?;
         // Ensure WindowState entry exists (needed for session_id tracking)
         let cwd = self.tmux_mgr.pane_cwd(&wid).await.unwrap_or_default();
+        let agent = self
+            .resolve_agent(
+                user_id,
+                target.chat_id.0,
+                target.thread_id.map(|t| t.0).unwrap_or(0),
+            )
+            .await;
         state
             .window_states
             .entry(window_id.to_string())
@@ -1709,7 +1804,7 @@ impl Server {
                 session_id: String::new(),
                 cwd,
                 window_name: window_name.clone(),
-                agent_type: self.config.agent_registry.default().name().to_string(),
+                agent_type: agent.name().to_string(),
             });
         state.thread_bindings.push(ThreadBinding {
             user_id,
@@ -1744,7 +1839,14 @@ impl Server {
         let window_id = self.tmux_mgr.new_window(&window_name, &cwd).await?;
 
         // Start the agent
-        let launch_cmd = agent_launch_cmd(self.config.agent_registry.default());
+        let agent = self
+            .resolve_agent(
+                user_id,
+                target.chat_id.0,
+                target.thread_id.map(|t| t.0).unwrap_or(0),
+            )
+            .await;
+        let launch_cmd = agent_launch_cmd(&agent);
         self.tmux_mgr.send_line(&window_id, &launch_cmd).await?;
 
         // Wait for agent process to actually start (non-shell process appears)
@@ -1783,7 +1885,7 @@ impl Server {
                 session_id: String::new(),
                 cwd: cwd.clone(),
                 window_name: window_name.to_string(),
-                agent_type: self.config.agent_registry.default().name().to_string(),
+                agent_type: agent.name().to_string(),
             },
         );
         self.state_mgr.save_state(&state).await?;
@@ -1963,6 +2065,33 @@ impl Server {
                     &text,
                 )
                 .await?;
+            }
+            "cancel" => {
+                let _ = self
+                    .im_adapter
+                    .edit_message(&target, &msg_id, "Cancelled.")
+                    .await;
+            }
+            "agent" => {
+                let agent_name = arg.unwrap_or("").to_string();
+                if !agent_name.is_empty() {
+                    self.pending_agents
+                        .lock()
+                        .await
+                        .insert(key.clone(), agent_name.clone());
+                }
+                // Re-insert pending message for the subsequent setup flow
+                self.pending_messages.lock().await.insert(key, text);
+                let _ = self
+                    .im_adapter
+                    .edit_message(
+                        &target,
+                        &msg_id,
+                        &format!("🤖 Agent: {}", agent_name),
+                    )
+                    .await;
+                self.show_setup_flow(&target, user_id, thread_id)
+                    .await?;
             }
             _ => {
                 tracing::warn!("Unknown callback action: {action}");
