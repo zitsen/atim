@@ -8,6 +8,21 @@ Telegram / Feishu  ↔  tmux  ↔  Claude Code
 
 Atim bridges an IM chat directly to a tmux window running an AI coding agent. Type in Telegram — it reaches the agent's terminal. The agent responds — you see it in Telegram.
 
+## Quick Install
+
+```bash
+# Download and install to ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/huolinhe/atim/main/install.sh | bash
+
+# Or with wget
+wget -qO- https://raw.githubusercontent.com/huolinhe/atim/main/install.sh | bash
+
+# Install to a custom path
+curl -fsSL https://raw.githubusercontent.com/huolinhe/atim/main/install.sh | bash -s -- -b /usr/local/bin
+```
+
+The installer downloads a statically-linked musl binary from the latest GitHub release.
+
 ## Features
 
 - **Multi-IM**: Telegram (stable) + Feishu/Lark (beta)
