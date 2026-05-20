@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use atim_core::agent::SessionDiscoverer;
 use tokio::sync::Mutex;
 
 /// Items per page in the directory listing.
@@ -275,92 +276,21 @@ fn read_dir_entries(path: &Path) -> Vec<DirEntry> {
     entries
 }
 
-/// Scan a directory for existing Claude Code sessions.
+/// Scan for existing Claude Code sessions using ClaudeSessionDiscoverer.
 pub async fn scan_claude_sessions(_path: &Path) -> Vec<ClaudeSession> {
-    let mut sessions = Vec::new();
-    let home = std::env::var("HOME").ok();
-    if let Some(home) = home {
-        let projects_dir = Path::new(&home).join(".claude").join("projects");
-        if let Ok(mut read_dir) = tokio::fs::read_dir(&projects_dir).await {
-            while let Ok(Some(entry)) = read_dir.next_entry().await {
-                if !entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
-                    continue;
-                }
-                let project_slug = entry.file_name().to_string_lossy().to_string();
-                if let Ok(mut jsonl_dir) = tokio::fs::read_dir(&entry.path()).await {
-                    while let Ok(Some(jsonl_entry)) = jsonl_dir.next_entry().await {
-                        let fname = jsonl_entry.file_name().to_string_lossy().to_string();
-                        if !fname.ends_with(".jsonl") {
-                            continue;
-                        }
-                        let session_id = fname.trim_end_matches(".jsonl").to_string();
-                        let file_path = jsonl_entry.path();
-                        let summary = extract_session_summary(&file_path).await;
-                        let timestamp = extract_timestamp(&file_path).await;
-                        let message_count = estimate_message_count(&file_path).await;
-                        sessions.push(ClaudeSession {
-                            id: session_id,
-                            project_slug: project_slug.clone(),
-                            summary,
-                            timestamp,
-                            message_count,
-                        });
-                    }
-                }
-            }
-        }
-    }
-    sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-    sessions
+    let discoverer = atim_core::agent::claude::ClaudeSessionDiscoverer;
+    let detected = discoverer.scan_sessions(_path).await;
+    detected
+        .into_iter()
+        .map(|s| ClaudeSession {
+            id: s.id,
+            project_slug: s.project_slug,
+            summary: s.summary,
+            timestamp: s.timestamp,
+            message_count: s.message_count,
+        })
+        .collect()
 }
-
-async fn extract_session_summary(path: &Path) -> String {
-    let data = tokio::fs::read_to_string(path).await.unwrap_or_default();
-    for line in data.lines() {
-        let line = line.trim();
-        if line.is_empty() { continue; }
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
-            let msg = match value.get("message") { Some(m) => m, None => continue };
-            let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
-            if role != "user" { continue; }
-            if let Some(content) = msg.get("content") {
-                if let Some(blocks) = content.as_array() {
-                    for block in blocks {
-                        if block.get("type").and_then(|v| v.as_str()) == Some("text") {
-                            if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
-                                let text = text.trim();
-                                if !text.is_empty() { return text.to_string(); }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    String::new()
-}
-
-async fn extract_timestamp(path: &Path) -> String {
-    let data = tokio::fs::read_to_string(path).await.unwrap_or_default();
-    for line in data.lines() {
-        let line = line.trim();
-        if line.is_empty() { continue; }
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
-            if let Some(ts) = value.get("timestamp").and_then(|v| v.as_str()) {
-                return ts.to_string();
-            }
-        }
-    }
-    String::new()
-}
-
-async fn estimate_message_count(path: &Path) -> usize {
-    let data = tokio::fs::read_to_string(path).await.unwrap_or_default();
-    data.lines().filter(|l| {
-        l.trim().contains("\"type\":\"user\"") || l.trim().contains("\"type\":\"assistant\"")
-    }).count()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

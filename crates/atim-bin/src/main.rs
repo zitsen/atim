@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use atim_core::agent::SessionDiscoverer;
 use atim_core::config::Config;
 use atim_core::im::ImAdapter;
 use clap::{Parser, Subcommand};
@@ -122,6 +123,11 @@ async fn main() -> anyhow::Result<()> {
         .filter(|(_, ws)| ws.session_id.is_empty())
         .map(|(wid, ws)| (wid.clone(), ws.cwd.clone()))
         .collect();
+    let mut known_ids: std::collections::HashSet<String> = resolved_state.window_states
+        .values()
+        .map(|ws| ws.session_id.clone())
+        .filter(|s| !s.is_empty())
+        .collect();
     for (wid, cwd) in &empty_windows {
         // Only discover session_ids for Claude Code windows — other agents
         // (Copilot, Codex) don't produce JSONL logs.
@@ -135,28 +141,16 @@ async fn main() -> anyhow::Result<()> {
             continue;
         }
 
-        tracing::info!("No session_id for window {wid}, attempting to discover via pane PID...");
-        if let Some(sid) = discover_session_for_window(wid).await {
+        tracing::info!("No session_id for window {wid}, attempting to discover...");
+        if let Some(sid) = discover_session_for_window(wid, cwd, &known_ids).await {
             tracing::info!("Discovered session {sid} for window {wid}, syncing to state and session_map");
             if let Some(ws) = resolved_state.window_states.get_mut(wid) {
                 ws.session_id = sid.clone();
             }
+            known_ids.insert(sid.clone());
             if let Ok(mut map) = state_mgr.load_session_map().await {
                 map.insert(wid.clone(), sid);
                 let _ = state_mgr.save_session_map(&map).await;
-            }
-        } else if !cwd.is_empty() {
-            // lsof failed — try project-slug matching
-            tracing::info!("lsof failed for window {wid}, trying project-slug matching (cwd={cwd})");
-            if let Some(sid) = discover_session_by_project_slug_for_wid(wid, cwd, &resolved_state).await {
-                tracing::info!("Discovered session {sid} for window {wid} via project-slug matching");
-                if let Some(ws) = resolved_state.window_states.get_mut(wid) {
-                    ws.session_id = sid.clone();
-                }
-                if let Ok(mut map) = state_mgr.load_session_map().await {
-                    map.insert(wid.clone(), sid);
-                    let _ = state_mgr.save_session_map(&map).await;
-                }
             }
         }
     }
@@ -242,127 +236,28 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Project-slug matching: derive the slug from cwd and look for untracked
-/// JSONL files in ~/.claude/projects/<slug>/.
-async fn discover_session_by_project_slug(
+/// Discover a session ID for a tmux window using ClaudeSessionDiscoverer.
+///
+/// Tries lsof-based PID tracing first, then falls back to project-slug
+/// matching against `~/.claude/projects/<slug>/`.
+async fn discover_session_for_window(
+    window_id: &str,
     cwd: &str,
     known_ids: &std::collections::HashSet<String>,
 ) -> Option<String> {
-    let slug: String = cwd.split('/').collect::<Vec<_>>().join("-");
-    let home = std::env::var("HOME").ok()?;
-    let proj_dir = std::path::PathBuf::from(home).join(".claude").join("projects").join(&slug);
-    if !proj_dir.is_dir() {
-        tracing::debug!("No claude project dir at {:?}", proj_dir);
-        return None;
+    let discoverer = atim_core::agent::claude::ClaudeSessionDiscoverer;
+
+    // Phase 1: trace the pane PID with lsof
+    if let Some(sid) = discoverer.discover_by_pid(window_id).await {
+        return Some(sid);
     }
 
-    let mut candidates: Vec<(std::time::SystemTime, String)> = Vec::new();
-    let entries = std::fs::read_dir(&proj_dir).ok()?;
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-            continue;
-        }
-        let stem = match path.file_stem().and_then(|s| s.to_str()) {
-            Some(s) => s.to_string(),
-            None => continue,
-        };
-        if stem.len() != 36 || !stem.contains('-') {
-            continue;
-        }
-        if known_ids.contains(&stem) {
-            continue;
-        }
-        let mtime = entry.metadata().ok()
-            .and_then(|m| m.modified().ok())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        candidates.push((mtime, stem));
+    // Phase 2: fallback to project-slug matching
+    if !cwd.is_empty() {
+        tracing::info!("lsof failed for window {window_id}, trying project-slug matching (cwd={cwd})");
+        return discoverer.discover(cwd, known_ids).await;
     }
 
-    candidates.sort_by(|a, b| b.0.cmp(&a.0));
-    let result = candidates.into_iter().next().map(|(_, sid)| sid);
-    if result.is_some() {
-        tracing::info!("Discovered session via project-slug matching (cwd={cwd}, slug={slug})");
-    } else {
-        tracing::warn!("No untracked JSONL session found via project-slug matching (cwd={cwd}, slug={slug})");
-    }
-    result
-}
-
-/// Wrapper that builds known_ids set from resolved_state.
-async fn discover_session_by_project_slug_for_wid(
-    _window_id: &str,
-    cwd: &str,
-    state: &atim_core::session::ServerState,
-) -> Option<String> {
-    let known_ids: std::collections::HashSet<String> = state.window_states
-        .values()
-        .map(|ws| ws.session_id.clone())
-        .filter(|s| !s.is_empty())
-        .collect();
-    discover_session_by_project_slug(cwd, &known_ids).await
-}
-
-/// Discover the session_id for a specific tmux window by tracing its process
-/// tree with `lsof` to find the JSONL file that Claude Code has open.
-async fn discover_session_for_window(window_id: &str) -> Option<String> {
-    use std::process::Command;
-
-    // Get pane PID from tmux
-    let output = Command::new("tmux")
-        .args(["display-message", "-t", window_id, "-p", "#{pane_pid}"])
-        .output().ok()?;
-    let pane_pid = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if pane_pid.is_empty() || pane_pid == "0" {
-        return None;
-    }
-
-    // Collect all descendant PIDs (process tree)
-    let mut all_pids = vec![pane_pid.clone()];
-    let mut idx = 0;
-    while idx < all_pids.len() {
-        if let Ok(child_out) = Command::new("pgrep")
-            .args(["-P", &all_pids[idx]])
-            .output()
-        {
-            for child in String::from_utf8_lossy(&child_out.stdout).lines() {
-                let c = child.trim().to_string();
-                if !c.is_empty() && !all_pids.contains(&c) {
-                    all_pids.push(c);
-                }
-            }
-        }
-        idx += 1;
-    }
-
-    // Check each PID for open JSONL files via lsof
-    for pid in &all_pids {
-        if let Ok(lsof_out) = Command::new("lsof")
-            .args(["-p", pid, "-F", "n"])
-            .output()
-        {
-            let out = String::from_utf8_lossy(&lsof_out.stdout);
-            for line in out.lines() {
-                if line.starts_with('n') {
-                    let path = &line[1..];
-                    if path.ends_with(".jsonl") {
-                        if let Some(stem) = std::path::Path::new(path).file_stem() {
-                            let sid = stem.to_string_lossy().to_string();
-                            if sid.len() == 36 && sid.contains('-') {
-                                tracing::info!(
-                                    "Discovered session {sid} for window {window_id} via lsof (PID {pid})"
-                                );
-                                return Some(sid);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    tracing::warn!("Could not discover session for window {window_id} via lsof");
     None
 }
 

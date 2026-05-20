@@ -1,4 +1,12 @@
+pub mod claude;
+pub mod copilot;
+pub mod codex;
+pub mod trait_def;
+pub mod types;
+
 use crate::message::{AgentKind, InteractiveUi};
+
+// ── AgentParser trait (unchanged for backward compat) ──
 
 /// Agent-specific output format detection and parsing.
 ///
@@ -20,18 +28,16 @@ pub trait AgentParser: Send + Sync {
     fn detect_interactive(&self, pane_text: &str) -> Option<InteractiveUi>;
 }
 
-// ── Built-in parsers ──
-
-pub mod claude;
-pub mod copilot;
-pub mod codex;
-
 /// Select the appropriate parser for a given agent kind.
 pub fn parser_for(kind: AgentKind) -> Box<dyn AgentParser> {
     match kind {
         AgentKind::ClaudeCode => Box::new(claude::ClaudeParser),
         AgentKind::CopilotCli => Box::new(copilot::CopilotParser),
         AgentKind::CodexCli => Box::new(codex::CodexParser),
-        AgentKind::Unknown => Box::new(claude::ClaudeParser), // default
+        AgentKind::Unknown => Box::new(claude::ClaudeParser),
     }
 }
+
+// Re-exports for convenience.
+pub use trait_def::{Agent, AgentId, DetectedSession, OutputSource, SessionDiscoverer};
+pub use types::{AgentHandle, AgentRegistry};

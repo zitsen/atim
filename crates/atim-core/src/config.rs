@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::agent::AgentRegistry;
 use crate::error::{Error, Result};
 
 /// Application configuration loaded from environment variables.
@@ -23,6 +24,9 @@ pub struct Config {
 
     // ── Agent command ──
     pub agent_command: String,
+
+    // ── Agent registry (built from env) ──
+    pub agent_registry: AgentRegistry,
 
     // ── Paths ──
     pub state_file: PathBuf,
@@ -88,6 +92,7 @@ impl Config {
             std::env::var("ATIM_TMUX_SESSION").unwrap_or_else(|_| "atim".into());
 
         let agent_command = std::env::var("ATIM_AGENT_COMMAND").unwrap_or_else(|_| "claude".into());
+        let agent_registry = AgentRegistry::from_env();
 
         let state_file = atim_dir.join("state.json");
         let session_map_file = atim_dir.join("session_map.json");
@@ -134,6 +139,7 @@ impl Config {
             tmux_session_name,
             tmux_main_window_name: "__main__".into(),
             agent_command,
+            agent_registry,
             state_file,
             session_map_file,
             monitor_state_file,

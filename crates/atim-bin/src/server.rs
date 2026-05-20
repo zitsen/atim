@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use atim_core::agent::SessionDiscoverer;
 use atim_core::config::Config;
 use atim_core::error::Result;
 use atim_core::im::ImAdapter;
@@ -483,6 +484,104 @@ impl Server {
             return Ok(());
         }
 
+        // Handle /switch <agent> — switch the active agent at runtime
+        if text.trim() == "/switch" || text.trim().starts_with("/switch ") {
+            let agent_name: Option<String> = text.trim().strip_prefix("/switch ").map(|s| s.trim().to_lowercase());
+            let agent_name = match agent_name {
+                Some(ref n) if !n.is_empty() => n.clone(),
+                _ => {
+                    let available: Vec<&str> = self.config.agent_registry.iter().map(|a| a.name()).collect();
+                    let _ = self.im_adapter.send_message(&target,
+                        &format!("Available agents: {}", available.join(", "))
+                    ).await;
+                    return Ok(());
+                }
+            };
+
+            let agent = match self.config.agent_registry.get(&agent_name) {
+                Some(a) => a.clone(),
+                None => {
+                    let available: Vec<&str> = self.config.agent_registry.iter().map(|a| a.name()).collect();
+                    let _ = self.im_adapter.send_message(&target,
+                        &format!("Unknown agent '{agent_name}'. Available: {}", available.join(", "))
+                    ).await;
+                    return Ok(());
+                }
+            };
+
+            if let Some(binding) = state.thread_bindings.iter().find(|b| {
+                b.user_id == user_id
+                    && b.thread_id == target.thread_id.map(|t| t.0).unwrap_or(0)
+            }) {
+                let window_id = WindowId(binding.window_id.clone());
+                if !self.tmux_mgr.window_exists(&window_id).await {
+                    let _ = self.im_adapter.send_message(&target, "Window no longer exists.").await;
+                    return Ok(());
+                }
+
+                // Graceful shutdown of current agent
+                self.tmux_mgr.send_key(&window_id, "C-c").await?;
+                tokio::time::sleep(Duration::from_millis(500)).await;
+
+                // Wait for agent to stop (shell prompt appears)
+                let mut stopped = false;
+                for _ in 0..10 {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    if let Ok(info) = self.tmux_mgr.find_window(&window_id).await {
+                        if is_shell_process(&info.current_command) {
+                            stopped = true;
+                            break;
+                        }
+                    }
+                }
+                if !stopped {
+                    tracing::warn!("/switch: agent in window {} did not stop within 5s, proceeding anyway", window_id.0);
+                }
+
+                // Launch new agent
+                let launch_cmd = agent_launch_cmd(&agent);
+                self.tmux_mgr.send_line(&window_id, &launch_cmd).await?;
+
+                // Wait for agent to start
+                let mut started = false;
+                for _ in 0..10 {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    if let Ok(info) = self.tmux_mgr.find_window(&window_id).await {
+                        if !is_shell_process(&info.current_command) {
+                            started = true;
+                            break;
+                        }
+                    }
+                }
+                if !started {
+                    tracing::warn!("/switch: new agent in window {} did not start within 5s", window_id.0);
+                }
+
+                // Update window state
+                let mut new_state = self.state_mgr.load_state().await?;
+                if let Some(ws) = new_state.window_states.get_mut(&binding.window_id) {
+                    ws.agent_type = agent.name().to_string();
+                    ws.session_id = String::new();
+                }
+                self.state_mgr.save_state(&new_state).await?;
+
+                // Also remove the old session_id from session_map so that
+                // the next SessionMapChanged event won't re-fill it.
+                if let Ok(mut map) = self.state_mgr.load_session_map().await {
+                    if map.remove(&binding.window_id).is_some() {
+                        let _ = self.state_mgr.save_session_map(&map).await;
+                    }
+                }
+
+                let _ = self.im_adapter.send_message(&target,
+                    &format!("Switched to **{}**.", agent.name())
+                ).await;
+            } else {
+                let _ = self.im_adapter.send_message(&target, "No active session to switch.").await;
+            }
+            return Ok(());
+        }
+
         // Check for /esc (send Escape key to dismiss modals/help screens)
         if text.trim() == "/esc" || text.trim() == "/dismiss" {
             if let Some(binding) = state.thread_bindings.iter().find(|b| {
@@ -603,7 +702,7 @@ impl Server {
                     }
                     tracing::warn!(
                         "Window {} has shell '{}' running instead of '{}', clearing binding",
-                        binding.window_id, info.current_command, self.config.agent_command
+                        binding.window_id, info.current_command, agent_launch_cmd(self.config.agent_registry.default())
                     );
                     let _ = self.tmux_mgr.kill_window(&window_id).await;
                     let mut new_state = state.clone();
@@ -995,8 +1094,7 @@ impl Server {
 
     /// After starting Claude in a new window, wait for the session_id to be
     /// registered — first by polling session_map.json (the SessionStart hook),
-    /// then falling back to tracing the pane PID with lsof, then by
-    /// project-slug matching.
+    /// then falling back to ClaudeSessionDiscoverer (lsof, project-slug).
     ///
     /// `cwd_hint` is the working directory of the pane — used for the
     /// project-slug fallback when lsof fails.
@@ -1007,7 +1105,6 @@ impl Server {
         cwd_hint: Option<&str>,
     ) -> Option<String> {
         // Only Claude Code produces JSONL session logs — skip for other agents.
-        // Check via stored agent_type first, fall back to tmux current_command.
         let agent_type = self.state_mgr.load_state().await.ok()
             .and_then(|s| s.window_states.get(window_id).cloned())
             .map(|ws| ws.agent_type)
@@ -1034,26 +1131,29 @@ impl Server {
             tokio::time::sleep(Duration::from_millis(300)).await;
         }
 
-        // Phase 2: Fallback — trace the pane PID with lsof
+        // Phase 2: Fallback — ClaudeSessionDiscoverer (lsof → project-slug)
         tracing::warn!(
-            "SessionStart hook didn't register session_id for window {window_id} within {timeout:?}, trying lsof"
+            "SessionStart hook didn't register session_id for window {window_id} within {timeout:?}, trying discoverer"
         );
-        if let Some(sid) = session_by_pane_lsof(window_id).await {
+        let discoverer = atim_core::agent::claude::ClaudeSessionDiscoverer;
+
+        // Phase 2a: lsof
+        if let Some(sid) = discoverer.discover_by_pid(window_id).await {
             return Some(sid);
         }
 
-        // Phase 3: Fallback — project-slug matching using cwd_hint
+        // Phase 2b: project-slug matching
         if let Some(cwd) = cwd_hint {
             tracing::warn!(
                 "lsof failed for window {window_id}, trying project-slug matching with cwd={cwd}"
             );
+            use atim_core::agent::SessionDiscoverer;
             let state = self.state_mgr.load_state().await.ok()?;
             let mut known_ids: std::collections::HashSet<String> = state.window_states
                 .values()
                 .map(|ws| ws.session_id.clone())
                 .filter(|sid| !sid.is_empty())
                 .collect();
-            // Also include session_map entries
             if let Ok(map) = self.state_mgr.load_session_map().await {
                 for sid in map.values() {
                     if !sid.is_empty() {
@@ -1061,9 +1161,7 @@ impl Server {
                     }
                 }
             }
-            if let Some(sid) = discover_session_by_project_slug(cwd, &known_ids).await {
-                return Some(sid);
-            }
+            return discoverer.discover(cwd, &known_ids).await;
         }
 
         None
@@ -1082,8 +1180,8 @@ impl Server {
         let window_name = topic_name.unwrap_or(&name);
         let window_id = self.tmux_mgr.new_window(window_name, &cwd.to_string_lossy()).await?;
 
-        let agent_cmd = &self.config.agent_command;
-        self.tmux_mgr.send_line(&window_id, agent_cmd).await?;
+        let launch_cmd = agent_launch_cmd(self.config.agent_registry.default());
+        self.tmux_mgr.send_line(&window_id, &launch_cmd).await?;
 
         // Wait for agent process to actually start (non-shell process appears)
         for _ in 0..10 {
@@ -1114,7 +1212,7 @@ impl Server {
                 session_id: String::new(),
                 cwd: cwd.to_string_lossy().to_string(),
                 window_name: window_name.to_string(),
-                agent_type: self.config.agent_type().to_string(),
+                agent_type: self.config.agent_registry.default().name().to_string(),
             },
         );
         self.state_mgr.save_state(&state).await?;
@@ -1148,8 +1246,13 @@ impl Server {
         let window_name = topic_name.unwrap_or(&name);
         let window_id = self.tmux_mgr.new_window(window_name, &cwd.to_string_lossy()).await?;
 
-        // Launch Claude with --resume flag
-        let resume_cmd = format!("{} --resume {}", self.config.agent_command, session_id);
+        // Launch agent with --resume flag
+        // Resume is Claude-specific (JSONL sessions), so always use the
+        // claude agent regardless of the registry default.
+        let agent = self.config.agent_registry.get("claude")
+            .unwrap_or_else(|| self.config.agent_registry.default());
+        let resume_cmd = agent.resume_command(session_id)
+            .unwrap_or_else(|| format!("{} --resume {}", agent.new_session_command(), session_id));
         self.tmux_mgr.send_line(&window_id, &resume_cmd).await?;
 
         // Notify user the session is ready instead of sending the first line to Claude
@@ -1171,7 +1274,7 @@ impl Server {
                 session_id: session_id.to_string(),
                 cwd: cwd.to_string_lossy().to_string(),
                 window_name: window_name.to_string(),
-                agent_type: self.config.agent_type().to_string(),
+                agent_type: self.config.agent_registry.default().name().to_string(),
             },
         );
         self.state_mgr.save_state(&state).await?;
@@ -1202,8 +1305,8 @@ impl Server {
         // If the pane is running a shell (agent hasn't started), launch it now
         if let Ok(info) = self.tmux_mgr.find_window(&wid).await {
             if is_shell_process(&info.current_command) {
-                let agent_cmd = &self.config.agent_command;
-                self.tmux_mgr.send_line(&wid, agent_cmd).await?;
+                let launch_cmd = agent_launch_cmd(self.config.agent_registry.default());
+                self.tmux_mgr.send_line(&wid, &launch_cmd).await?;
                 // Wait for agent process to start
                 for _ in 0..10 {
                     if let Ok(info) = self.tmux_mgr.find_window(&wid).await {
@@ -1216,7 +1319,7 @@ impl Server {
             }
         }
 
-        // Notify user the session is ready instead of sending the first line to Claude
+        // Notify user the session is ready
         let _ = self.im_adapter.send_message(target, "✅ Session ready! Send your message to start chatting.").await;
 
         // Persist the binding
@@ -1227,7 +1330,7 @@ impl Server {
             session_id: String::new(),
             cwd,
             window_name: window_name.clone(),
-            agent_type: self.config.agent_type().to_string(),
+            agent_type: self.config.agent_registry.default().name().to_string(),
         });
         state.thread_bindings.push(ThreadBinding {
             user_id,
@@ -1265,8 +1368,8 @@ impl Server {
             .await?;
 
         // Start the agent
-        let agent_cmd = &self.config.agent_command;
-        self.tmux_mgr.send_line(&window_id, agent_cmd).await?;
+        let launch_cmd = agent_launch_cmd(self.config.agent_registry.default());
+        self.tmux_mgr.send_line(&window_id, &launch_cmd).await?;
 
         // Wait for agent process to actually start (non-shell process appears)
         for _ in 0..10 {
@@ -1298,7 +1401,7 @@ impl Server {
                 session_id: String::new(),
                 cwd: cwd.clone(),
                 window_name: window_name.to_string(),
-                agent_type: self.config.agent_type().to_string(),
+                agent_type: self.config.agent_registry.default().name().to_string(),
             },
         );
         self.state_mgr.save_state(&state).await?;
@@ -1795,6 +1898,17 @@ fn is_shell_process(process: &str) -> bool {
     matches!(process, "zsh" | "bash" | "sh" | "fish" | "dash" | "ksh")
 }
 
+/// Build the launch command string for an agent (command + extra args).
+fn agent_launch_cmd(agent: &atim_core::agent::AgentHandle) -> String {
+    let cmd = agent.new_session_command();
+    let args = agent.extra_args();
+    if args.is_empty() {
+        cmd
+    } else {
+        format!("{} {}", cmd, args.join(" "))
+    }
+}
+
 /// Detect whether the tail of command output contains a shell/agent prompt.
 fn is_shell_prompt(output: &str) -> bool {
     for line in output.lines().rev() {
@@ -2134,139 +2248,6 @@ async fn zoxide_query(text: &str) -> anyhow::Result<Option<PathBuf>> {
     }
     Ok(None)
 }
-
-/// Discover the session_id for a tmux window — first by tracing the process
-/// tree with `lsof`, then by project-slug matching as a fallback.
-///
-/// `cwd_hint` is the working directory of the session; when provided and lsof
-/// fails, we compute the Claude project slug from cwd and look for the most
-/// recently modified JSONL file in the matching `~/.claude/projects/<slug>/`
-/// directory, excluding any session_ids already known in `known_ids`.
-async fn session_by_pane_lsof(window_id: &str) -> Option<String> {
-    use std::process::Command;
-
-    let output = Command::new("tmux")
-        .args(["display-message", "-t", window_id, "-p", "#{pane_pid}"])
-        .output().ok()?;
-    let pane_pid = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if pane_pid.is_empty() || pane_pid == "0" {
-        return None;
-    }
-
-    // Collect process tree
-    let mut all_pids = vec![pane_pid];
-    let mut idx = 0;
-    while idx < all_pids.len() {
-        if let Ok(child_out) = Command::new("pgrep")
-            .args(["-P", &all_pids[idx]])
-            .output()
-        {
-            for child in String::from_utf8_lossy(&child_out.stdout).lines() {
-                let c = child.trim().to_string();
-                if !c.is_empty() && !all_pids.contains(&c) {
-                    all_pids.push(c);
-                }
-            }
-        }
-        idx += 1;
-    }
-
-    for pid in &all_pids {
-        if let Ok(lsof_out) = Command::new("lsof")
-            .args(["-p", pid, "-F", "n"])
-            .output()
-        {
-            let out = String::from_utf8_lossy(&lsof_out.stdout);
-            for line in out.lines() {
-                if line.starts_with('n') {
-                    let path = &line[1..];
-                    if path.ends_with(".jsonl") && path.contains(".claude") {
-                        if let Some(stem) = std::path::Path::new(path).file_stem() {
-                            let sid = stem.to_string_lossy().to_string();
-                            if sid.len() == 36 && sid.contains('-') {
-                                tracing::info!(
-                                    "Discovered session {sid} for window {window_id} via lsof (PID {pid})"
-                                );
-                                return Some(sid);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    tracing::warn!("Could not discover session for window {window_id} via lsof");
-    None
-}
-
-/// Fallback: derive the Claude project slug from `cwd` (e.g. `/home/user/proj`
-/// → `-home-user-proj`) and scan `~/.claude/projects/<slug>/` for JSONL files
-/// whose session_ids are not in `known_ids`. Returns the most recently modified
-/// untracked session_id, if any.
-async fn discover_session_by_project_slug(
-    cwd: &str,
-    known_ids: &std::collections::HashSet<String>,
-) -> Option<String> {
-    let slug: String = cwd.split('/').collect::<Vec<_>>().join("-");
-    let proj_dir = match claude_projects_dir() {
-        Some(d) => d.join("projects").join(&slug),
-        None => return None,
-    };
-    if !proj_dir.is_dir() {
-        tracing::debug!("No claude project dir at {:?} for cwd {cwd}", proj_dir);
-        return None;
-    }
-
-    let mut candidates: Vec<(std::time::SystemTime, String)> = Vec::new();
-    let entries = match std::fs::read_dir(&proj_dir) {
-        Ok(e) => e,
-        Err(_) => return None,
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-            continue;
-        }
-        let stem = match path.file_stem().and_then(|s| s.to_str()) {
-            Some(s) => s.to_string(),
-            None => continue,
-        };
-        // Must be a UUID-like session_id
-        if stem.len() != 36 || !stem.contains('-') {
-            continue;
-        }
-        if known_ids.contains(&stem) {
-            continue;
-        }
-        let mtime = entry.metadata().ok().and_then(|m| m.modified().ok()).unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        candidates.push((mtime, stem));
-    }
-
-    // Sort by mtime descending — newest first
-    candidates.sort_by(|a, b| b.0.cmp(&a.0));
-
-    if let Some((_, sid)) = candidates.into_iter().next() {
-        tracing::info!("Discovered session {sid} via project-slug matching (cwd={cwd}, slug={slug})");
-        return Some(sid);
-    }
-
-    tracing::warn!("No untracked JSONL session found via project-slug matching (cwd={cwd}, slug={slug})");
-    None
-}
-
-/// Resolve the claude projects directory: `~/.claude` or `$CLAUDE_DIR`.
-fn claude_projects_dir() -> Option<PathBuf> {
-    let base = std::env::var("CLAUDE_DIR")
-        .ok()
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".claude"))
-        })?;
-    Some(base)
-}
-
 
 #[cfg(test)]
 mod tests {

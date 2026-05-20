@@ -1,4 +1,5 @@
 use super::AgentParser;
+use super::trait_def::{Agent, AgentId, OutputSource, SessionDiscoverer};
 use crate::message::{AgentKind, InteractiveUi, UiKind};
 
 /// Copilot CLI spinner characters (Braille dots).
@@ -141,9 +142,57 @@ impl AgentParser for CopilotParser {
     }
 }
 
+// ── CopilotAgent ──
+
+/// Copilot CLI agent implementation.
+pub struct CopilotAgent;
+
+impl Agent for CopilotAgent {
+    fn id(&self) -> AgentId {
+        AgentId::CopilotCli
+    }
+
+    fn new_session_command(&self) -> String {
+        "gh".into()
+    }
+
+    fn resume_command(&self, _session_id: &str) -> Option<String> {
+        None
+    }
+
+    fn extra_args(&self) -> Vec<String> {
+        vec!["copilot".into()]
+    }
+
+    fn supports_sessions(&self) -> bool {
+        false
+    }
+
+    fn has_session_start_hook(&self) -> bool {
+        false
+    }
+
+    fn output_source(&self) -> OutputSource {
+        OutputSource::PaneCapture
+    }
+
+    fn parser(&self) -> Box<dyn AgentParser> {
+        Box::new(CopilotParser)
+    }
+
+    fn session_discoverer(&self) -> Option<Box<dyn SessionDiscoverer>> {
+        None
+    }
+
+    fn graceful_shutdown_keys(&self) -> Vec<&'static str> {
+        vec!["C-c"]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::trait_def::OutputSource;
 
     #[test]
     fn test_detect_by_process_name() {
@@ -195,6 +244,29 @@ mod tests {
         let ui = parser.detect_interactive(text);
         assert!(ui.is_some());
         assert_eq!(ui.as_ref().unwrap().kind, UiKind::PermissionPrompt);
+    }
+
+    #[test]
+    fn test_copilot_agent_identity() {
+        let agent = CopilotAgent;
+        assert_eq!(agent.name(), "copilot");
+        assert_eq!(agent.kind(), AgentKind::CopilotCli);
+        assert!(!agent.supports_sessions());
+        assert!(!agent.has_session_start_hook());
+        assert_eq!(agent.output_source(), OutputSource::PaneCapture);
+    }
+
+    #[test]
+    fn test_copilot_agent_no_resume() {
+        let agent = CopilotAgent;
+        assert!(agent.resume_command("any-id").is_none());
+    }
+
+    #[test]
+    fn test_copilot_agent_extra_args() {
+        let agent = CopilotAgent;
+        let args = agent.extra_args();
+        assert!(args.contains(&"copilot".to_string()));
     }
 
     #[test]

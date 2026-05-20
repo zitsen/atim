@@ -1,6 +1,9 @@
+use std::path::{Path, PathBuf};
+
 use regex::Regex;
 
 use super::AgentParser;
+use super::trait_def::{Agent, AgentId, DetectedSession, OutputSource, SessionDiscoverer};
 use crate::message::{AgentKind, InteractiveUi, UiKind};
 
 /// Patterns for Claude Code interactive UIs.
@@ -99,10 +102,9 @@ impl AgentParser for ClaudeParser {
             if line.is_empty() {
                 continue;
             }
-            if let Some(c) = line.chars().next() {
-                if STATUS_SPINNERS.contains(&c) {
+            if let Some(c) = line.chars().next()
+                && STATUS_SPINNERS.contains(&c) {
                     return Some(line[1..].trim().to_string());
-                }
             }
             return None;
         }
@@ -156,6 +158,291 @@ fn try_extract(lines: &[&str], def: &UiPatternDef) -> Option<String> {
     Some(lines[top_idx..=bottom_idx].join("\n"))
 }
 
+// ── ClaudeAgent ──
+
+/// Claude Code agent implementation.
+pub struct ClaudeAgent;
+
+impl Agent for ClaudeAgent {
+    fn id(&self) -> AgentId {
+        AgentId::ClaudeCode
+    }
+
+    fn new_session_command(&self) -> String {
+        std::env::var("ATIM_AGENT_COMMAND")
+            .or_else(|_| std::env::var("AGENT_COMMAND"))
+            .unwrap_or_else(|_| "claude".into())
+    }
+
+    fn resume_command(&self, session_id: &str) -> Option<String> {
+        Some(format!("{} --resume {session_id}", self.new_session_command()))
+    }
+
+    fn supports_sessions(&self) -> bool {
+        true
+    }
+
+    fn has_session_start_hook(&self) -> bool {
+        true
+    }
+
+    fn output_source(&self) -> OutputSource {
+        OutputSource::JsonlFiles
+    }
+
+    fn parser(&self) -> Box<dyn AgentParser> {
+        Box::new(ClaudeParser)
+    }
+
+    fn session_discoverer(&self) -> Option<Box<dyn SessionDiscoverer>> {
+        Some(Box::new(ClaudeSessionDiscoverer))
+    }
+
+    fn graceful_shutdown_keys(&self) -> Vec<&'static str> {
+        vec!["C-c"]
+    }
+}
+
+// ── ClaudeSessionDiscoverer ──
+
+/// Discovers Claude Code JSONL session files via lsof and project-slug matching.
+pub struct ClaudeSessionDiscoverer;
+
+#[async_trait::async_trait]
+impl SessionDiscoverer for ClaudeSessionDiscoverer {
+    /// Project-slug matching: derive slug from cwd, scan `~/.claude/projects/<slug>/`.
+    async fn discover(
+        &self,
+        cwd: &str,
+        known_ids: &std::collections::HashSet<String>,
+    ) -> Option<String> {
+        let slug: String = cwd.split('/').collect::<Vec<_>>().join("-");
+        let proj_dir = claude_projects_dir()?.join("projects").join(&slug);
+        if !proj_dir.is_dir() {
+            tracing::debug!("No claude project dir at {:?} for cwd {cwd}", proj_dir);
+            return None;
+        }
+
+        let mut candidates: Vec<(std::time::SystemTime, String)> = Vec::new();
+        let entries = std::fs::read_dir(&proj_dir).ok()?;
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let stem = match path.file_stem().and_then(|s| s.to_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            if stem.len() != 36 || !stem.contains('-') {
+                continue;
+            }
+            if known_ids.contains(&stem) {
+                continue;
+            }
+            let mtime = entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            candidates.push((mtime, stem));
+        }
+
+        candidates.sort_by_key(|b| std::cmp::Reverse(b.0));
+        let result = candidates.into_iter().next().map(|(_, sid)| sid);
+        if result.is_some() {
+            tracing::info!("Discovered session via project-slug matching (cwd={cwd}, slug={slug})");
+        }
+        result
+    }
+
+    /// Trace a pane PID with lsof to find the open JSONL file.
+    async fn discover_by_pid(&self, window_id: &str) -> Option<String> {
+        use std::process::Command;
+
+        let output = Command::new("tmux")
+            .args(["display-message", "-t", window_id, "-p", "#{pane_pid}"])
+            .output()
+            .ok()?;
+        let pane_pid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if pane_pid.is_empty() || pane_pid == "0" {
+            return None;
+        }
+
+        let mut all_pids = vec![pane_pid];
+        let mut idx = 0;
+        while idx < all_pids.len() {
+            if let Ok(child_out) = Command::new("pgrep").args(["-P", &all_pids[idx]]).output() {
+                for child in String::from_utf8_lossy(&child_out.stdout).lines() {
+                    let c = child.trim().to_string();
+                    if !c.is_empty() && !all_pids.contains(&c) {
+                        all_pids.push(c);
+                    }
+                }
+            }
+            idx += 1;
+        }
+
+        for pid in &all_pids {
+            if let Ok(lsof_out) = Command::new("lsof").args(["-p", pid, "-F", "n"]).output() {
+                let out = String::from_utf8_lossy(&lsof_out.stdout);
+                for line in out.lines() {
+                    if let Some(path) = line.strip_prefix('n')
+                        && path.ends_with(".jsonl") && path.contains(".claude")
+                        && let Some(stem) = std::path::Path::new(path).file_stem() {
+                            let sid = stem.to_string_lossy().to_string();
+                            if sid.len() == 36 && sid.contains('-') {
+                                tracing::info!(
+                                    "Discovered session {sid} for window {window_id} via lsof (PID {pid})"
+                                );
+                                return Some(sid);
+                            }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Scan a directory for Claude Code session files.
+    async fn scan_sessions(&self, _path: &Path) -> Vec<DetectedSession> {
+        let claude_dir = match claude_projects_dir() {
+            Some(d) => d,
+            None => return vec![],
+        };
+
+        let projects_dir = claude_dir.join("projects");
+        let projects = match std::fs::read_dir(&projects_dir) {
+            Ok(d) => d,
+            Err(_) => return vec![],
+        };
+
+        let mut sessions = Vec::new();
+
+        for project_dir in projects.flatten() {
+            let proj_path = project_dir.path();
+            if !proj_path.is_dir() {
+                continue;
+            }
+            let slug = proj_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+
+            let entries = match std::fs::read_dir(&proj_path) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                let session_id = match path.file_stem().and_then(|s| s.to_str()) {
+                    Some(s) if s.len() == 36 && s.contains('-') => s.to_string(),
+                    _ => continue,
+                };
+
+                let content = match std::fs::read_to_string(&path) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+
+                let summary = extract_session_summary(&content);
+                let timestamp = extract_timestamp(&content);
+                let message_count = estimate_message_count(&content);
+
+                sessions.push(DetectedSession {
+                    id: session_id,
+                    project_slug: slug.clone(),
+                    summary,
+                    timestamp,
+                    message_count,
+                });
+            }
+        }
+
+        sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        sessions
+    }
+}
+
+/// Resolve the claude projects directory: `~/.claude` or `$CLAUDE_DIR`.
+pub fn claude_projects_dir() -> Option<PathBuf> {
+    let base = std::env::var("CLAUDE_DIR")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| PathBuf::from(h).join(".claude"))
+        })?;
+    Some(base)
+}
+
+/// Extract the first user text from JSONL content as a summary.
+fn extract_session_summary(content: &str) -> String {
+    let mut summary = String::new();
+    for line in content.lines() {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+            let role = val["message"]["role"].as_str().unwrap_or("");
+            if role == "user"
+                && let Some(blocks) = val["message"]["content"].as_array() {
+                    for block in blocks {
+                        let text = block["text"].as_str().unwrap_or("");
+                        if !text.is_empty() && text.len() > 3 {
+                            summary = text.to_string();
+                            break;
+                        }
+                    }
+            }
+        }
+        if !summary.is_empty() {
+            break;
+        }
+    }
+
+    if summary.len() > 200 {
+        let end = summary
+            .char_indices()
+            .nth(197)
+            .map(|(i, _)| i)
+            .unwrap_or(summary.len());
+        summary.truncate(end);
+        summary.push('…');
+    }
+    summary
+}
+
+/// Extract the first timestamp from JSONL content.
+fn extract_timestamp(content: &str) -> String {
+    for line in content.lines() {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(line)
+            && let Some(ts) = val["timestamp"].as_str()
+            && !ts.is_empty() {
+                return ts.to_string();
+        }
+    }
+    String::new()
+}
+
+/// Count user/assistant type lines in JSONL content.
+fn estimate_message_count(content: &str) -> usize {
+    let mut count = 0;
+    for line in content.lines() {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+            let role = val["message"]["role"].as_str().unwrap_or("");
+            if role == "user" || role == "assistant" {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,5 +458,46 @@ mod tests {
         let text = "\n☐ Option 1\n☐ Option 2\nEnter to select\n";
         let parser = ClaudeParser;
         assert!(parser.detect_interactive(text).is_some());
+    }
+
+    #[test]
+    fn test_claude_agent_identity() {
+        let agent = ClaudeAgent;
+        assert_eq!(agent.name(), "claude");
+        assert_eq!(agent.kind(), AgentKind::ClaudeCode);
+        assert!(agent.supports_sessions());
+        assert!(agent.has_session_start_hook());
+        assert_eq!(agent.output_source(), OutputSource::JsonlFiles);
+    }
+
+    #[test]
+    fn test_claude_agent_resume_command() {
+        let agent = ClaudeAgent;
+        let cmd = agent.resume_command("abc-def-123");
+        assert!(cmd.is_some());
+        let cmd = cmd.unwrap();
+        assert!(cmd.contains("claude"));
+        assert!(cmd.contains("--resume"));
+        assert!(cmd.contains("abc-def-123"));
+    }
+
+    #[test]
+    fn test_extract_session_summary() {
+        let jsonl = r#"{"timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":[{"type":"text","text":"hello world"}]}}
+{"timestamp":"2025-01-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"hi there"}]}}"#;
+        assert_eq!(extract_session_summary(jsonl), "hello world");
+    }
+
+    #[test]
+    fn test_extract_session_summary_empty() {
+        assert_eq!(extract_session_summary(""), "");
+    }
+
+    #[test]
+    fn test_estimate_message_count() {
+        let jsonl = r#"{"message":{"role":"user"}}
+{"message":{"role":"assistant"}}
+{"message":{"role":"user"}}"#;
+        assert_eq!(estimate_message_count(jsonl), 3);
     }
 }
