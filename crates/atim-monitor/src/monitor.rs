@@ -123,7 +123,7 @@ impl SessionMonitor {
 
             // 3. Periodically persist byte offsets
             self.save_counter += 1;
-            if self.save_counter % SAVE_INTERVAL_CYCLES == 0 {
+            if self.save_counter.is_multiple_of(SAVE_INTERVAL_CYCLES) {
                 self.save_offsets().await;
             }
 
@@ -155,10 +155,10 @@ impl SessionMonitor {
             && let Some(ws) = state.get("window_states").and_then(|v| v.as_object())
         {
             for entry in ws.values() {
-                if let Some(sid) = entry.get("session_id").and_then(|v| v.as_str()) {
-                    if !sid.is_empty() && !sessions.contains(&sid.to_string()) {
-                        sessions.push(sid.to_string());
-                    }
+                if let Some(sid) = entry.get("session_id").and_then(|v| v.as_str())
+                    && !sid.is_empty() && !sessions.contains(&sid.to_string())
+                {
+                    sessions.push(sid.to_string());
                 }
             }
         }
@@ -262,7 +262,7 @@ impl SessionMonitor {
         // Phase 3: Scan filesystem for untracked JSONL files (Claude Code
         // sometimes rotates session IDs without invoking the SessionStart hook,
         // so the new session never appears in session_map.json or state.json).
-        if let Some(home) = std::env::var("HOME").ok() {
+        if let Ok(home) = std::env::var("HOME") {
             let claude_dir = Path::new(&home).join(".claude").join("projects");
             if claude_dir.exists() && let Ok(mut dir) = tokio::fs::read_dir(&claude_dir).await {
                 while let Ok(Some(entry)) = dir.next_entry().await {

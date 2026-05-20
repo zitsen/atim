@@ -214,7 +214,7 @@ fn load_font_opt(candidates: &[&str]) -> Option<FontArc> {
 
 /// Check if a character likely needs a CJK font.
 fn is_cjk(ch: char) -> bool {
-    match ch as u32 {
+    matches!(ch as u32,
         0x2E80..=0x2EFF
         | 0x2F00..=0x2FDF
         | 0x3000..=0x303F
@@ -238,9 +238,8 @@ fn is_cjk(ch: char) -> bool {
         | 0x2CEB0..=0x2EBEF
         | 0x30000..=0x3134F
         | 0x31350..=0x323AF
-        | 0xAC00..=0xD7AF => true,
-        _ => false,
-    }
+        | 0xAC00..=0xD7AF
+    )
 }
 
 // ── Main renderer ──

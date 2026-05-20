@@ -22,6 +22,11 @@ use tokio::sync::Mutex;
 use crate::browser;
 use crate::browser::{BrowserMode, DirectoryBrowser};
 
+/// Key type for per-user pending state: (user_id, chat_id, thread_id).
+type UserTriple = (i64, i64, i64);
+/// Key type for tool_use message tracking: (chat_id, thread_id, tool_use_id).
+type ToolUseMsgKey = (i64, i64, String);
+
 /// The main application server — routes IM events to tmux and monitor
 /// events back to IM.
 pub struct Server {
@@ -36,19 +41,19 @@ pub struct Server {
     /// Track topic names by (chat_id, thread_id) from forum_topic_created/edited.
     pub topic_names: Arc<Mutex<HashMap<(i64, i64), String>>>,
     /// Pending user messages awaiting callback selection: (user_id, chat_id, thread_id) -> text.
-    pub pending_messages: Arc<Mutex<HashMap<(i64, i64, i64), String>>>,
+    pub pending_messages: Arc<Mutex<HashMap<UserTriple, String>>>,
     /// Callback context validation: token -> (user_id, chat_id, thread_id).
-    pub callback_contexts: Arc<Mutex<HashMap<String, (i64, i64, i64)>>>,
+    pub callback_contexts: Arc<Mutex<HashMap<String, UserTriple>>>,
     /// Directory browser for session creation with project navigation.
     pub browser: DirectoryBrowser,
     /// Tool_use message tracking for in-place editing:
     /// key = (chat_id, thread_id, tool_use_id) -> message_id of the sent tool_use summary.
-    pub tool_use_msg_ids: Arc<Mutex<HashMap<(i64, i64, String), MessageId>>>,
+    pub tool_use_msg_ids: Arc<Mutex<HashMap<ToolUseMsgKey, MessageId>>>,
     /// Status message tracking for status→content conversion:
     /// key = (chat_id, thread_id) -> whether status has been consumed by first content.
     pub status_consumed: Arc<Mutex<HashSet<(i64, i64)>>>,
     /// Pending agent selection per (user_id, chat_id, thread_id) during setup workflow.
-    pub pending_agents: Arc<Mutex<HashMap<(i64, i64, i64), String>>>,
+    pub pending_agents: Arc<Mutex<HashMap<UserTriple, String>>>,
     /// Interactive UI detection cache: window_id -> hash of last detected UI content.
     pub last_ui_states: Arc<Mutex<HashMap<String, String>>>,
     /// Last pane output per window (for non-Claude agents without JSONL logs).
@@ -2517,21 +2522,21 @@ impl Server {
             // Compare project directories: if the old session's JSONL is in
             // the same project directory as the new session's JSONL, assume
             // they belong to the same window.
-            if let Some(old_path) = resolve_jsonl(&ws.session_id).await {
-                if old_path.parent() == Some(new_parent) {
-                    // Persist the new mapping so future lookups are direct
-                    if let Ok(mut new_state) = self.state_mgr.load_state().await {
-                        if let Some(ws) = new_state.window_states.get_mut(wid) {
-                            ws.session_id = session_id.to_string();
-                            tracing::info!(
-                                "[pipe] Updated window {wid} session: {} → {session_id}",
-                                ws.session_id,
-                            );
-                        }
-                        let _ = self.state_mgr.save_state(&new_state).await;
+            if let Some(old_path) = resolve_jsonl(&ws.session_id).await
+                && old_path.parent() == Some(new_parent)
+            {
+                // Persist the new mapping so future lookups are direct
+                if let Ok(mut new_state) = self.state_mgr.load_state().await {
+                    if let Some(ws) = new_state.window_states.get_mut(wid) {
+                        ws.session_id = session_id.to_string();
+                        tracing::info!(
+                            "[pipe] Updated window {wid} session: {} → {session_id}",
+                            ws.session_id,
+                        );
                     }
-                    return Some(wid.clone());
+                    let _ = self.state_mgr.save_state(&new_state).await;
                 }
+                return Some(wid.clone());
             }
         }
         None
