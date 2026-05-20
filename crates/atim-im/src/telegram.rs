@@ -108,8 +108,7 @@ impl TelegramAdapter {
         if let Ok(proxy_url) = std::env::var("TELEGRAM_PROXY") {
             let proxy_url = proxy_url.trim().to_string();
             if !proxy_url.is_empty() {
-                let proxy = reqwest::Proxy::all(&proxy_url)
-                    .expect("invalid proxy URL");
+                let proxy = reqwest::Proxy::all(&proxy_url).expect("invalid proxy URL");
                 client_builder = client_builder.proxy(proxy);
                 tracing::info!("Telegram proxy configured: {proxy_url}");
             }
@@ -161,15 +160,21 @@ impl TelegramAdapter {
             .await
             .map_err(|e| {
                 // Determine error category for diagnostics
-                let tag = if e.is_timeout() { "timeout" }
-                    else if e.is_connect() { "connect" }
-                    else if e.is_body() { "body" }
-                    else { "request" };
+                let tag = if e.is_timeout() {
+                    "timeout"
+                } else if e.is_connect() {
+                    "connect"
+                } else if e.is_body() {
+                    "body"
+                } else {
+                    "request"
+                };
                 // Include the source chain, sanitizing the token from all text
-                let chain = std::iter::successors(Some(&e as &dyn std::error::Error), |e| e.source())
-                    .map(|s| self.sanitize_str(&s.to_string()))
-                    .collect::<Vec<_>>()
-                    .join(": ");
+                let chain =
+                    std::iter::successors(Some(&e as &dyn std::error::Error), |e| e.source())
+                        .map(|s| self.sanitize_str(&s.to_string()))
+                        .collect::<Vec<_>>()
+                        .join(": ");
                 Error::Telegram(format!(
                     "network error ({tag}) calling {}: {chain}",
                     self.sanitized_url(),
@@ -178,12 +183,14 @@ impl TelegramAdapter {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let json: serde_json::Value = resp
-                .json()
-                .await
-                .unwrap_or(serde_json::Value::Null);
-            let desc = json.get("description").and_then(|v| v.as_str()).unwrap_or("unknown error");
-            return Err(Error::Telegram(format!("API error (HTTP {status}): {desc}")));
+            let json: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+            let desc = json
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error");
+            return Err(Error::Telegram(format!(
+                "API error (HTTP {status}): {desc}"
+            )));
         }
 
         let json: serde_json::Value = resp
@@ -327,10 +334,17 @@ impl ImAdapter for TelegramAdapter {
             params["message_thread_id"] = serde_json::json!(thread.0);
         }
         let result = self.api_post("sendMessage", &params).await?;
-        Ok(MessageId(result["message_id"].as_i64().unwrap_or(0).to_string()))
+        Ok(MessageId(
+            result["message_id"].as_i64().unwrap_or(0).to_string(),
+        ))
     }
 
-    async fn edit_message(&self, target: &MessageTarget, msg_id: &MessageId, text: &str) -> Result<()> {
+    async fn edit_message(
+        &self,
+        target: &MessageTarget,
+        msg_id: &MessageId,
+        text: &str,
+    ) -> Result<()> {
         let html = markdown_to_html(text);
         let mut params = serde_json::json!({
             "chat_id": target.chat_id.0,
@@ -345,14 +359,18 @@ impl ImAdapter for TelegramAdapter {
         Ok(())
     }
 
-    async fn send_photo(&self, target: &MessageTarget, filename: &str, data: &[u8]) -> Result<MessageId> {
+    async fn send_photo(
+        &self,
+        target: &MessageTarget,
+        filename: &str,
+        data: &[u8],
+    ) -> Result<MessageId> {
         let url = format!("{}/sendPhoto", self.api_url);
         let mut form = reqwest::multipart::Form::new()
             .text("chat_id", target.chat_id.0.to_string())
             .part(
                 "photo",
-                reqwest::multipart::Part::bytes(data.to_vec())
-                    .file_name(filename.to_string()),
+                reqwest::multipart::Part::bytes(data.to_vec()).file_name(filename.to_string()),
             );
         if let Some(thread) = target.thread_id {
             form = form.text("message_thread_id", thread.0.to_string());
@@ -371,9 +389,17 @@ impl ImAdapter for TelegramAdapter {
             .map_err(|e| Error::Telegram(format!("JSON parse error: {e}")))?;
 
         if json.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
-            Ok(MessageId(json["result"]["message_id"].as_i64().unwrap_or(0).to_string()))
+            Ok(MessageId(
+                json["result"]["message_id"]
+                    .as_i64()
+                    .unwrap_or(0)
+                    .to_string(),
+            ))
         } else {
-            let desc = json.get("description").and_then(|v| v.as_str()).unwrap_or("unknown error");
+            let desc = json
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error");
             Err(Error::Telegram(format!("sendPhoto failed: {desc}")))
         }
     }
@@ -409,7 +435,9 @@ impl ImAdapter for TelegramAdapter {
             params["message_thread_id"] = serde_json::json!(thread.0);
         }
         let result = self.api_post("sendMessage", &params).await?;
-        Ok(MessageId(result["message_id"].as_i64().unwrap_or(0).to_string()))
+        Ok(MessageId(
+            result["message_id"].as_i64().unwrap_or(0).to_string(),
+        ))
     }
 
     async fn delete_message(&self, target: &MessageTarget, msg_id: &MessageId) -> Result<()> {
@@ -484,46 +512,57 @@ impl ImAdapter for TelegramAdapter {
 // ── Parsing helpers ──
 
 fn parse_message(msg: &serde_json::Value) -> Option<ImEvent> {
-	let chat_id = msg["chat"]["id"].as_i64()?;
-	// Service messages (topic close, etc.) may not have a `from` field
-	let user_id = msg["from"]["id"].as_i64().unwrap_or(0);
-	let thread_id = msg["is_topic_message"]
-	    .as_bool()
-	    .filter(|&b| b)
-	    .and_then(|_| msg["message_thread_id"].as_i64());
+    let chat_id = msg["chat"]["id"].as_i64()?;
+    // Service messages (topic close, etc.) may not have a `from` field
+    let user_id = msg["from"]["id"].as_i64().unwrap_or(0);
+    let thread_id = msg["is_topic_message"]
+        .as_bool()
+        .filter(|&b| b)
+        .and_then(|_| msg["message_thread_id"].as_i64());
 
-	let target = MessageTarget {
-	    chat_id: atim_core::message::ChatId(chat_id),
-	    thread_id: thread_id.map(atim_core::message::ThreadId),
-	};
+    let target = MessageTarget {
+        chat_id: atim_core::message::ChatId(chat_id),
+        thread_id: thread_id.map(atim_core::message::ThreadId),
+    };
 
-	let kind = if let Some(tc) = msg.get("forum_topic_created") {
-	    let name = tc.get("name").and_then(|v| v.as_str()).unwrap_or("");
-	    ImEventKind::TopicCreated { name: name.to_string() }
-	} else if let Some(te) = msg.get("forum_topic_edited") {
-	    let new_name = te.get("name").and_then(|v| v.as_str()).unwrap_or("");
-	    ImEventKind::TopicEdited { new_name: new_name.to_string() }
-	} else if msg.get("forum_topic_closed").is_some() {
-	    ImEventKind::TopicClosed
-	} else if let Some(text) = msg.get("text").and_then(|v| v.as_str()) {
-	    ImEventKind::Text { text: text.to_string(), is_mention: false, is_group: false }
-	} else if msg.get("photo").is_some() {
-	    ImEventKind::Photo {
-	        caption: msg.get("caption").and_then(|v| v.as_str()).map(String::from),
-	        data: Vec::new(), // Would need to download the photo file
-	        mime_type: "image/jpeg".into(),
-	    }
-	} else if msg.get("voice").is_some() {
-	    ImEventKind::Voice(Vec::new()) // Would need to download voice file
-	} else {
-	    return None;
-	};
+    let kind = if let Some(tc) = msg.get("forum_topic_created") {
+        let name = tc.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        ImEventKind::TopicCreated {
+            name: name.to_string(),
+        }
+    } else if let Some(te) = msg.get("forum_topic_edited") {
+        let new_name = te.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        ImEventKind::TopicEdited {
+            new_name: new_name.to_string(),
+        }
+    } else if msg.get("forum_topic_closed").is_some() {
+        ImEventKind::TopicClosed
+    } else if let Some(text) = msg.get("text").and_then(|v| v.as_str()) {
+        ImEventKind::Text {
+            text: text.to_string(),
+            is_mention: false,
+            is_group: false,
+        }
+    } else if msg.get("photo").is_some() {
+        ImEventKind::Photo {
+            caption: msg
+                .get("caption")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            data: Vec::new(), // Would need to download the photo file
+            mime_type: "image/jpeg".into(),
+        }
+    } else if msg.get("voice").is_some() {
+        ImEventKind::Voice(Vec::new()) // Would need to download voice file
+    } else {
+        return None;
+    };
 
-	Some(ImEvent {
-	    user_id: atim_core::message::UserId(user_id),
-	    target,
-	    kind,
-	})
+    Some(ImEvent {
+        user_id: atim_core::message::UserId(user_id),
+        target,
+        kind,
+    })
 }
 
 fn parse_callback_query(cq: &serde_json::Value) -> Option<ImEvent> {

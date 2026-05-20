@@ -57,7 +57,10 @@ impl TmuxManager {
 
             // Recover from a dead tmux server
             if stderr.contains("no server running") {
-                tracing::warn!("tmux server not running, re-creating session \"{}\"", self.session_name);
+                tracing::warn!(
+                    "tmux server not running, re-creating session \"{}\"",
+                    self.session_name
+                );
                 let _ = Command::new("tmux")
                     .args(["new-session", "-d", "-s", &self.session_name])
                     .output()
@@ -201,8 +204,7 @@ impl TmuxManager {
 
     /// Kill (close) a window by its ID.
     pub async fn kill_window(&self, window_id: &WindowId) -> Result<()> {
-        self.tmux(&["kill-window", "-t", &window_id.0])
-            .await?;
+        self.tmux(&["kill-window", "-t", &window_id.0]).await?;
         Ok(())
     }
 
@@ -223,8 +225,8 @@ impl TmuxManager {
             "capture-pane",
             "-t",
             &window_id.0,
-            "-p",  // print to stdout
-            "-e",  // preserve ANSI
+            "-p", // print to stdout
+            "-e", // preserve ANSI
         ])
         .await
     }
@@ -240,8 +242,7 @@ impl TmuxManager {
 
     /// Send a key press (e.g. "Enter", "Escape", "C-c").
     pub async fn send_key(&self, window_id: &WindowId, key: &str) -> Result<()> {
-        self.tmux(&["send-keys", "-t", &window_id.0, key])
-            .await?;
+        self.tmux(&["send-keys", "-t", &window_id.0, key]).await?;
         Ok(())
     }
 

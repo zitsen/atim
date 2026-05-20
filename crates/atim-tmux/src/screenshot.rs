@@ -1,6 +1,6 @@
 use ab_glyph::{FontArc, PxScale};
-use image::RgbaImage;
 use image::ImageEncoder;
+use image::RgbaImage;
 use regex::Regex;
 
 use atim_core::error::{Error, Result};
@@ -69,8 +69,12 @@ struct Style {
 }
 
 impl Style {
-    fn fg_rgb(&self) -> (u8, u8, u8) { self.fg.unwrap_or(DEFAULT_FG) }
-    fn bg_rgb(&self) -> Option<(u8, u8, u8)> { self.bg }
+    fn fg_rgb(&self) -> (u8, u8, u8) {
+        self.fg.unwrap_or(DEFAULT_FG)
+    }
+    fn bg_rgb(&self) -> Option<(u8, u8, u8)> {
+        self.bg
+    }
 }
 
 struct Segment {
@@ -94,7 +98,7 @@ fn parse_ansi_line(line: &str, re: &Regex) -> Vec<Segment> {
 
         // Parse the SGR parameters
         let params = cap.as_str();
-        let codes: Vec<u8> = params[2..params.len()-1]
+        let codes: Vec<u8> = params[2..params.len() - 1]
             .split(';')
             .filter_map(|s| s.parse().ok())
             .collect();
@@ -109,13 +113,19 @@ fn parse_ansi_line(line: &str, re: &Regex) -> Vec<Segment> {
     }
 
     if segments.is_empty() {
-        segments.push(Segment { text: String::new(), style, has_cjk: false });
+        segments.push(Segment {
+            text: String::new(),
+            style,
+            has_cjk: false,
+        });
     }
     segments
 }
 
 fn push_segment(segments: &mut Vec<Segment>, text: &str, style: Style) {
-    if text.is_empty() { return; }
+    if text.is_empty() {
+        return;
+    }
     // Merge with previous segment if same style
     if let Some(last) = segments.last_mut() {
         if last.style == style {
@@ -136,8 +146,12 @@ fn apply_sgr(mut style: Style, codes: &[u8]) -> Style {
     let mut i = 0;
     while i < codes.len() {
         match codes[i] {
-            0 => { style = Style { fg: None, bg: None }; }
-            30..=37 => { style.fg = Some(ANSI_COLORS[(codes[i] - 30) as usize]); }
+            0 => {
+                style = Style { fg: None, bg: None };
+            }
+            30..=37 => {
+                style.fg = Some(ANSI_COLORS[(codes[i] - 30) as usize]);
+            }
             38 => {
                 if i + 1 < codes.len() && codes[i + 1] == 5 && i + 2 < codes.len() {
                     style.fg = Some(ansi_256_to_rgb(codes[i + 2]));
@@ -147,8 +161,12 @@ fn apply_sgr(mut style: Style, codes: &[u8]) -> Style {
                     i += 4;
                 }
             }
-            39 => { style.fg = None; }
-            40..=47 => { style.bg = Some(ANSI_COLORS[(codes[i] - 40) as usize]); }
+            39 => {
+                style.fg = None;
+            }
+            40..=47 => {
+                style.bg = Some(ANSI_COLORS[(codes[i] - 40) as usize]);
+            }
             48 => {
                 if i + 1 < codes.len() && codes[i + 1] == 5 && i + 2 < codes.len() {
                     style.bg = Some(ansi_256_to_rgb(codes[i + 2]));
@@ -158,9 +176,15 @@ fn apply_sgr(mut style: Style, codes: &[u8]) -> Style {
                     i += 4;
                 }
             }
-            49 => { style.bg = None; }
-            90..=97 => { style.fg = Some(ANSI_COLORS[(codes[i] - 90 + 8) as usize]); }
-            100..=107 => { style.bg = Some(ANSI_COLORS[(codes[i] - 100 + 8) as usize]); }
+            49 => {
+                style.bg = None;
+            }
+            90..=97 => {
+                style.fg = Some(ANSI_COLORS[(codes[i] - 90 + 8) as usize]);
+            }
+            100..=107 => {
+                style.bg = Some(ANSI_COLORS[(codes[i] - 100 + 8) as usize]);
+            }
             _ => {}
         }
         i += 1;
@@ -193,14 +217,29 @@ fn load_font_opt(candidates: &[&str]) -> Option<FontArc> {
 /// Check if a character likely needs a CJK font.
 fn is_cjk(ch: char) -> bool {
     match ch as u32 {
-        0x2E80..=0x2EFF | 0x2F00..=0x2FDF | 0x3000..=0x303F
-        | 0x3040..=0x309F | 0x30A0..=0x30FF | 0x3100..=0x312F
-        | 0x3130..=0x318F | 0x3190..=0x319F | 0x31A0..=0x31EF
-        | 0x3200..=0x32FF | 0x3300..=0x33FF | 0x3400..=0x4DBF
-        | 0x4E00..=0x9FFF | 0xF900..=0xFAFF | 0xFE30..=0xFE4F
-        | 0xFF00..=0xFFEF | 0x20000..=0x2A6DF | 0x2A700..=0x2B73F
-        | 0x2B740..=0x2B81F | 0x2B820..=0x2CEAF | 0x2CEB0..=0x2EBEF
-        | 0x30000..=0x3134F | 0x31350..=0x323AF
+        0x2E80..=0x2EFF
+        | 0x2F00..=0x2FDF
+        | 0x3000..=0x303F
+        | 0x3040..=0x309F
+        | 0x30A0..=0x30FF
+        | 0x3100..=0x312F
+        | 0x3130..=0x318F
+        | 0x3190..=0x319F
+        | 0x31A0..=0x31EF
+        | 0x3200..=0x32FF
+        | 0x3300..=0x33FF
+        | 0x3400..=0x4DBF
+        | 0x4E00..=0x9FFF
+        | 0xF900..=0xFAFF
+        | 0xFE30..=0xFE4F
+        | 0xFF00..=0xFFEF
+        | 0x20000..=0x2A6DF
+        | 0x2A700..=0x2B73F
+        | 0x2B740..=0x2B81F
+        | 0x2B820..=0x2CEAF
+        | 0x2CEB0..=0x2EBEF
+        | 0x30000..=0x3134F
+        | 0x31350..=0x323AF
         | 0xAC00..=0xD7AF => true,
         _ => false,
     }
@@ -223,19 +262,28 @@ pub fn render_ansi_to_png(contents: &str) -> Result<Vec<u8>> {
     }
 
     let font_size = 16.0f32;
-    let scale = PxScale { x: font_size, y: font_size };
+    let scale = PxScale {
+        x: font_size,
+        y: font_size,
+    };
     let char_w = imageproc::drawing::text_size(scale, &font, "W").0 as u32;
     let line_h = (font_size * 1.35).ceil() as u32;
     let padding = 16u32;
 
     // Parse lines
     let ansi_re = Regex::new(r"\x1b\[([0-9;]*)m").unwrap();
-    let mut lines: Vec<Vec<Segment>> = contents.lines().map(|l| parse_ansi_line(l, &ansi_re)).collect();
+    let mut lines: Vec<Vec<Segment>> = contents
+        .lines()
+        .map(|l| parse_ansi_line(l, &ansi_re))
+        .collect();
 
     // Trim trailing whitespace from each line to avoid wasted space
     for segs in &mut lines {
         loop {
-            let is_empty = segs.last().map(|s| s.text.trim_end().is_empty()).unwrap_or(false);
+            let is_empty = segs
+                .last()
+                .map(|s| s.text.trim_end().is_empty())
+                .unwrap_or(false);
             if is_empty {
                 segs.pop();
             } else {
@@ -250,28 +298,42 @@ pub fn render_ansi_to_png(contents: &str) -> Result<Vec<u8>> {
     }
 
     // Calculate max visible line width (approximate CJK as 2 Latin chars)
-    let max_chars = lines.iter()
-        .map(|segs| segs.iter().map(|s| {
-            let cjk = s.text.chars().filter(|c| is_cjk(*c)).count();
-            s.text.chars().count() + cjk  // add extra width for CJK
-        }).sum::<usize>())
+    let max_chars = lines
+        .iter()
+        .map(|segs| {
+            segs.iter()
+                .map(|s| {
+                    let cjk = s.text.chars().filter(|c| is_cjk(*c)).count();
+                    s.text.chars().count() + cjk // add extra width for CJK
+                })
+                .sum::<usize>()
+        })
         .max()
         .unwrap_or(0);
     if max_chars == 0 || lines.is_empty() {
         let img = RgbaImage::from_pixel(100, 100, image::Rgba([30, 30, 30, 255]));
         let mut png = Vec::new();
         let encoder = image::codecs::png::PngEncoder::new(&mut png);
-        encoder.write_image(img.as_raw(), 100, 100, image::ExtendedColorType::Rgba8)
+        encoder
+            .write_image(img.as_raw(), 100, 100, image::ExtendedColorType::Rgba8)
             .map_err(|e| Error::PngEncoding(e.to_string()))?;
         return Ok(png);
     }
 
     let mut img_w = max_chars as u32 * char_w + padding * 2;
     let mut img_h = lines.len() as u32 * line_h + padding * 2;
-    if img_w < 100 { img_w = 100; }
-    if img_h < 100 { img_h = 100; }
+    if img_w < 100 {
+        img_w = 100;
+    }
+    if img_h < 100 {
+        img_h = 100;
+    }
 
-    let mut img = RgbaImage::from_pixel(img_w, img_h, image::Rgba([DEFAULT_BG.0, DEFAULT_BG.1, DEFAULT_BG.2, 255]));
+    let mut img = RgbaImage::from_pixel(
+        img_w,
+        img_h,
+        image::Rgba([DEFAULT_BG.0, DEFAULT_BG.1, DEFAULT_BG.2, 255]),
+    );
 
     let mut y = padding as i32;
     for line_segs in &lines {
@@ -279,7 +341,11 @@ pub fn render_ansi_to_png(contents: &str) -> Result<Vec<u8>> {
         for seg in line_segs {
             let seg_chars = seg.text.chars().count();
             // CJK chars are ~2x width in terminal; approximate by treating as 2 Latin chars
-            let cjk_count = if seg.has_cjk { seg.text.chars().filter(|c| is_cjk(*c)).count() } else { 0 };
+            let cjk_count = if seg.has_cjk {
+                seg.text.chars().filter(|c| is_cjk(*c)).count()
+            } else {
+                0
+            };
             let latin_count = seg_chars - cjk_count;
             let seg_w = (latin_count as u32 + cjk_count as u32 * 2) * char_w;
 
@@ -287,8 +353,13 @@ pub fn render_ansi_to_png(contents: &str) -> Result<Vec<u8>> {
             if let Some(bg) = seg.style.bg_rgb() {
                 for dy in y..y + line_h as i32 {
                     for dx in x..x + seg_w as i32 {
-                        if dx >= 0 && dy >= 0 && dx < img.width() as i32 && dy < img.height() as i32 {
-                            img.put_pixel(dx as u32, dy as u32, image::Rgba([bg.0, bg.1, bg.2, 255]));
+                        if dx >= 0 && dy >= 0 && dx < img.width() as i32 && dy < img.height() as i32
+                        {
+                            img.put_pixel(
+                                dx as u32,
+                                dy as u32,
+                                image::Rgba([bg.0, bg.1, bg.2, 255]),
+                            );
                         }
                     }
                 }
@@ -307,15 +378,20 @@ pub fn render_ansi_to_png(contents: &str) -> Result<Vec<u8>> {
 
     // Only resize if Telegram constraints require it (w+h <= 10000, ratio <= 20).
     // Otherwise keep native resolution for maximum sharpness.
-    let telegram_ok = img_w + img_h <= 10000
-        && img_w.max(img_h) as f64 / img_w.min(img_h).max(1) as f64 <= 20.0;
+    let telegram_ok =
+        img_w + img_h <= 10000 && img_w.max(img_h) as f64 / img_w.min(img_h).max(1) as f64 <= 20.0;
     let (resized_w, resized_h) = if telegram_ok {
         (img_w, img_h)
     } else {
         fit_to_bounds(img_w, img_h, 5000, 5000)
     };
     let resized = if resized_w != img_w || resized_h != img_h {
-        image::imageops::resize(&img, resized_w, resized_h, image::imageops::FilterType::CatmullRom)
+        image::imageops::resize(
+            &img,
+            resized_w,
+            resized_h,
+            image::imageops::FilterType::CatmullRom,
+        )
     } else {
         img
     };
@@ -323,7 +399,12 @@ pub fn render_ansi_to_png(contents: &str) -> Result<Vec<u8>> {
     let mut png = Vec::new();
     let encoder = image::codecs::png::PngEncoder::new(&mut png);
     encoder
-        .write_image(resized.as_raw(), resized_w, resized_h, image::ExtendedColorType::Rgba8)
+        .write_image(
+            resized.as_raw(),
+            resized_w,
+            resized_h,
+            image::ExtendedColorType::Rgba8,
+        )
         .map_err(|e| Error::PngEncoding(e.to_string()))?;
 
     Ok(png)
@@ -333,7 +414,9 @@ pub fn render_ansi_to_png(contents: &str) -> Result<Vec<u8>> {
 /// width + height <= 10000, aspect ratio (max/min) <= 20
 fn fit_to_bounds(w: u32, h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
     let ratio_ok = |nw: u32, nh: u32| nw.max(nh) as f64 / nw.min(nh).max(1) as f64 <= 20.0;
-    let mut scale = (max_w as f64 / w as f64).min(max_h as f64 / h as f64).min(1.0);
+    let mut scale = (max_w as f64 / w as f64)
+        .min(max_h as f64 / h as f64)
+        .min(1.0);
     while scale > 0.01 {
         let nw = (w as f64 * scale).round() as u32;
         let nh = (h as f64 * scale).round() as u32;
@@ -363,7 +446,13 @@ mod tests {
 
     #[test]
     fn test_sgr_reset() {
-        let style = apply_sgr(Style { fg: Some((1, 2, 3)), bg: Some((4, 5, 6)) }, &[0]);
+        let style = apply_sgr(
+            Style {
+                fg: Some((1, 2, 3)),
+                bg: Some((4, 5, 6)),
+            },
+            &[0],
+        );
         assert_eq!(style.fg, None);
         assert_eq!(style.bg, None);
     }
@@ -400,7 +489,11 @@ mod tests {
         assert!(result.is_ok(), "PNG rendering failed: {:?}", result.err());
         let png = result.unwrap();
         assert!(!png.is_empty(), "PNG should not be empty");
-        assert_eq!(&png[..8], &[137, 80, 78, 71, 13, 10, 26, 10], "Not a valid PNG");
+        assert_eq!(
+            &png[..8],
+            &[137, 80, 78, 71, 13, 10, 26, 10],
+            "Not a valid PNG"
+        );
     }
 
     #[test]

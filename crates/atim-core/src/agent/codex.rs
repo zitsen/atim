@@ -4,8 +4,7 @@ use crate::message::{AgentKind, InteractiveUi, UiKind};
 
 /// Codex CLI spinner characters (common TUI spinner set).
 const STATUS_SPINNERS: &[char] = &[
-    '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏',
-    '◐', '◓', '◑', '◒',
+    '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏', '◐', '◓', '◑', '◒',
 ];
 
 /// Patterns for Codex CLI interactive UIs.
@@ -55,9 +54,7 @@ impl AgentParser for CodexParser {
             return AgentKind::CodexCli;
         }
         // Check pane text for Codex CLI markers
-        if pane_text.contains("Codex")
-            || pane_text.contains("codex")
-        {
+        if pane_text.contains("Codex") || pane_text.contains("codex") {
             // Avoid false positives: "Codex" alone is not enough — verify
             // with additional context (e.g. TUI elements)
             if pane_text.contains("codex")
@@ -89,12 +86,11 @@ impl AgentParser for CodexParser {
                     }
                 }
                 // Also look for bracket-enclosed status: "[processing something]"
-                if trimmed.starts_with('[') && trimmed.len() > 3 {
-                    if let Some(end) = trimmed.find(']') {
-                        if end > 1 && end < 30 {
-                            return Some(trimmed[..=end].to_string());
-                        }
-                    }
+                if trimmed.starts_with('[') && trimmed.len() > 3
+                    && let Some(end) = trimmed.find(']')
+                    && end > 1 && end < 30
+                {
+                    return Some(trimmed[..=end].to_string());
                 }
             }
         }
@@ -107,23 +103,25 @@ impl AgentParser for CodexParser {
 
         for def in UI_PATTERNS {
             // All `contains` strings must match on any line in the pane.
-            let matched: bool = def.contains.iter().all(|pat| {
-                lines.iter().any(|l| l.contains(pat))
-            });
+            let matched: bool = def
+                .contains
+                .iter()
+                .all(|pat| lines.iter().any(|l| l.contains(pat)));
             if !matched {
                 continue;
             }
 
             // Find content boundaries: from first match line to last match line.
-            let first = lines.iter().position(|l| {
-                def.contains.iter().any(|pat| l.contains(pat))
-            })?;
+            let first = lines
+                .iter()
+                .position(|l| def.contains.iter().any(|pat| l.contains(pat)))?;
 
             // Collect content until we hit a non-matching line after the start.
-            let mut end = first;
-            for i in first..=last {
+            let mut end = last;
+            for (idx, line) in lines[first..=last].iter().enumerate() {
+                let i = first + idx;
                 end = i;
-                if lines[i].trim().is_empty() && i > first + 1 {
+                if line.trim().is_empty() && idx > 1 {
                     end = i.saturating_sub(1);
                     break;
                 }
@@ -189,19 +187,13 @@ mod tests {
 
     #[test]
     fn test_detect_by_process_name() {
-        assert_eq!(
-            CodexParser::detect("", "codex"),
-            AgentKind::CodexCli
-        );
+        assert_eq!(CodexParser::detect("", "codex"), AgentKind::CodexCli);
     }
 
     #[test]
     fn test_detect_by_pane_text() {
         let text = "Codex CLI — How can I help you today?";
-        assert_eq!(
-            CodexParser::detect(text, "bash"),
-            AgentKind::CodexCli
-        );
+        assert_eq!(CodexParser::detect(text, "bash"), AgentKind::CodexCli);
     }
 
     #[test]
@@ -209,7 +201,10 @@ mod tests {
         let text = "⠋ Gathering context for your request\n";
         let parser = CodexParser;
         let status = parser.parse_status(text);
-        assert_eq!(status.as_deref(), Some("Gathering context for your request"));
+        assert_eq!(
+            status.as_deref(),
+            Some("Gathering context for your request")
+        );
     }
 
     #[test]

@@ -91,7 +91,9 @@ fn is_valid_uuid(s: &str) -> bool {
     if parts.len() != 5 {
         return false;
     }
-    parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_hexdigit()))
+    parts
+        .iter()
+        .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
 fn atomic_write_json(path: &PathBuf, data: &HashMap<String, String>) -> std::io::Result<()> {
@@ -138,7 +140,8 @@ fn install_hook() {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&hook_path, std::fs::Permissions::from_mode(0o755));
+                let _ =
+                    std::fs::set_permissions(&hook_path, std::fs::Permissions::from_mode(0o755));
             }
             println!("Hook installed at {:?}", hook_path);
         }

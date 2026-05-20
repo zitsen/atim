@@ -42,10 +42,7 @@ impl JsonlParser {
     }
 
     /// Read new data from a file starting at a given byte offset.
-    pub async fn read_new<P: AsRef<Path>>(
-        path: P,
-        offset: u64,
-    ) -> Result<(Vec<ParsedEntry>, u64)> {
+    pub async fn read_new<P: AsRef<Path>>(path: P, offset: u64) -> Result<(Vec<ParsedEntry>, u64)> {
         let mut file = fs::File::open(path.as_ref()).await?;
         let metadata = file.metadata().await?;
         let file_size = metadata.len();
@@ -75,9 +72,12 @@ impl JsonlParser {
     /// `tool_names` is a mutable cache mapping `tool_use_id → tool_name` across
     /// multiple lines in a single parse batch. It lets tool_result entries know
     /// which tool produced them for smarter summaries.
-    fn parse_line(line: &str, tool_names: &mut HashMap<String, String>) -> Result<Vec<ParsedEntry>> {
-        let value: serde_json::Value =
-            serde_json::from_str(line).map_err(|e| Error::Parse(format!("JSON parse error: {e}")))?;
+    fn parse_line(
+        line: &str,
+        tool_names: &mut HashMap<String, String>,
+    ) -> Result<Vec<ParsedEntry>> {
+        let value: serde_json::Value = serde_json::from_str(line)
+            .map_err(|e| Error::Parse(format!("JSON parse error: {e}")))?;
 
         let msg = match value.get("message") {
             Some(m) => m,
@@ -92,7 +92,10 @@ impl JsonlParser {
 
         let content = msg.get("content");
         let event_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        let timestamp = value.get("timestamp").and_then(|v| v.as_str()).map(String::from);
+        let timestamp = value
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .map(String::from);
 
         let mut entries = Vec::new();
 
@@ -111,8 +114,10 @@ impl JsonlParser {
                             }
                             Some("thinking") => {}
                             Some("tool_use") => {
-                                let tool_name = block.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
-                                let tool_use_id = block.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                                let tool_name =
+                                    block.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
+                                let tool_use_id =
+                                    block.get("id").and_then(|v| v.as_str()).unwrap_or("");
                                 tool_names.insert(tool_use_id.to_string(), tool_name.to_string());
                                 let summary = summarize_tool_use(tool_name, block.get("input"));
                                 tool_entries.push(ParsedEntry {
@@ -305,12 +310,14 @@ fn summarize_tool_result(text: &str, tool_name: Option<&str>) -> String {
                 None => format!("⚡ Completed ({line_count} lines)"),
             };
         }
-        Some("Write") | Some("WriteTool") | Some("CreateTool")
-        | Some("Create") | Some("FileWriteTool") => {
+        Some("Write")
+        | Some("WriteTool")
+        | Some("CreateTool")
+        | Some("Create")
+        | Some("FileWriteTool") => {
             return format!("📝 Wrote {} chars", text.len());
         }
-        Some("Search") | Some("SearchTool") | Some("GrepTool")
-        | Some("GlobTool") => {
+        Some("Search") | Some("SearchTool") | Some("GrepTool") | Some("GlobTool") => {
             let matches = count_search_matches(text);
             return format!("🔍 Found {matches} matches");
         }
@@ -359,7 +366,10 @@ fn extract_exit_code(text: &str) -> Option<i32> {
         // Match "exit code N" or "exit code: N"
         if line.contains("exit code") || line.contains("exit_code") {
             for word in line.split_whitespace() {
-                if let Ok(n) = word.trim_end_matches(&['.', ',', ';', ')', ']'][..]).parse::<i32>() {
+                if let Ok(n) = word
+                    .trim_end_matches(&['.', ',', ';', ')', ']'][..])
+                    .parse::<i32>()
+                {
                     return Some(n);
                 }
             }
@@ -374,7 +384,8 @@ fn extract_exit_code(text: &str) -> Option<i32> {
 fn count_search_matches(text: &str) -> usize {
     let line_count = text.lines().count();
     // If output looks like grep matches (path:line:content), count match lines
-    let colon_lines = text.lines()
+    let colon_lines = text
+        .lines()
         .filter(|l| l.contains(':') && !l.trim().is_empty())
         .count();
     if colon_lines > line_count / 2 {
@@ -397,7 +408,7 @@ fn extract_tool_result_text(content: Option<&serde_json::Value>) -> ExtractedCon
             return ExtractedContent {
                 text: String::new(),
                 images: None,
-            }
+            };
         }
     };
 
@@ -424,8 +435,8 @@ fn extract_tool_result_text(content: Option<&serde_json::Value>) -> ExtractedCon
                         if let Some(media_type) =
                             source.and_then(|s| s.get("media_type").and_then(|v| v.as_str()))
                         {
-                            if let Some(data) = source
-                                .and_then(|s| s.get("data").and_then(|v| v.as_str()))
+                            if let Some(data) =
+                                source.and_then(|s| s.get("data").and_then(|v| v.as_str()))
                             {
                                 if let Ok(bytes) = BASE64_STANDARD.decode(data) {
                                     images.push((media_type.to_string(), bytes));
@@ -449,7 +460,11 @@ fn extract_tool_result_text(content: Option<&serde_json::Value>) -> ExtractedCon
                 }
             }
 
-            let images = if images.is_empty() { None } else { Some(images) };
+            let images = if images.is_empty() {
+                None
+            } else {
+                Some(images)
+            };
             ExtractedContent { text, images }
         }
         serde_json::Value::Object(_) => {
@@ -480,8 +495,8 @@ fn extract_tool_result_text(content: Option<&serde_json::Value>) -> ExtractedCon
     }
 }
 
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 
 #[cfg(test)]
 mod tests {
@@ -683,7 +698,10 @@ mod tests {
     fn test_extract_exit_code() {
         assert_eq!(extract_exit_code("Build OK\n[Exit 0]"), Some(0));
         assert_eq!(extract_exit_code("Error\n[Exit 1]"), Some(1));
-        assert_eq!(extract_exit_code("Process finished with exit code 42"), Some(42));
+        assert_eq!(
+            extract_exit_code("Process finished with exit code 42"),
+            Some(42)
+        );
         assert_eq!(extract_exit_code("No code here"), None);
     }
 

@@ -5,7 +5,7 @@ use atim_core::agent::Agent;
 use atim_core::config::Config;
 use atim_core::im::ImAdapter;
 use clap::{Parser, Subcommand};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
 mod browser;
 mod hook;
@@ -109,7 +109,10 @@ async fn main() -> anyhow::Result<()> {
             if !ws.session_id.is_empty() && !map.contains_key(wid) {
                 map.insert(wid.clone(), ws.session_id.clone());
                 changed = true;
-                tracing::info!("Synced session {} to session_map for window {wid}", ws.session_id);
+                tracing::info!(
+                    "Synced session {} to session_map for window {wid}",
+                    ws.session_id
+                );
             }
         }
         if changed {
@@ -119,11 +122,14 @@ async fn main() -> anyhow::Result<()> {
 
     // 4c. Discover session_ids for windows with empty session_id
     //     (e.g. windows created before the SessionStart hook was installed)
-    let empty_windows: Vec<(String, String)> = resolved_state.window_states.iter()
+    let empty_windows: Vec<(String, String)> = resolved_state
+        .window_states
+        .iter()
         .filter(|(_, ws)| ws.session_id.is_empty())
         .map(|(wid, ws)| (wid.clone(), ws.cwd.clone()))
         .collect();
-    let mut known_ids: std::collections::HashSet<String> = resolved_state.window_states
+    let mut known_ids: std::collections::HashSet<String> = resolved_state
+        .window_states
         .values()
         .map(|ws| ws.session_id.clone())
         .filter(|s| !s.is_empty())
@@ -131,7 +137,9 @@ async fn main() -> anyhow::Result<()> {
     for (wid, cwd) in &empty_windows {
         // Only discover session_ids for Claude Code windows — other agents
         // (Copilot, Codex) don't produce JSONL logs.
-        let agent_type = resolved_state.window_states.get(wid)
+        let agent_type = resolved_state
+            .window_states
+            .get(wid)
             .map(|ws| ws.agent_type.as_str())
             .unwrap_or("");
         if agent_type != "claude" {
@@ -143,7 +151,9 @@ async fn main() -> anyhow::Result<()> {
 
         tracing::info!("No session_id for window {wid}, attempting to discover...");
         if let Some(sid) = discover_session_for_window(wid, cwd, &known_ids) {
-            tracing::info!("Discovered session {sid} for window {wid}, syncing to state and session_map");
+            tracing::info!(
+                "Discovered session {sid} for window {wid}, syncing to state and session_map"
+            );
             if let Some(ws) = resolved_state.window_states.get_mut(wid) {
                 ws.session_id = sid.clone();
             }
@@ -160,8 +170,7 @@ async fn main() -> anyhow::Result<()> {
     let (im_tx, im_rx) = mpsc::unbounded_channel();
 
     let raw_adapter: Arc<dyn ImAdapter> = {
-        let backend = std::env::var("ATIM_IM_BACKEND")
-            .unwrap_or_else(|_| "telegram".into());
+        let backend = std::env::var("ATIM_IM_BACKEND").unwrap_or_else(|_| "telegram".into());
         match backend.as_str() {
             "feishu" => {
                 let adapter = atim_im::feishu::FeishuAdapter::new(
@@ -172,7 +181,8 @@ async fn main() -> anyhow::Result<()> {
             }
             _ => {
                 // telegram (default)
-                let adapter = atim_im::telegram::TelegramAdapter::new(config.telegram_bot_token.clone());
+                let adapter =
+                    atim_im::telegram::TelegramAdapter::new(config.telegram_bot_token.clone());
                 Arc::new(adapter)
             }
         }
@@ -254,7 +264,9 @@ fn discover_session_for_window(
 
     // Phase 2: fallback to project-slug matching
     if !cwd.is_empty() {
-        tracing::info!("lsof failed for window {window_id}, trying project-slug matching (cwd={cwd})");
+        tracing::info!(
+            "lsof failed for window {window_id}, trying project-slug matching (cwd={cwd})"
+        );
         if let Ok(Some(sid)) = agent.discover_session(cwd, known_ids) {
             return Some(sid);
         }
@@ -280,11 +292,19 @@ fn re_resolve_state(
     for (wid, ws) in &state.window_states {
         if windows.contains_key(wid) {
             resolved_windows.insert(wid.clone(), ws.clone());
-        } else if let Some((new_id, _)) = windows.iter().find(|(_, info)| info.name == ws.window_name) {
+        } else if let Some((new_id, _)) =
+            windows.iter().find(|(_, info)| info.name == ws.window_name)
+        {
             resolved_windows.insert(new_id.clone(), ws.clone());
-            tracing::info!("Re-resolved window_state {wid} → {new_id} by name '{}'", ws.window_name);
+            tracing::info!(
+                "Re-resolved window_state {wid} → {new_id} by name '{}'",
+                ws.window_name
+            );
         } else {
-            tracing::info!("Removing stale window_state {wid} ('{}') — no matching tmux window", ws.window_name);
+            tracing::info!(
+                "Removing stale window_state {wid} ('{}') — no matching tmux window",
+                ws.window_name
+            );
         }
     }
     state.window_states = resolved_windows;
@@ -294,54 +314,82 @@ fn re_resolve_state(
     for tb in &state.thread_bindings {
         if windows.contains_key(&tb.window_id) {
             resolved_bindings.push(tb.clone());
-        } else if let Some((new_id, _)) = windows.iter().find(|(_, info)| info.name == tb.display_name) {
+        } else if let Some((new_id, _)) = windows
+            .iter()
+            .find(|(_, info)| info.name == tb.display_name)
+        {
             let mut updated = tb.clone();
             updated.window_id = new_id.clone();
             resolved_bindings.push(updated);
-            tracing::info!("Re-resolved ThreadBinding window_id {} → {} by display_name '{}'", tb.window_id, new_id, tb.display_name);
+            tracing::info!(
+                "Re-resolved ThreadBinding window_id {} → {} by display_name '{}'",
+                tb.window_id,
+                new_id,
+                tb.display_name
+            );
         } else {
-            tracing::info!("Removing stale ThreadBinding for window {} ('{}')", tb.window_id, tb.display_name);
+            tracing::info!(
+                "Removing stale ThreadBinding for window {} ('{}')",
+                tb.window_id,
+                tb.display_name
+            );
         }
     }
     state.thread_bindings = resolved_bindings;
 
     // 3. Clean up display_names HashMap
-    state.window_display_names.retain(|wid, _| windows.contains_key(wid) || state.window_states.contains_key(wid));
+    state
+        .window_display_names
+        .retain(|wid, _| windows.contains_key(wid) || state.window_states.contains_key(wid));
 
     state
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use atim_core::session::{ServerState, ThreadBinding, WindowState};
     use atim_tmux::manager::WindowInfo;
+    use std::collections::HashMap;
 
     #[test]
     fn test_re_resolve_all_alive() {
         let mut windows = HashMap::new();
-        windows.insert("@0".into(), WindowInfo {
-            window_id: atim_core::message::WindowId("@0".into()),
-            name: "atim-100".into(),
-            current_command: "claude".into(),
-        });
-        windows.insert("@1".into(), WindowInfo {
-            window_id: atim_core::message::WindowId("@1".into()),
-            name: "welcome".into(),
-            current_command: "zsh".into(),
-        });
+        windows.insert(
+            "@0".into(),
+            WindowInfo {
+                window_id: atim_core::message::WindowId("@0".into()),
+                name: "atim-100".into(),
+                current_command: "claude".into(),
+            },
+        );
+        windows.insert(
+            "@1".into(),
+            WindowInfo {
+                window_id: atim_core::message::WindowId("@1".into()),
+                name: "welcome".into(),
+                current_command: "zsh".into(),
+            },
+        );
 
         let state = ServerState {
-            window_states: HashMap::from([
-                ("@0".into(), WindowState { session_id: "sess_a".into(), cwd: "/home".into(), window_name: "atim-100".into(), agent_type: "claude".into() }),
-            ]),
-            thread_bindings: vec![
-                ThreadBinding {
-                    user_id: 100, thread_id: 1, chat_id: -100,
-                    window_id: "@0".into(), display_name: "atim-100".into(),
-                    group_chat_id: None, topic_name: None,
+            window_states: HashMap::from([(
+                "@0".into(),
+                WindowState {
+                    session_id: "sess_a".into(),
+                    cwd: "/home".into(),
+                    window_name: "atim-100".into(),
+                    agent_type: "claude".into(),
                 },
-            ],
+            )]),
+            thread_bindings: vec![ThreadBinding {
+                user_id: 100,
+                thread_id: 1,
+                chat_id: -100,
+                window_id: "@0".into(),
+                display_name: "atim-100".into(),
+                group_chat_id: None,
+                topic_name: None,
+            }],
             window_display_names: HashMap::from([("@0".into(), "atim-100".into())]),
             user_window_offsets: HashMap::new(),
         };
@@ -357,16 +405,24 @@ mod tests {
     fn test_re_resolve_stale_removed() {
         let windows = HashMap::new(); // no windows at all
         let state = ServerState {
-            window_states: HashMap::from([
-                ("@9".into(), WindowState { session_id: "sess_x".into(), cwd: "/tmp".into(), window_name: "ghost".into(), agent_type: "claude".into() }),
-            ]),
-            thread_bindings: vec![
-                ThreadBinding {
-                    user_id: 200, thread_id: 5, chat_id: -200,
-                    window_id: "@9".into(), display_name: "ghost".into(),
-                    group_chat_id: None, topic_name: None,
+            window_states: HashMap::from([(
+                "@9".into(),
+                WindowState {
+                    session_id: "sess_x".into(),
+                    cwd: "/tmp".into(),
+                    window_name: "ghost".into(),
+                    agent_type: "claude".into(),
                 },
-            ],
+            )]),
+            thread_bindings: vec![ThreadBinding {
+                user_id: 200,
+                thread_id: 5,
+                chat_id: -200,
+                window_id: "@9".into(),
+                display_name: "ghost".into(),
+                group_chat_id: None,
+                topic_name: None,
+            }],
             window_display_names: HashMap::from([("@9".into(), "ghost".into())]),
             user_window_offsets: HashMap::new(),
         };
@@ -380,24 +436,35 @@ mod tests {
     #[test]
     fn test_re_resolve_by_display_name() {
         let mut windows = HashMap::new();
-        windows.insert("@42".into(), WindowInfo {
-            window_id: atim_core::message::WindowId("@42".into()),
-            name: "atim-300".into(),
-            current_command: "claude".into(),
-        });
+        windows.insert(
+            "@42".into(),
+            WindowInfo {
+                window_id: atim_core::message::WindowId("@42".into()),
+                name: "atim-300".into(),
+                current_command: "claude".into(),
+            },
+        );
 
         // Stale window_id "@old" — should be re-resolved to "@42" by matching display_name / window_name
         let state = ServerState {
-            window_states: HashMap::from([
-                ("@old".into(), WindowState { session_id: "sess_y".into(), cwd: "/projects".into(), window_name: "atim-300".into(), agent_type: "claude".into() }),
-            ]),
-            thread_bindings: vec![
-                ThreadBinding {
-                    user_id: 300, thread_id: 10, chat_id: -300,
-                    window_id: "@old".into(), display_name: "atim-300".into(),
-                    group_chat_id: None, topic_name: None,
+            window_states: HashMap::from([(
+                "@old".into(),
+                WindowState {
+                    session_id: "sess_y".into(),
+                    cwd: "/projects".into(),
+                    window_name: "atim-300".into(),
+                    agent_type: "claude".into(),
                 },
-            ],
+            )]),
+            thread_bindings: vec![ThreadBinding {
+                user_id: 300,
+                thread_id: 10,
+                chat_id: -300,
+                window_id: "@old".into(),
+                display_name: "atim-300".into(),
+                group_chat_id: None,
+                topic_name: None,
+            }],
             window_display_names: HashMap::from([("@old".into(), "atim-300".into())]),
             user_window_offsets: HashMap::new(),
         };
@@ -406,7 +473,10 @@ mod tests {
         // window_state re-keyed to @42
         assert_eq!(resolved.window_states.len(), 1);
         assert!(!resolved.window_states.contains_key("@old"));
-        assert_eq!(resolved.window_states.get("@42").unwrap().session_id, "sess_y");
+        assert_eq!(
+            resolved.window_states.get("@42").unwrap().session_id,
+            "sess_y"
+        );
 
         // thread_binding updated
         assert_eq!(resolved.thread_bindings[0].window_id, "@42");
@@ -418,27 +488,54 @@ mod tests {
     #[test]
     fn test_re_resolve_partial_stale() {
         let mut windows = HashMap::new();
-        windows.insert("@10".into(), WindowInfo {
-            window_id: atim_core::message::WindowId("@10".into()),
-            name: "alive".into(),
-            current_command: "bash".into(),
-        });
+        windows.insert(
+            "@10".into(),
+            WindowInfo {
+                window_id: atim_core::message::WindowId("@10".into()),
+                name: "alive".into(),
+                current_command: "bash".into(),
+            },
+        );
 
         let state = ServerState {
             window_states: HashMap::from([
-                ("@10".into(), WindowState { session_id: "sess_keep".into(), cwd: "/a".into(), window_name: "alive".into(), agent_type: "claude".into() }),
-                ("@99".into(), WindowState { session_id: "sess_dead".into(), cwd: "/b".into(), window_name: "dead".into(), agent_type: "claude".into() }),
+                (
+                    "@10".into(),
+                    WindowState {
+                        session_id: "sess_keep".into(),
+                        cwd: "/a".into(),
+                        window_name: "alive".into(),
+                        agent_type: "claude".into(),
+                    },
+                ),
+                (
+                    "@99".into(),
+                    WindowState {
+                        session_id: "sess_dead".into(),
+                        cwd: "/b".into(),
+                        window_name: "dead".into(),
+                        agent_type: "claude".into(),
+                    },
+                ),
             ]),
             thread_bindings: vec![
                 ThreadBinding {
-                    user_id: 1, thread_id: 1, chat_id: -1,
-                    window_id: "@10".into(), display_name: "alive".into(),
-                    group_chat_id: None, topic_name: None,
+                    user_id: 1,
+                    thread_id: 1,
+                    chat_id: -1,
+                    window_id: "@10".into(),
+                    display_name: "alive".into(),
+                    group_chat_id: None,
+                    topic_name: None,
                 },
                 ThreadBinding {
-                    user_id: 2, thread_id: 2, chat_id: -2,
-                    window_id: "@99".into(), display_name: "dead".into(),
-                    group_chat_id: None, topic_name: None,
+                    user_id: 2,
+                    thread_id: 2,
+                    chat_id: -2,
+                    window_id: "@99".into(),
+                    display_name: "dead".into(),
+                    group_chat_id: None,
+                    topic_name: None,
                 },
             ],
             window_display_names: HashMap::new(),
@@ -455,21 +552,25 @@ mod tests {
     #[test]
     fn test_re_resolve_rekeys_window_states_when_name_matches() {
         let mut windows = HashMap::new();
-        windows.insert("@new1".into(), WindowInfo {
-            window_id: atim_core::message::WindowId("@new1".into()),
-            name: "project-alpha".into(),
-            current_command: "claude".into(),
-        });
+        windows.insert(
+            "@new1".into(),
+            WindowInfo {
+                window_id: atim_core::message::WindowId("@new1".into()),
+                name: "project-alpha".into(),
+                current_command: "claude".into(),
+            },
+        );
 
         let state = ServerState {
-            window_states: HashMap::from([
-                ("@old_stale".into(), WindowState {
+            window_states: HashMap::from([(
+                "@old_stale".into(),
+                WindowState {
                     session_id: "sess_alpha".into(),
                     cwd: "/alpha".into(),
                     window_name: "project-alpha".into(),
                     agent_type: "claude".into(),
-                }),
-            ]),
+                },
+            )]),
             thread_bindings: vec![],
             window_display_names: HashMap::new(),
             user_window_offsets: HashMap::new(),

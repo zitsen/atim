@@ -152,7 +152,7 @@ pub enum UiKind {
 /// A parsed entry from the agent's session log.
 #[derive(Debug, Clone)]
 pub struct ParsedEntry {
-    pub role: String,                  // "user" | "assistant"
+    pub role: String, // "user" | "assistant"
     pub text: String,
     pub content_type: ContentType,
     pub tool_use_id: Option<String>,

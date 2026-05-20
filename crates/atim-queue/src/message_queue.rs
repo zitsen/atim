@@ -54,9 +54,11 @@ impl MessageQueue {
     /// will edit it in-place. Otherwise, a new message is sent.
     pub fn enqueue_status(&mut self, target: MessageTarget, text: String) {
         // Check if we already have a pending status for this target — replace it
-        if let Some(existing) = self.pending.iter_mut().find(|m| {
-            m.is_status && m.target == target
-        }) {
+        if let Some(existing) = self
+            .pending
+            .iter_mut()
+            .find(|m| m.is_status && m.target == target)
+        {
             existing.text = text;
             return;
         }

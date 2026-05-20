@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use atim_core::error::Result;
 use atim_core::message::{NewMessage, SessionId};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
 /// Polling interval for JSONL file changes.
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -142,7 +142,10 @@ impl SessionMonitor {
         if found_new {
             tracing::info!(
                 "New sessions detected: {:?}",
-                current_sessions.iter().filter(|s| !self.last_known_sessions.contains(*s)).collect::<Vec<_>>()
+                current_sessions
+                    .iter()
+                    .filter(|s| !self.last_known_sessions.contains(*s))
+                    .collect::<Vec<_>>()
             );
         }
 
@@ -202,7 +205,10 @@ impl SessionMonitor {
             drop(cache_lock);
             // Cache miss — search and cache the result
             if let Some(path) = resolve_jsonl(session_id).await {
-                cache.lock().await.insert(session_id.to_string(), path.clone());
+                cache
+                    .lock()
+                    .await
+                    .insert(session_id.to_string(), path.clone());
                 Some(path)
             } else {
                 None

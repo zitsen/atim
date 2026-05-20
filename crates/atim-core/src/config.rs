@@ -62,7 +62,11 @@ impl Config {
         let allowed_users: std::result::Result<Vec<i64>, _> = allowed_users_str
             .split(',')
             .filter(|s| !s.trim().is_empty())
-            .map(|s| s.trim().parse::<i64>().map_err(|e| Error::Config(format!("Invalid user ID '{}': {}", s, e))))
+            .map(|s| {
+                s.trim()
+                    .parse::<i64>()
+                    .map_err(|e| Error::Config(format!("Invalid user ID '{}': {}", s, e)))
+            })
             .collect();
         let allowed_users = allowed_users?;
 

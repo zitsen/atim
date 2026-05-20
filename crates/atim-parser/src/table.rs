@@ -2,7 +2,7 @@
 ///
 /// Telegram doesn't support HTML tables, so we convert markdown tables
 /// into readable card-style key-value blocks.
-
+///
 /// Represents a parsed markdown table.
 struct Table {
     headers: Vec<String>,
@@ -149,7 +149,8 @@ mod tests {
 
     #[test]
     fn test_table_with_non_table_text() {
-        let input = "Here is some data:\n\n| A | B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n\nThat's it.\n";
+        let input =
+            "Here is some data:\n\n| A | B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n\nThat's it.\n";
         let result = convert_tables(input);
         assert!(result.contains("Here is some data:"));
         assert!(result.contains("📋 1"));
@@ -247,7 +248,8 @@ mod tests {
 
     #[test]
     fn test_table_with_code_blocks() {
-        let input = "| File | Size |\n|------|------|\n| `src/main.rs` | 2 KB |\n| `src/lib.rs` | 1 KB |\n";
+        let input =
+            "| File | Size |\n|------|------|\n| `src/main.rs` | 2 KB |\n| `src/lib.rs` | 1 KB |\n";
         let result = convert_tables(input);
         assert!(result.contains("📋 `src/main.rs`"));
         assert!(result.contains("Size: 1 KB"));

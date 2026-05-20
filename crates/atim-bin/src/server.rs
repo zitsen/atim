@@ -7,17 +7,19 @@ use atim_core::agent::OutputSource;
 use atim_core::config::Config;
 use atim_core::error::Result;
 use atim_core::im::ImAdapter;
-use atim_core::message::{Button, ChatId, ImEvent, ImEventKind, MessageId, MessageTarget, ThreadId, WindowId};
-use atim_core::session::{ThreadBinding, WindowState};
+use atim_core::message::{
+    Button, ChatId, ImEvent, ImEventKind, MessageId, MessageTarget, ThreadId, WindowId,
+};
 use atim_core::message::{InteractiveUi, UiKind};
+use atim_core::session::{ThreadBinding, WindowState};
 use atim_monitor::monitor::MonitorEvent;
 use atim_queue::message_queue::MessageQueue;
 use atim_state::persistence::StateManager;
 use atim_tmux::manager::TmuxManager;
 use tokio::sync::Mutex;
 
-use crate::browser::{BrowserMode, DirectoryBrowser};
 use crate::browser;
+use crate::browser::{BrowserMode, DirectoryBrowser};
 
 /// The main application server — routes IM events to tmux and monitor
 /// events back to IM.
@@ -126,7 +128,11 @@ impl Server {
     }
 
     async fn handle_im_event(&self, event: ImEvent) -> Result<()> {
-        tracing::debug!("[Feishu] handle_im_event: user_id={:?} kind={}", event.user_id, event.kind.variant_name());
+        tracing::debug!(
+            "[Feishu] handle_im_event: user_id={:?} kind={}",
+            event.user_id,
+            event.kind.variant_name()
+        );
 
         // Check user authorization
         if !self.config.is_user_allowed(event.user_id.0) {
@@ -135,12 +141,33 @@ impl Server {
         }
 
         match event.kind {
-            ImEventKind::Text { text, is_mention, is_group } => {
-                self.handle_text_message(event.target, event.user_id.0, &text, is_mention, is_group)
-                    .await?;
+            ImEventKind::Text {
+                text,
+                is_mention,
+                is_group,
+            } => {
+                self.handle_text_message(
+                    event.target,
+                    event.user_id.0,
+                    &text,
+                    is_mention,
+                    is_group,
+                )
+                .await?;
             }
-            ImEventKind::CallbackQuery { data, msg_id, callback_query_id } => {
-                self.handle_callback(event.target, event.user_id.0, &data, msg_id, callback_query_id.as_deref()).await?;
+            ImEventKind::CallbackQuery {
+                data,
+                msg_id,
+                callback_query_id,
+            } => {
+                self.handle_callback(
+                    event.target,
+                    event.user_id.0,
+                    &data,
+                    msg_id,
+                    callback_query_id.as_deref(),
+                )
+                .await?;
             }
             ImEventKind::Photo { .. } => {
                 tracing::info!("Photo message (not yet implemented)");
@@ -150,21 +177,38 @@ impl Server {
                     tracing::warn!("Empty voice data, skipping");
                     return Ok(());
                 }
-                let status_msg = self.im_adapter
+                let status_msg = self
+                    .im_adapter
                     .send_message(&event.target, "🎤 Transcribing voice message...")
                     .await;
-                match transcribe_voice(&self.config.openai_api_key, &self.config.openai_base_url, &data).await {
+                match transcribe_voice(
+                    &self.config.openai_api_key,
+                    &self.config.openai_base_url,
+                    &data,
+                )
+                .await
+                {
                     Ok(text) => {
                         if text.is_empty() {
                             if let Ok(ref mid) = status_msg {
-                                let _ = self.im_adapter
-                                    .edit_message(&event.target, mid, "🎤 Transcription returned empty text.")
+                                let _ = self
+                                    .im_adapter
+                                    .edit_message(
+                                        &event.target,
+                                        mid,
+                                        "🎤 Transcription returned empty text.",
+                                    )
                                     .await;
                             }
                         } else {
                             if let Ok(ref mid) = status_msg {
-                                let _ = self.im_adapter
-                                    .edit_message(&event.target, mid, &format!("🎤 *Transcribed:*\n{text}"))
+                                let _ = self
+                                    .im_adapter
+                                    .edit_message(
+                                        &event.target,
+                                        mid,
+                                        &format!("🎤 *Transcribed:*\n{text}"),
+                                    )
                                     .await;
                             }
                         }
@@ -172,8 +216,13 @@ impl Server {
                     Err(e) => {
                         tracing::error!("Voice transcription failed: {e}");
                         if let Ok(ref mid) = status_msg {
-                            let _ = self.im_adapter
-                                .edit_message(&event.target, mid, &format!("🎤 Transcription failed: {e}"))
+                            let _ = self
+                                .im_adapter
+                                .edit_message(
+                                    &event.target,
+                                    mid,
+                                    &format!("🎤 Transcription failed: {e}"),
+                                )
                                 .await;
                         }
                     }
@@ -181,7 +230,13 @@ impl Server {
             }
             ImEventKind::TopicCreated { name } => {
                 let mut names = self.topic_names.lock().await;
-                names.insert((event.target.chat_id.0, event.target.thread_id.map(|t| t.0).unwrap_or(0)), name);
+                names.insert(
+                    (
+                        event.target.chat_id.0,
+                        event.target.thread_id.map(|t| t.0).unwrap_or(0),
+                    ),
+                    name,
+                );
             }
             ImEventKind::TopicClosed => {
                 self.handle_topic_closed(&event.target).await?;
@@ -200,11 +255,16 @@ impl Server {
                 let state = self.state_mgr.load_state().await?;
 
                 // Filter and group messages by session_id
-                let mut by_session: HashMap<String, Vec<&atim_core::message::NewMessage>> = HashMap::new();
+                let mut by_session: HashMap<String, Vec<&atim_core::message::NewMessage>> =
+                    HashMap::new();
                 for msg in &messages {
                     tracing::debug!(
                         "[pipe] NewMessage: session_id={}, role={}, content_type={:?}, complete={}, text_len={}",
-                        msg.session_id.0, msg.role, msg.content_type, msg.is_complete, msg.text.len(),
+                        msg.session_id.0,
+                        msg.role,
+                        msg.content_type,
+                        msg.is_complete,
+                        msg.text.len(),
                     );
 
                     if msg.role != "assistant"
@@ -223,14 +283,19 @@ impl Server {
                     if msg.content_type == atim_core::message::ContentType::Thinking {
                         continue;
                     }
-                    by_session.entry(msg.session_id.0.clone()).or_default().push(msg);
+                    by_session
+                        .entry(msg.session_id.0.clone())
+                        .or_default()
+                        .push(msg);
                 }
 
                 for (_sid, group) in &by_session {
                     // Resolve to window + binding
-                    let window_id = match state.window_states.iter().find(|(_, ws)| {
-                        ws.session_id == *_sid
-                    }) {
+                    let window_id = match state
+                        .window_states
+                        .iter()
+                        .find(|(_, ws)| ws.session_id == *_sid)
+                    {
                         Some((wid, _)) => wid.clone(),
                         None => {
                             tracing::warn!(
@@ -242,9 +307,11 @@ impl Server {
                         }
                     };
 
-                    let binding = match state.thread_bindings.iter().find(|b| {
-                        b.window_id == window_id
-                    }) {
+                    let binding = match state
+                        .thread_bindings
+                        .iter()
+                        .find(|b| b.window_id == window_id)
+                    {
                         Some(b) => b.clone(),
                         None => {
                             tracing::warn!(
@@ -275,14 +342,19 @@ impl Server {
                     // 3. The first text flush edits the status message in-place.
                     // 4. ToolUse / ToolResult break the merge chain.
 
-                    let has_text = group.iter().any(|m| m.content_type == atim_core::message::ContentType::Text);
+                    let has_text = group
+                        .iter()
+                        .any(|m| m.content_type == atim_core::message::ContentType::Text);
                     let status_key = (chat_id, thread_id_val);
 
                     let mut status_msg_id = if has_text {
                         let consumed = self.status_consumed.lock().await;
                         if !consumed.contains(&status_key) {
                             drop(consumed);
-                            self.im_adapter.send_message(&target, "🤖 Claude is working...").await.ok()
+                            self.im_adapter
+                                .send_message(&target, "🤖 Claude is working...")
+                                .await
+                                .ok()
                         } else {
                             drop(consumed);
                             None
@@ -298,12 +370,16 @@ impl Server {
                             if !merged.is_empty() {
                                 if let Some(mid) = status_msg_id.take() {
                                     // First content batch → edit status in-place
-                                    if let Err(e) = self.im_adapter.edit_message(&target, &mid, &merged).await {
+                                    if let Err(e) =
+                                        self.im_adapter.edit_message(&target, &mid, &merged).await
+                                    {
                                         tracing::error!("[pipe] Failed to edit status: {e}");
                                     }
                                     self.status_consumed.lock().await.insert(status_key);
                                 } else {
-                                    if let Err(e) = self.im_adapter.send_message(&target, &merged).await {
+                                    if let Err(e) =
+                                        self.im_adapter.send_message(&target, &merged).await
+                                    {
                                         tracing::error!("[pipe] Failed to send: {e}");
                                     }
                                 }
@@ -327,8 +403,12 @@ impl Server {
                             ContentType::ToolUse => {
                                 flush!();
                                 if let Some(tuid) = &msg.tool_use_id {
-                                    if let Ok(mid) = self.im_adapter.send_message(&target, &msg.text).await {
-                                        self.tool_use_msg_ids.lock().await
+                                    if let Ok(mid) =
+                                        self.im_adapter.send_message(&target, &msg.text).await
+                                    {
+                                        self.tool_use_msg_ids
+                                            .lock()
+                                            .await
                                             .insert((chat_id, thread_id_val, tuid.clone()), mid);
                                     }
                                 }
@@ -337,10 +417,16 @@ impl Server {
                                 flush!();
                                 if let Some(tuid) = &msg.tool_use_id {
                                     let mut map = self.tool_use_msg_ids.lock().await;
-                                    if let Some(mid) = map.remove(&(chat_id, thread_id_val, tuid.clone())) {
-                                        let _ = self.im_adapter.edit_message(&target, &mid, &msg.text).await;
+                                    if let Some(mid) =
+                                        map.remove(&(chat_id, thread_id_val, tuid.clone()))
+                                    {
+                                        let _ = self
+                                            .im_adapter
+                                            .edit_message(&target, &mid, &msg.text)
+                                            .await;
                                     } else {
-                                        let _ = self.im_adapter.send_message(&target, &msg.text).await;
+                                        let _ =
+                                            self.im_adapter.send_message(&target, &msg.text).await;
                                     }
                                 } else {
                                     let _ = self.im_adapter.send_message(&target, &msg.text).await;
@@ -380,7 +466,9 @@ impl Server {
                         if ws.session_id.is_empty() {
                             ws.session_id = session_id.clone();
                             synced += 1;
-                            tracing::info!("[pipe] Assigned session {session_id} to window {window_id}");
+                            tracing::info!(
+                                "[pipe] Assigned session {session_id} to window {window_id}"
+                            );
                         } else if ws.session_id != *session_id {
                             tracing::debug!(
                                 "[pipe] Window {window_id} has session {} but map says {session_id} — updating",
@@ -416,8 +504,7 @@ impl Server {
         // Check for screenshot command
         if text.trim() == "/ss" || text.trim() == "/screenshot" || text.trim() == "!ss" {
             if let Some(binding) = state.thread_bindings.iter().find(|b| {
-                b.user_id == user_id
-                    && b.thread_id == target.thread_id.map(|t| t.0).unwrap_or(0)
+                b.user_id == user_id && b.thread_id == target.thread_id.map(|t| t.0).unwrap_or(0)
             }) {
                 let window_id = atim_core::message::WindowId(binding.window_id.clone());
                 if self.tmux_mgr.window_exists(&window_id).await {
@@ -425,9 +512,11 @@ impl Server {
                     match self.tmux_mgr.screenshot(&window_id).await {
                         Ok(png_data) => {
                             tracing::info!("Screenshot generated: {} bytes", png_data.len());
-                            if let Err(e) = self.im_adapter.send_photo(
-                                &target, "terminal.png", &png_data,
-                            ).await {
+                            if let Err(e) = self
+                                .im_adapter
+                                .send_photo(&target, "terminal.png", &png_data)
+                                .await
+                            {
                                 tracing::error!("Failed to send screenshot: {e}");
                             }
                         }
@@ -437,10 +526,16 @@ impl Server {
                         }
                     }
                 } else {
-                    let _ = self.im_adapter.send_message(&target, "Window no longer exists.").await;
+                    let _ = self
+                        .im_adapter
+                        .send_message(&target, "Window no longer exists.")
+                        .await;
                 }
             } else {
-                let _ = self.im_adapter.send_message(&target, "No active session to capture.").await;
+                let _ = self
+                    .im_adapter
+                    .send_message(&target, "No active session to capture.")
+                    .await;
             }
             return Ok(());
         }
@@ -448,17 +543,22 @@ impl Server {
         // Check for /usage command
         if text.trim() == "/usage" {
             if let Some(binding) = state.thread_bindings.iter().find(|b| {
-                b.user_id == user_id
-                    && b.thread_id == target.thread_id.map(|t| t.0).unwrap_or(0)
+                b.user_id == user_id && b.thread_id == target.thread_id.map(|t| t.0).unwrap_or(0)
             }) {
                 let window_id = atim_core::message::WindowId(binding.window_id.clone());
                 if !self.tmux_mgr.window_exists(&window_id).await {
-                    let _ = self.im_adapter.send_message(&target, "Window no longer exists.").await;
+                    let _ = self
+                        .im_adapter
+                        .send_message(&target, "Window no longer exists.")
+                        .await;
                     return Ok(());
                 }
 
                 let _ = self.im_adapter.send_chat_action(&target).await;
-                let _ = self.im_adapter.send_message(&target, "Fetching usage info...").await;
+                let _ = self
+                    .im_adapter
+                    .send_message(&target, "Fetching usage info...")
+                    .await;
 
                 // Send /usage to the agent
                 self.tmux_mgr.send_line(&window_id, "/usage").await?;
@@ -480,21 +580,36 @@ impl Server {
                 // Dismiss the modal
                 let _ = self.tmux_mgr.send_key(&window_id, "q").await;
             } else {
-                let _ = self.im_adapter.send_message(&target, "No active session.").await;
+                let _ = self
+                    .im_adapter
+                    .send_message(&target, "No active session.")
+                    .await;
             }
             return Ok(());
         }
 
         // Handle /switch <agent> — switch the active agent at runtime
         if text.trim() == "/switch" || text.trim().starts_with("/switch ") {
-            let agent_name: Option<String> = text.trim().strip_prefix("/switch ").map(|s| s.trim().to_lowercase());
+            let agent_name: Option<String> = text
+                .trim()
+                .strip_prefix("/switch ")
+                .map(|s| s.trim().to_lowercase());
             let agent_name = match agent_name {
                 Some(ref n) if !n.is_empty() => n.clone(),
                 _ => {
-                    let available: Vec<&str> = self.config.agent_registry.iter().map(|a| a.name()).collect();
-                    let _ = self.im_adapter.send_message(&target,
-                        &format!("Available agents: {}", available.join(", "))
-                    ).await;
+                    let available: Vec<&str> = self
+                        .config
+                        .agent_registry
+                        .iter()
+                        .map(|a| a.name())
+                        .collect();
+                    let _ = self
+                        .im_adapter
+                        .send_message(
+                            &target,
+                            &format!("Available agents: {}", available.join(", ")),
+                        )
+                        .await;
                     return Ok(());
                 }
             };
@@ -502,21 +617,35 @@ impl Server {
             let agent = match self.config.agent_registry.get(&agent_name) {
                 Some(a) => a.clone(),
                 None => {
-                    let available: Vec<&str> = self.config.agent_registry.iter().map(|a| a.name()).collect();
-                    let _ = self.im_adapter.send_message(&target,
-                        &format!("Unknown agent '{agent_name}'. Available: {}", available.join(", "))
-                    ).await;
+                    let available: Vec<&str> = self
+                        .config
+                        .agent_registry
+                        .iter()
+                        .map(|a| a.name())
+                        .collect();
+                    let _ = self
+                        .im_adapter
+                        .send_message(
+                            &target,
+                            &format!(
+                                "Unknown agent '{agent_name}'. Available: {}",
+                                available.join(", ")
+                            ),
+                        )
+                        .await;
                     return Ok(());
                 }
             };
 
             if let Some(binding) = state.thread_bindings.iter().find(|b| {
-                b.user_id == user_id
-                    && b.thread_id == target.thread_id.map(|t| t.0).unwrap_or(0)
+                b.user_id == user_id && b.thread_id == target.thread_id.map(|t| t.0).unwrap_or(0)
             }) {
                 let window_id = WindowId(binding.window_id.clone());
                 if !self.tmux_mgr.window_exists(&window_id).await {
-                    let _ = self.im_adapter.send_message(&target, "Window no longer exists.").await;
+                    let _ = self
+                        .im_adapter
+                        .send_message(&target, "Window no longer exists.")
+                        .await;
                     return Ok(());
                 }
 
@@ -536,7 +665,10 @@ impl Server {
                     }
                 }
                 if !stopped {
-                    tracing::warn!("/switch: agent in window {} did not stop within 5s, proceeding anyway", window_id.0);
+                    tracing::warn!(
+                        "/switch: agent in window {} did not stop within 5s, proceeding anyway",
+                        window_id.0
+                    );
                 }
 
                 // Launch new agent
@@ -555,7 +687,10 @@ impl Server {
                     }
                 }
                 if !started {
-                    tracing::warn!("/switch: new agent in window {} did not start within 5s", window_id.0);
+                    tracing::warn!(
+                        "/switch: new agent in window {} did not start within 5s",
+                        window_id.0
+                    );
                 }
 
                 // Update window state
@@ -574,11 +709,15 @@ impl Server {
                     }
                 }
 
-                let _ = self.im_adapter.send_message(&target,
-                    &format!("Switched to **{}**.", agent.name())
-                ).await;
+                let _ = self
+                    .im_adapter
+                    .send_message(&target, &format!("Switched to **{}**.", agent.name()))
+                    .await;
             } else {
-                let _ = self.im_adapter.send_message(&target, "No active session to switch.").await;
+                let _ = self
+                    .im_adapter
+                    .send_message(&target, "No active session to switch.")
+                    .await;
             }
             return Ok(());
         }
@@ -586,19 +725,27 @@ impl Server {
         // Check for /esc (send Escape key to dismiss modals/help screens)
         if text.trim() == "/esc" || text.trim() == "/dismiss" {
             if let Some(binding) = state.thread_bindings.iter().find(|b| {
-                b.user_id == user_id
-                    && b.thread_id == target.thread_id.map(|t| t.0).unwrap_or(0)
+                b.user_id == user_id && b.thread_id == target.thread_id.map(|t| t.0).unwrap_or(0)
             }) {
                 let window_id = atim_core::message::WindowId(binding.window_id.clone());
                 if !self.tmux_mgr.window_exists(&window_id).await {
-                    let _ = self.im_adapter.send_message(&target, "Window no longer exists.").await;
+                    let _ = self
+                        .im_adapter
+                        .send_message(&target, "Window no longer exists.")
+                        .await;
                     return Ok(());
                 }
                 let _ = self.im_adapter.send_chat_action(&target).await;
                 self.tmux_mgr.send_key(&window_id, "Escape").await?;
-                let _ = self.im_adapter.send_message(&target, "Sent Escape key.").await;
+                let _ = self
+                    .im_adapter
+                    .send_message(&target, "Sent Escape key.")
+                    .await;
             } else {
-                let _ = self.im_adapter.send_message(&target, "No active session.").await;
+                let _ = self
+                    .im_adapter
+                    .send_message(&target, "No active session.")
+                    .await;
             }
             return Ok(());
         }
@@ -613,7 +760,10 @@ impl Server {
                 }) {
                     let window_id = atim_core::message::WindowId(binding.window_id.clone());
                     if !self.tmux_mgr.window_exists(&window_id).await {
-                        let _ = self.im_adapter.send_message(&target, "Window no longer exists.").await;
+                        let _ = self
+                            .im_adapter
+                            .send_message(&target, "Window no longer exists.")
+                            .await;
                         return Ok(());
                     }
                     let _ = self.im_adapter.send_chat_action(&target).await;
@@ -633,7 +783,10 @@ impl Server {
                         }
                     });
                 } else {
-                    let _ = self.im_adapter.send_message(&target, "No active session.").await;
+                    let _ = self
+                        .im_adapter
+                        .send_message(&target, "No active session.")
+                        .await;
                 }
             }
             return Ok(());
@@ -649,7 +802,9 @@ impl Server {
                             if matched_path.is_dir() {
                                 self.browser.navigate_to(user_id, &matched_path).await;
                                 let thread_id = target.thread_id.map(|t| t.0).unwrap_or(0);
-                                let _ = self.send_browser_keyboard(&target, user_id, thread_id).await;
+                                let _ = self
+                                    .send_browser_keyboard(&target, user_id, thread_id)
+                                    .await;
                                 return Ok(());
                             }
                         }
@@ -666,10 +821,12 @@ impl Server {
 
         // Find binding for this user+thread
         if let Some(binding) = state.thread_bindings.iter().find(|b| {
-            b.user_id == user_id
-                && b.thread_id == target.thread_id.map(|t| t.0).unwrap_or(0)
+            b.user_id == user_id && b.thread_id == target.thread_id.map(|t| t.0).unwrap_or(0)
         }) {
-            tracing::debug!("[Feishu] Found binding for user {user_id}: window={}", binding.window_id);
+            tracing::debug!(
+                "[Feishu] Found binding for user {user_id}: window={}",
+                binding.window_id
+            );
             // Forward to existing window
             let window_id = atim_core::message::WindowId(binding.window_id.clone());
 
@@ -677,9 +834,15 @@ impl Server {
             match self.tmux_mgr.find_window(&window_id).await {
                 Err(_) => {
                     // Window died — clear binding and notify user
-                    tracing::warn!("Window {} died, clearing binding for user {}", binding.window_id, user_id);
+                    tracing::warn!(
+                        "Window {} died, clearing binding for user {}",
+                        binding.window_id,
+                        user_id
+                    );
                     let mut new_state = state.clone();
-                    new_state.thread_bindings.retain(|b| b.window_id != window_id.0);
+                    new_state
+                        .thread_bindings
+                        .retain(|b| b.window_id != window_id.0);
                     self.state_mgr.save_state(&new_state).await?;
                     let _ = self.im_adapter.send_message(&target,
                         "Session window no longer exists. Please send your message again to start a new session."
@@ -694,7 +857,10 @@ impl Server {
                             if !is_shell_process(&info2.current_command) {
                                 self.tmux_mgr.send_line(&window_id, text).await?;
                                 let sc_chat_id = binding.group_chat_id.unwrap_or(binding.chat_id);
-                                self.status_consumed.lock().await.remove(&(sc_chat_id, binding.thread_id));
+                                self.status_consumed
+                                    .lock()
+                                    .await
+                                    .remove(&(sc_chat_id, binding.thread_id));
                                 return Ok(());
                             }
                         } else {
@@ -703,11 +869,15 @@ impl Server {
                     }
                     tracing::warn!(
                         "Window {} has shell '{}' running instead of '{}', clearing binding",
-                        binding.window_id, info.current_command, agent_launch_cmd(self.config.agent_registry.default())
+                        binding.window_id,
+                        info.current_command,
+                        agent_launch_cmd(self.config.agent_registry.default())
                     );
                     let _ = self.tmux_mgr.kill_window(&window_id).await;
                     let mut new_state = state.clone();
-                    new_state.thread_bindings.retain(|b| b.window_id != window_id.0);
+                    new_state
+                        .thread_bindings
+                        .retain(|b| b.window_id != window_id.0);
                     new_state.window_states.remove(&binding.window_id);
                     self.state_mgr.save_state(&new_state).await?;
                     let _ = self.im_adapter.send_message(&target,
@@ -719,21 +889,32 @@ impl Server {
                     // Agent is running — send text
                     self.tmux_mgr.send_line(&window_id, text).await?;
                     let sc_chat_id = binding.group_chat_id.unwrap_or(binding.chat_id);
-                    self.status_consumed.lock().await.remove(&(sc_chat_id, binding.thread_id));
+                    self.status_consumed
+                        .lock()
+                        .await
+                        .remove(&(sc_chat_id, binding.thread_id));
                     return Ok(());
                 }
             }
         } else {
             // In group chat without @-mention and no active binding, silently ignore
             if is_group && !is_mention {
-                tracing::debug!("Ignoring group message from user {user_id} (no binding, no @-mention)");
+                tracing::debug!(
+                    "Ignoring group message from user {user_id} (no binding, no @-mention)"
+                );
                 return Ok(());
             }
 
-            tracing::debug!("[Feishu] No binding for user {user_id}, showing picker (is_mention={is_mention}, is_group={is_group})");
+            tracing::debug!(
+                "[Feishu] No binding for user {user_id}, showing picker (is_mention={is_mention}, is_group={is_group})"
+            );
 
             // No binding — save pending text, then show picker or browser
-            let key = (user_id, target.chat_id.0, target.thread_id.map(|t| t.0).unwrap_or(0));
+            let key = (
+                user_id,
+                target.chat_id.0,
+                target.thread_id.map(|t| t.0).unwrap_or(0),
+            );
             {
                 let mut pending = self.pending_messages.lock().await;
                 pending.insert(key, text.to_string());
@@ -741,18 +922,27 @@ impl Server {
 
             let unbound = self.unbound_windows(&state).await;
             if !unbound.is_empty() {
-                self.show_window_picker(&target, user_id, &unbound,
-                    target.thread_id.map(|t| t.0).unwrap_or(0)).await?;
+                self.show_window_picker(
+                    &target,
+                    user_id,
+                    &unbound,
+                    target.thread_id.map(|t| t.0).unwrap_or(0),
+                )
+                .await?;
             } else {
-                let topic_name = self.topic_names.lock().await.remove(
-                    &(target.chat_id.0, target.thread_id.map(|t| t.0).unwrap_or(0))
-                );
+                let topic_name = self
+                    .topic_names
+                    .lock()
+                    .await
+                    .remove(&(target.chat_id.0, target.thread_id.map(|t| t.0).unwrap_or(0)));
                 drop(topic_name); // saved in topic_names for later use
 
                 self.show_directory_browser(
-                    &target, user_id,
+                    &target,
+                    user_id,
                     target.thread_id.map(|t| t.0).unwrap_or(0),
-                ).await?;
+                )
+                .await?;
             }
         }
 
@@ -766,8 +956,7 @@ impl Server {
         user_id: i64,
         thread_id: i64,
     ) -> Result<()> {
-        let start_path = std::env::current_dir()
-            .unwrap_or_else(|_| Path::new("/").to_path_buf());
+        let start_path = std::env::current_dir().unwrap_or_else(|_| Path::new("/").to_path_buf());
 
         self.browser.start_browsing(user_id, &start_path).await;
         let _ = self.send_browser_keyboard(target, user_id, thread_id).await;
@@ -775,8 +964,12 @@ impl Server {
     }
 
     /// Compute unbound tmux windows (exist in tmux but not in any binding).
-    async fn unbound_windows(&self, state: &atim_core::session::ServerState) -> Vec<browser::WindowEntry> {
-        let bound_ids: HashSet<String> = state.thread_bindings
+    async fn unbound_windows(
+        &self,
+        state: &atim_core::session::ServerState,
+    ) -> Vec<browser::WindowEntry> {
+        let bound_ids: HashSet<String> = state
+            .thread_bindings
             .iter()
             .map(|b| b.window_id.clone())
             .collect();
@@ -786,7 +979,9 @@ impl Server {
                 .into_iter()
                 .filter(|w| !bound_ids.contains(&w.window_id.0))
                 .map(|w| {
-                    let agent_type = state.window_states.get(&w.window_id.0)
+                    let agent_type = state
+                        .window_states
+                        .get(&w.window_id.0)
                         .map(|ws| ws.agent_type.as_str())
                         .unwrap_or("");
                     browser::WindowEntry {
@@ -809,11 +1004,12 @@ impl Server {
         unbound: &[browser::WindowEntry],
         thread_id: i64,
     ) -> Result<()> {
-        let start_path = std::env::current_dir()
-            .unwrap_or_else(|_| Path::new("/").to_path_buf());
+        let start_path = std::env::current_dir().unwrap_or_else(|_| Path::new("/").to_path_buf());
 
         self.browser.start_browsing(user_id, &start_path).await;
-        self.browser.show_window_picker(user_id, unbound.to_vec()).await;
+        self.browser
+            .show_window_picker(user_id, unbound.to_vec())
+            .await;
         let _ = self.send_browser_keyboard(target, user_id, thread_id).await;
         Ok(())
     }
@@ -843,7 +1039,12 @@ impl Server {
                 // Entry rows
                 for (i, entry) in listing.entries.iter().enumerate() {
                     let display = format!("📁 {}", entry.name);
-                    let token = Self::make_callback_token(&mut ctx_lock, user_id, target.chat_id.0, thread_id);
+                    let token = Self::make_callback_token(
+                        &mut ctx_lock,
+                        user_id,
+                        target.chat_id.0,
+                        thread_id,
+                    );
                     buttons.push(vec![Button {
                         text: display,
                         callback_data: format!("cb:{token}:browse:dir:{i}"),
@@ -852,25 +1053,49 @@ impl Server {
 
                 // Navigation row
                 let mut nav_row = Vec::new();
-                let cancel_token = Self::make_callback_token(&mut ctx_lock, user_id, target.chat_id.0, thread_id);
-                nav_row.push(Button { text: "❌ Cancel".into(), callback_data: format!("cb:{cancel_token}:browse:cancel") });
+                let cancel_token =
+                    Self::make_callback_token(&mut ctx_lock, user_id, target.chat_id.0, thread_id);
+                nav_row.push(Button {
+                    text: "❌ Cancel".into(),
+                    callback_data: format!("cb:{cancel_token}:browse:cancel"),
+                });
 
                 if listing.total_pages > 1 {
-                    let page_token = Self::make_callback_token(&mut ctx_lock, user_id, target.chat_id.0, thread_id);
+                    let page_token = Self::make_callback_token(
+                        &mut ctx_lock,
+                        user_id,
+                        target.chat_id.0,
+                        thread_id,
+                    );
                     nav_row.push(Button {
                         text: format!("◀ {}/{} ▶", listing.page + 1, listing.total_pages),
                         callback_data: format!("cb:{page_token}:browse:page"),
                     });
                 }
                 if listing.has_parent {
-                    let up_token = Self::make_callback_token(&mut ctx_lock, user_id, target.chat_id.0, thread_id);
-                    nav_row.push(Button { text: "⬆ Up".into(), callback_data: format!("cb:{up_token}:browse:up") });
+                    let up_token = Self::make_callback_token(
+                        &mut ctx_lock,
+                        user_id,
+                        target.chat_id.0,
+                        thread_id,
+                    );
+                    nav_row.push(Button {
+                        text: "⬆ Up".into(),
+                        callback_data: format!("cb:{up_token}:browse:up"),
+                    });
                 }
-                let sel_token = Self::make_callback_token(&mut ctx_lock, user_id, target.chat_id.0, thread_id);
-                nav_row.push(Button { text: "✅ Select".into(), callback_data: format!("cb:{sel_token}:browse:confirm") });
+                let sel_token =
+                    Self::make_callback_token(&mut ctx_lock, user_id, target.chat_id.0, thread_id);
+                nav_row.push(Button {
+                    text: "✅ Select".into(),
+                    callback_data: format!("cb:{sel_token}:browse:confirm"),
+                });
                 buttons.push(nav_row);
 
-                let text = format!("📁 Select a project directory:\n{}", listing.current_path.display());
+                let text = format!(
+                    "📁 Select a project directory:\n{}",
+                    listing.current_path.display()
+                );
                 (text, buttons)
             }
             BrowserMode::SessionPick { sessions: _ } => {
@@ -884,7 +1109,9 @@ impl Server {
                         &session.timestamp
                     };
                     let summary = if session.summary.len() > 40 {
-                        let end = session.summary.char_indices()
+                        let end = session
+                            .summary
+                            .char_indices()
                             .nth(37)
                             .map(|(i, _)| i)
                             .unwrap_or(session.summary.len());
@@ -894,33 +1121,61 @@ impl Server {
                     } else {
                         session.summary.clone()
                     };
-                    let token = Self::make_callback_token(&mut ctx_lock, user_id, target.chat_id.0, thread_id);
+                    let token = Self::make_callback_token(
+                        &mut ctx_lock,
+                        user_id,
+                        target.chat_id.0,
+                        thread_id,
+                    );
                     buttons.push(vec![Button {
-                        text: format!("🔄 {} {} | {}", timestamp_short, session.project_slug, summary),
+                        text: format!(
+                            "🔄 {} {} | {}",
+                            timestamp_short, session.project_slug, summary
+                        ),
                         callback_data: format!("cb:{token}:browse:sel:{i}"),
                     }]);
                 }
 
                 // Navigation row
                 let mut nav_row = Vec::new();
-                let cancel_token = Self::make_callback_token(&mut ctx_lock, user_id, target.chat_id.0, thread_id);
-                nav_row.push(Button { text: "❌ Cancel".into(), callback_data: format!("cb:{cancel_token}:browse:cancel") });
+                let cancel_token =
+                    Self::make_callback_token(&mut ctx_lock, user_id, target.chat_id.0, thread_id);
+                nav_row.push(Button {
+                    text: "❌ Cancel".into(),
+                    callback_data: format!("cb:{cancel_token}:browse:cancel"),
+                });
 
-                let back_token = Self::make_callback_token(&mut ctx_lock, user_id, target.chat_id.0, thread_id);
-                nav_row.push(Button { text: "📁 Browse".into(), callback_data: format!("cb:{back_token}:browse:back") });
+                let back_token =
+                    Self::make_callback_token(&mut ctx_lock, user_id, target.chat_id.0, thread_id);
+                nav_row.push(Button {
+                    text: "📁 Browse".into(),
+                    callback_data: format!("cb:{back_token}:browse:back"),
+                });
 
                 if page.total_pages > 1 {
-                    let page_token = Self::make_callback_token(&mut ctx_lock, user_id, target.chat_id.0, thread_id);
+                    let page_token = Self::make_callback_token(
+                        &mut ctx_lock,
+                        user_id,
+                        target.chat_id.0,
+                        thread_id,
+                    );
                     nav_row.push(Button {
                         text: format!("◀ {}/{} ▶", page.page + 1, page.total_pages),
                         callback_data: format!("cb:{page_token}:browse:page"),
                     });
                 }
-                let new_token = Self::make_callback_token(&mut ctx_lock, user_id, target.chat_id.0, thread_id);
-                nav_row.push(Button { text: "🆕 New".into(), callback_data: format!("cb:{new_token}:browse:new") });
+                let new_token =
+                    Self::make_callback_token(&mut ctx_lock, user_id, target.chat_id.0, thread_id);
+                nav_row.push(Button {
+                    text: "🆕 New".into(),
+                    callback_data: format!("cb:{new_token}:browse:new"),
+                });
                 buttons.push(nav_row);
 
-                let text = format!("🔄 Select a session to resume (or choose New):\n{}", state.current_path.display());
+                let text = format!(
+                    "🔄 Select a session to resume (or choose New):\n{}",
+                    state.current_path.display()
+                );
                 (text, buttons)
             }
             BrowserMode::WindowPick { windows: _ } => {
@@ -934,7 +1189,12 @@ impl Server {
                         &win.agent_type
                     };
                     let label = format!("💬 {} [{}]", win.name, agent);
-                    let token = Self::make_callback_token(&mut ctx_lock, user_id, target.chat_id.0, thread_id);
+                    let token = Self::make_callback_token(
+                        &mut ctx_lock,
+                        user_id,
+                        target.chat_id.0,
+                        thread_id,
+                    );
                     buttons.push(vec![Button {
                         text: label,
                         callback_data: format!("cb:{token}:browse:win:{i}"),
@@ -943,14 +1203,27 @@ impl Server {
 
                 // Navigation row
                 let mut nav_row = Vec::new();
-                let cancel_token = Self::make_callback_token(&mut ctx_lock, user_id, target.chat_id.0, thread_id);
-                nav_row.push(Button { text: "❌ Cancel".into(), callback_data: format!("cb:{cancel_token}:browse:cancel") });
+                let cancel_token =
+                    Self::make_callback_token(&mut ctx_lock, user_id, target.chat_id.0, thread_id);
+                nav_row.push(Button {
+                    text: "❌ Cancel".into(),
+                    callback_data: format!("cb:{cancel_token}:browse:cancel"),
+                });
 
-                let new_token = Self::make_callback_token(&mut ctx_lock, user_id, target.chat_id.0, thread_id);
-                nav_row.push(Button { text: "🆕 New Session".into(), callback_data: format!("cb:{new_token}:browse:new_win") });
+                let new_token =
+                    Self::make_callback_token(&mut ctx_lock, user_id, target.chat_id.0, thread_id);
+                nav_row.push(Button {
+                    text: "🆕 New Session".into(),
+                    callback_data: format!("cb:{new_token}:browse:new_win"),
+                });
 
                 if page.total_pages > 1 {
-                    let page_token = Self::make_callback_token(&mut ctx_lock, user_id, target.chat_id.0, thread_id);
+                    let page_token = Self::make_callback_token(
+                        &mut ctx_lock,
+                        user_id,
+                        target.chat_id.0,
+                        thread_id,
+                    );
                     nav_row.push(Button {
                         text: format!("◀ {}/{} ▶", page.page + 1, page.total_pages),
                         callback_data: format!("cb:{page_token}:browse:page"),
@@ -989,7 +1262,10 @@ impl Server {
         match action {
             "cancel" => {
                 self.browser.end_session(user_id).await;
-                let _ = self.im_adapter.edit_message(target, msg_id, "Cancelled.").await;
+                let _ = self
+                    .im_adapter
+                    .edit_message(target, msg_id, "Cancelled.")
+                    .await;
             }
             "up" => {
                 self.browser.go_up(user_id).await;
@@ -1008,13 +1284,25 @@ impl Server {
                 let sessions = browser::scan_claude_sessions(&state.current_path);
                 if sessions.is_empty() {
                     // No existing sessions — create new directly
-                    let topic_name = self.topic_names.lock().await.remove(
-                        &(target.chat_id.0, thread_id)
-                    );
+                    let topic_name = self
+                        .topic_names
+                        .lock()
+                        .await
+                        .remove(&(target.chat_id.0, thread_id));
                     self.browser.end_session(user_id).await;
                     // Override cwd for the new window
-                    let _ = self.im_adapter.edit_message(target, msg_id, "Creating new session...").await;
-                    self.create_and_bind_in_dir(&target, user_id, text, &state.current_path, topic_name.as_deref()).await?;
+                    let _ = self
+                        .im_adapter
+                        .edit_message(target, msg_id, "Creating new session...")
+                        .await;
+                    self.create_and_bind_in_dir(
+                        &target,
+                        user_id,
+                        text,
+                        &state.current_path,
+                        topic_name.as_deref(),
+                    )
+                    .await?;
                 } else {
                     self.browser.show_session_picker(user_id, sessions).await;
                     let _ = self.send_browser_keyboard(target, user_id, thread_id).await;
@@ -1028,12 +1316,24 @@ impl Server {
             }
             "new" => {
                 // Create a new session in the selected directory
-                let topic_name = self.topic_names.lock().await.remove(
-                    &(target.chat_id.0, thread_id)
-                );
+                let topic_name = self
+                    .topic_names
+                    .lock()
+                    .await
+                    .remove(&(target.chat_id.0, thread_id));
                 self.browser.end_session(user_id).await;
-                let _ = self.im_adapter.edit_message(target, msg_id, "Creating new session...").await;
-                self.create_and_bind_in_dir(&target, user_id, text, &state.current_path, topic_name.as_deref()).await?;
+                let _ = self
+                    .im_adapter
+                    .edit_message(target, msg_id, "Creating new session...")
+                    .await;
+                self.create_and_bind_in_dir(
+                    &target,
+                    user_id,
+                    text,
+                    &state.current_path,
+                    topic_name.as_deref(),
+                )
+                .await?;
             }
             d if d.starts_with("dir:") => {
                 // Navigate to a directory by index
@@ -1051,17 +1351,29 @@ impl Server {
                 // Select a session from the picker by index
                 let idx: usize = s[4..].parse().unwrap_or(0);
                 let state_now = self.browser.get_state(user_id).await;
-                if let Some(BrowserMode::SessionPick { sessions }) = state_now.as_ref().map(|s| &s.mode) {
+                if let Some(BrowserMode::SessionPick { sessions }) =
+                    state_now.as_ref().map(|s| &s.mode)
+                {
                     if let Some(session) = sessions.get(idx) {
-                        let topic_name = self.topic_names.lock().await.remove(
-                            &(target.chat_id.0, thread_id)
-                        );
+                        let topic_name = self
+                            .topic_names
+                            .lock()
+                            .await
+                            .remove(&(target.chat_id.0, thread_id));
                         self.browser.end_session(user_id).await;
-                        let _ = self.im_adapter.edit_message(target, msg_id, "Resuming session...").await;
+                        let _ = self
+                            .im_adapter
+                            .edit_message(target, msg_id, "Resuming session...")
+                            .await;
                         self.create_and_bind_with_resume(
-                            &target, user_id, text, &state.current_path,
-                            &session.id, topic_name.as_deref(),
-                        ).await?;
+                            &target,
+                            user_id,
+                            text,
+                            &state.current_path,
+                            &session.id,
+                            topic_name.as_deref(),
+                        )
+                        .await?;
                     }
                 }
             }
@@ -1075,14 +1387,28 @@ impl Server {
                 // User selected an unbound tmux window to attach
                 let idx: usize = w[4..].parse().unwrap_or(0);
                 let state_now = self.browser.get_state(user_id).await;
-                if let Some(BrowserMode::WindowPick { windows }) = state_now.as_ref().map(|s| &s.mode) {
+                if let Some(BrowserMode::WindowPick { windows }) =
+                    state_now.as_ref().map(|s| &s.mode)
+                {
                     if let Some(entry) = windows.get(idx) {
                         self.browser.end_session(user_id).await;
-                        let _ = self.im_adapter.edit_message(target, msg_id, "Attaching to existing window...").await;
-                        let topic_name = self.topic_names.lock().await.remove(
-                            &(target.chat_id.0, thread_id)
-                        );
-                        self.bind_window(&target, user_id, text, &entry.window_id, topic_name.as_deref()).await?;
+                        let _ = self
+                            .im_adapter
+                            .edit_message(target, msg_id, "Attaching to existing window...")
+                            .await;
+                        let topic_name = self
+                            .topic_names
+                            .lock()
+                            .await
+                            .remove(&(target.chat_id.0, thread_id));
+                        self.bind_window(
+                            &target,
+                            user_id,
+                            text,
+                            &entry.window_id,
+                            topic_name.as_deref(),
+                        )
+                        .await?;
                     }
                 }
             }
@@ -1106,7 +1432,11 @@ impl Server {
         cwd_hint: Option<&str>,
     ) -> Option<String> {
         // Determine the agent for this window to dispatch session discovery.
-        let agent = self.state_mgr.load_state().await.ok()
+        let agent = self
+            .state_mgr
+            .load_state()
+            .await
+            .ok()
             .and_then(|s| s.window_states.get(window_id).cloned())
             .and_then(|ws| {
                 if ws.agent_type == "claude" {
@@ -1129,7 +1459,9 @@ impl Server {
             if let Ok(map) = self.state_mgr.load_session_map().await {
                 if let Some(sid) = map.get(window_id) {
                     if !sid.is_empty() {
-                        tracing::info!("Found session {sid} for window {window_id} via session_map");
+                        tracing::info!(
+                            "Found session {sid} for window {window_id} via session_map"
+                        );
                         return Some(sid.clone());
                     }
                 }
@@ -1153,7 +1485,8 @@ impl Server {
                 "PID discovery failed for window {window_id}, trying path-based discovery with cwd={cwd}"
             );
             let state = self.state_mgr.load_state().await.ok()?;
-            let mut known_ids: std::collections::HashSet<String> = state.window_states
+            let mut known_ids: std::collections::HashSet<String> = state
+                .window_states
                 .values()
                 .map(|ws| ws.session_id.clone())
                 .filter(|sid| !sid.is_empty())
@@ -1184,7 +1517,10 @@ impl Server {
     ) -> Result<()> {
         let name = format!("atim-{user_id}");
         let window_name = topic_name.unwrap_or(&name);
-        let window_id = self.tmux_mgr.new_window(window_name, &cwd.to_string_lossy()).await?;
+        let window_id = self
+            .tmux_mgr
+            .new_window(window_name, &cwd.to_string_lossy())
+            .await?;
 
         let launch_cmd = agent_launch_cmd(self.config.agent_registry.default());
         self.tmux_mgr.send_line(&window_id, &launch_cmd).await?;
@@ -1200,7 +1536,13 @@ impl Server {
         }
 
         // Notify user the session is ready
-        let _ = self.im_adapter.send_message(target, "✅ Session ready! Send your message to start chatting.").await;
+        let _ = self
+            .im_adapter
+            .send_message(
+                target,
+                "✅ Session ready! Send your message to start chatting.",
+            )
+            .await;
 
         let mut state = self.state_mgr.load_state().await?;
         state.thread_bindings.push(ThreadBinding {
@@ -1227,7 +1569,14 @@ impl Server {
         // This is best-effort: if it fails, the SessionMapChanged handler
         // in the monitor loop will discover it later (after a restart or hook re-run).
         let wid = window_id.0.clone();
-        if let Some(sid) = self.resolve_session_id(&wid, Duration::from_secs(15), Some(cwd.to_str().unwrap_or_default())).await {
+        if let Some(sid) = self
+            .resolve_session_id(
+                &wid,
+                Duration::from_secs(15),
+                Some(cwd.to_str().unwrap_or_default()),
+            )
+            .await
+        {
             let mut state = self.state_mgr.load_state().await?;
             if let Some(ws) = state.window_states.get_mut(&wid) {
                 ws.session_id = sid;
@@ -1250,7 +1599,10 @@ impl Server {
     ) -> Result<()> {
         let name = format!("atim-{user_id}");
         let window_name = topic_name.unwrap_or(&name);
-        let window_id = self.tmux_mgr.new_window(window_name, &cwd.to_string_lossy()).await?;
+        let window_id = self
+            .tmux_mgr
+            .new_window(window_name, &cwd.to_string_lossy())
+            .await?;
 
         // Launch agent with resume command
         let agent = self.config.agent_registry.default();
@@ -1258,14 +1610,23 @@ impl Server {
             Some(cmd) => cmd,
             None => {
                 tracing::error!("Agent '{}' does not support session resume", agent.name());
-                let _ = self.im_adapter.send_message(target, "This agent does not support resuming sessions.").await;
+                let _ = self
+                    .im_adapter
+                    .send_message(target, "This agent does not support resuming sessions.")
+                    .await;
                 return Ok(());
             }
         };
         self.tmux_mgr.send_line(&window_id, &resume_cmd).await?;
 
         // Notify user the session is ready instead of sending the first line to Claude
-        let _ = self.im_adapter.send_message(target, "✅ Session ready! Send your message to start chatting.").await;
+        let _ = self
+            .im_adapter
+            .send_message(
+                target,
+                "✅ Session ready! Send your message to start chatting.",
+            )
+            .await;
 
         let mut state = self.state_mgr.load_state().await?;
         state.thread_bindings.push(ThreadBinding {
@@ -1329,18 +1690,27 @@ impl Server {
         }
 
         // Notify user the session is ready
-        let _ = self.im_adapter.send_message(target, "✅ Session ready! Send your message to start chatting.").await;
+        let _ = self
+            .im_adapter
+            .send_message(
+                target,
+                "✅ Session ready! Send your message to start chatting.",
+            )
+            .await;
 
         // Persist the binding
         let mut state = self.state_mgr.load_state().await?;
         // Ensure WindowState entry exists (needed for session_id tracking)
         let cwd = self.tmux_mgr.pane_cwd(&wid).await.unwrap_or_default();
-        state.window_states.entry(window_id.to_string()).or_insert(WindowState {
-            session_id: String::new(),
-            cwd,
-            window_name: window_name.clone(),
-            agent_type: self.config.agent_registry.default().name().to_string(),
-        });
+        state
+            .window_states
+            .entry(window_id.to_string())
+            .or_insert(WindowState {
+                session_id: String::new(),
+                cwd,
+                window_name: window_name.clone(),
+                agent_type: self.config.agent_registry.default().name().to_string(),
+            });
         state.thread_bindings.push(ThreadBinding {
             user_id,
             thread_id: target.thread_id.map(|t| t.0).unwrap_or(0),
@@ -1371,10 +1741,7 @@ impl Server {
             .to_string_lossy()
             .to_string();
 
-        let window_id = self
-            .tmux_mgr
-            .new_window(&window_name, &cwd)
-            .await?;
+        let window_id = self.tmux_mgr.new_window(&window_name, &cwd).await?;
 
         // Start the agent
         let launch_cmd = agent_launch_cmd(self.config.agent_registry.default());
@@ -1391,7 +1758,13 @@ impl Server {
         }
 
         // Notify user the session is ready
-        let _ = self.im_adapter.send_message(target, "✅ Session ready! Send your message to start chatting.").await;
+        let _ = self
+            .im_adapter
+            .send_message(
+                target,
+                "✅ Session ready! Send your message to start chatting.",
+            )
+            .await;
 
         // Persist the binding
         let mut state = self.state_mgr.load_state().await?;
@@ -1417,7 +1790,10 @@ impl Server {
 
         // Try to resolve session_id so the monitor can track responses.
         let wid = window_id.0.clone();
-        if let Some(sid) = self.resolve_session_id(&wid, Duration::from_secs(15), Some(&cwd)).await {
+        if let Some(sid) = self
+            .resolve_session_id(&wid, Duration::from_secs(15), Some(&cwd))
+            .await
+        {
             let mut state = self.state_mgr.load_state().await?;
             if let Some(ws) = state.window_states.get_mut(&wid) {
                 ws.session_id = sid;
@@ -1442,8 +1818,7 @@ impl Server {
         if data.starts_with("ui:") {
             let state = self.state_mgr.load_state().await?;
             if let Some(binding) = state.thread_bindings.iter().find(|b| {
-                b.user_id == user_id
-                    && b.thread_id == target.thread_id.map(|t| t.0).unwrap_or(0)
+                b.user_id == user_id && b.thread_id == target.thread_id.map(|t| t.0).unwrap_or(0)
             }) {
                 let _ = handle_ui_callback(&self.tmux_mgr, &binding.window_id, data).await;
                 if let Some(qid) = callback_query_id {
@@ -1489,9 +1864,8 @@ impl Server {
                 }
             };
             let browse_action = arg.unwrap_or("");
-            self.handle_browser_action(
-                &target, user_id, thread_id, &msg_id, browse_action, &text,
-            ).await?;
+            self.handle_browser_action(&target, user_id, thread_id, &msg_id, browse_action, &text)
+                .await?;
             return Ok(());
         }
 
@@ -1505,7 +1879,10 @@ impl Server {
             None => {
                 tracing::warn!("Stale or invalid callback token: {data}");
                 if let Some(qid) = callback_query_id {
-                    let _ = self.im_adapter.answer_callback(qid, "This selection has expired. Please start over.").await;
+                    let _ = self
+                        .im_adapter
+                        .answer_callback(qid, "This selection has expired. Please start over.")
+                        .await;
                 }
                 return Ok(());
             }
@@ -1515,10 +1892,18 @@ impl Server {
         if ctx.0 != user_id || ctx.1 != target.chat_id.0 || ctx.2 != thread_id {
             tracing::warn!(
                 "Callback context mismatch: expected ({},{},{}) got ({},{},{})",
-                ctx.0, ctx.1, ctx.2, user_id, target.chat_id.0, thread_id,
+                ctx.0,
+                ctx.1,
+                ctx.2,
+                user_id,
+                target.chat_id.0,
+                thread_id,
             );
             if let Some(qid) = callback_query_id {
-                let _ = self.im_adapter.answer_callback(qid, "This selection is from a different chat.").await;
+                let _ = self
+                    .im_adapter
+                    .answer_callback(qid, "This selection is from a different chat.")
+                    .await;
             }
             return Ok(());
         }
@@ -1534,31 +1919,50 @@ impl Server {
             }
         };
 
-        let topic_name = self.topic_names.lock().await.remove(
-            &(target.chat_id.0, thread_id)
-        );
+        let topic_name = self
+            .topic_names
+            .lock()
+            .await
+            .remove(&(target.chat_id.0, thread_id));
 
         match action {
             "new" => {
-                self.create_and_bind(&target, user_id, &text, topic_name.as_deref()).await?;
-                let _ = self.im_adapter.edit_message(&target, &msg_id, "New session created.").await;
+                self.create_and_bind(&target, user_id, &text, topic_name.as_deref())
+                    .await?;
+                let _ = self
+                    .im_adapter
+                    .edit_message(&target, &msg_id, "New session created.")
+                    .await;
             }
             "bind" => {
                 let window_id = arg.unwrap_or("");
                 let wid = WindowId(window_id.to_string());
                 if !self.tmux_mgr.window_exists(&wid).await {
-                    let _ = self.im_adapter.edit_message(&target, &msg_id, "Session no longer available.").await;
+                    let _ = self
+                        .im_adapter
+                        .edit_message(&target, &msg_id, "Session no longer available.")
+                        .await;
                     return Ok(());
                 }
-                self.bind_window(&target, user_id, &text, window_id, topic_name.as_deref()).await?;
-                let _ = self.im_adapter.edit_message(&target, &msg_id, "Session bound.").await;
+                self.bind_window(&target, user_id, &text, window_id, topic_name.as_deref())
+                    .await?;
+                let _ = self
+                    .im_adapter
+                    .edit_message(&target, &msg_id, "Session bound.")
+                    .await;
             }
             "browse" => {
                 // Directory browser action — sub-actions: dir:<path>, up, cancel, confirm, sel:<sid>, back, page
                 let browse_action = arg.unwrap_or("");
                 self.handle_browser_action(
-                    &target, user_id, thread_id, &msg_id, browse_action, &text,
-                ).await?;
+                    &target,
+                    user_id,
+                    thread_id,
+                    &msg_id,
+                    browse_action,
+                    &text,
+                )
+                .await?;
             }
             _ => {
                 tracing::warn!("Unknown callback action: {action}");
@@ -1584,9 +1988,11 @@ impl Server {
 
         // Find and kill the associated tmux window, then remove binding
         let mut state = self.state_mgr.load_state().await?;
-        if let Some(binding) = state.thread_bindings.iter().find(|b| {
-            b.chat_id == chat_id && b.thread_id == thread_id
-        }) {
+        if let Some(binding) = state
+            .thread_bindings
+            .iter()
+            .find(|b| b.chat_id == chat_id && b.thread_id == thread_id)
+        {
             let wid = WindowId(binding.window_id.clone());
             tracing::info!("Killing tmux window {} for closed topic", wid.0);
             if let Err(e) = self.tmux_mgr.kill_window(&wid).await {
@@ -1594,14 +2000,19 @@ impl Server {
                 tracing::debug!("Error killing window {} (may already be gone): {e}", wid.0);
             }
         }
-        state.thread_bindings.retain(|b| b.chat_id != chat_id || b.thread_id != thread_id);
+        state
+            .thread_bindings
+            .retain(|b| b.chat_id != chat_id || b.thread_id != thread_id);
         self.state_mgr.save_state(&state).await?;
         Ok(())
     }
 
     async fn handle_topic_edited(&self, target: &MessageTarget, new_name: &str) -> Result<()> {
         let thread_id = target.thread_id.map(|t| t.0).unwrap_or(0);
-        tracing::info!("Topic renamed: chat={} thread={thread_id} -> \"{new_name}\"", target.chat_id.0);
+        tracing::info!(
+            "Topic renamed: chat={} thread={thread_id} -> \"{new_name}\"",
+            target.chat_id.0
+        );
 
         // Update topic name in memory
         let mut names = self.topic_names.lock().await;
@@ -1610,9 +2021,11 @@ impl Server {
 
         // Update in persisted binding and rename tmux window
         let mut state = self.state_mgr.load_state().await?;
-        if let Some(binding) = state.thread_bindings.iter_mut().find(|b| {
-            b.chat_id == target.chat_id.0 && b.thread_id == thread_id
-        }) {
+        if let Some(binding) = state
+            .thread_bindings
+            .iter_mut()
+            .find(|b| b.chat_id == target.chat_id.0 && b.thread_id == thread_id)
+        {
             binding.topic_name = Some(new_name.to_string());
             let wid = WindowId(binding.window_id.clone());
             if let Err(e) = self.tmux_mgr.rename_window(&wid, new_name).await {
@@ -1644,12 +2057,20 @@ impl Server {
             if let Err(e) = self.im_adapter.send_chat_action(&target).await {
                 let err_str = e.to_string();
                 // Detect topic-deleted errors from Telegram
-                if err_str.contains("topic") || err_str.contains("chat not found") || err_str.contains("Forbidden") {
+                if err_str.contains("topic")
+                    || err_str.contains("chat not found")
+                    || err_str.contains("Forbidden")
+                {
                     tracing::warn!(
                         "Topic probe failed for chat={} thread={}: {e} — cleaning up",
-                        chat_id, binding.thread_id,
+                        chat_id,
+                        binding.thread_id,
                     );
-                    deleted.push((binding.chat_id, binding.thread_id, binding.window_id.clone()));
+                    deleted.push((
+                        binding.chat_id,
+                        binding.thread_id,
+                        binding.window_id.clone(),
+                    ));
                 }
             }
         }
@@ -1662,9 +2083,9 @@ impl Server {
                 if let Err(e) = self.tmux_mgr.kill_window(&wid).await {
                     tracing::debug!("Error killing stale window {}: {e}", wid.0);
                 }
-                state.thread_bindings.retain(|b| {
-                    b.chat_id != *chat_id || b.thread_id != *thread_id
-                });
+                state
+                    .thread_bindings
+                    .retain(|b| b.chat_id != *chat_id || b.thread_id != *thread_id);
                 tracing::info!("Cleaned up deleted topic: chat={chat_id} thread={thread_id}");
             }
             self.state_mgr.save_state(&state).await?;
@@ -1697,10 +2118,15 @@ impl Server {
             let clean = atim_parser::terminal::TerminalParser::strip_ansi(&pane_text);
 
             // Look up the per-window agent from WindowState
-            let agent_type = state.window_states.get(&binding.window_id)
+            let agent_type = state
+                .window_states
+                .get(&binding.window_id)
                 .map(|ws| ws.agent_type.as_str())
                 .unwrap_or("");
-            let agent = self.config.agent_registry.get(agent_type)
+            let agent = self
+                .config
+                .agent_registry
+                .get(agent_type)
                 .unwrap_or_else(|| self.config.agent_registry.default());
 
             // Use the agent's own parser for interactive UI detection
@@ -1708,7 +2134,8 @@ impl Server {
             let ui = parser.detect_interactive(&clean);
 
             // Compute content hash
-            let content_hash = ui.as_ref()
+            let content_hash = ui
+                .as_ref()
                 .map(|u| format!("{:?}:{}", u.kind, u.content.len()))
                 .unwrap_or_default();
 
@@ -1716,7 +2143,8 @@ impl Server {
             if prev == Some(&content_hash) {
                 // UI unchanged — still forward pane output if agent uses PaneCapture
                 if agent.output_source() == OutputSource::PaneCapture {
-                    self.forward_new_pane_output(&binding, &clean, &mut pane_outputs).await;
+                    self.forward_new_pane_output(&binding, &clean, &mut pane_outputs)
+                        .await;
                 }
                 continue;
             }
@@ -1730,13 +2158,20 @@ impl Server {
                 };
                 let buttons = ui_to_buttons(&interactive);
                 let header = format!("🧭 {}:", ui_display_name(interactive.kind));
-                let text = format!("{header}\n{content}", content = truncate_ui_content(&interactive.content, 200));
-                let _ = self.im_adapter.send_keyboard(&target, &text, &buttons).await;
+                let text = format!(
+                    "{header}\n{content}",
+                    content = truncate_ui_content(&interactive.content, 200)
+                );
+                let _ = self
+                    .im_adapter
+                    .send_keyboard(&target, &text, &buttons)
+                    .await;
             }
 
             // Forward terminal output for PaneCapture agents
             if agent.output_source() == OutputSource::PaneCapture {
-                self.forward_new_pane_output(&binding, &clean, &mut pane_outputs).await;
+                self.forward_new_pane_output(&binding, &clean, &mut pane_outputs)
+                    .await;
             }
         }
 
@@ -1769,11 +2204,17 @@ impl Server {
 
         // Content changed — find lines in new pane text that weren't in old
         // Trim trailing whitespace from each line to avoid terminal padding noise
-        fn trim_trailing(s: &str) -> &str { s.trim_end() }
+        fn trim_trailing(s: &str) -> &str {
+            s.trim_end()
+        }
         let old_lines: Vec<&str> = prev.lines().map(trim_trailing).collect();
         let new_lines: Vec<&str> = clean.lines().map(trim_trailing).collect();
         let old_set: std::collections::HashSet<&str> = old_lines.iter().copied().collect();
-        let added: Vec<&str> = new_lines.iter().copied().filter(|l| !old_set.contains(l)).collect();
+        let added: Vec<&str> = new_lines
+            .iter()
+            .copied()
+            .filter(|l| !old_set.contains(l))
+            .collect();
 
         // Update baseline even if we don't forward (so future diffs are accurate)
         pane_outputs.insert(binding.window_id.clone(), clean.to_string());
@@ -1792,11 +2233,28 @@ impl Server {
                 }
                 let c = t.chars().next().unwrap();
                 // Skip box-drawing, block, and shade characters
-                if matches!(c, '│' | '╭' | '╮' | '╰' | '╯' | '─' | '▔' | '▁' | '░' | '█' | '▝' | '▘' | '▖' | '▗') {
+                if matches!(
+                    c,
+                    '│' | '╭'
+                        | '╮'
+                        | '╰'
+                        | '╯'
+                        | '─'
+                        | '▔'
+                        | '▁'
+                        | '░'
+                        | '█'
+                        | '▝'
+                        | '▘'
+                        | '▖'
+                        | '▗'
+                ) {
                     return false;
                 }
                 // Skip lines that are purely decorative
-                if t.chars().all(|c| c.is_ascii_punctuation() || c.is_whitespace()) {
+                if t.chars()
+                    .all(|c| c.is_ascii_punctuation() || c.is_whitespace())
+                {
                     return false;
                 }
                 true
@@ -1885,9 +2343,17 @@ async fn run_capture_loop(
         // Truncate if too long
         let display = if joined.len() > MAX_MSG_LEN {
             let truncated: String = joined.chars().take(MAX_MSG_LEN).collect();
-            format!("```\n{}…\n```\n_(truncated, {}s elapsed)_", truncated, start.elapsed().as_secs())
+            format!(
+                "```\n{}…\n```\n_(truncated, {}s elapsed)_",
+                truncated,
+                start.elapsed().as_secs()
+            )
         } else {
-            format!("```\n{}\n```\n_({}s elapsed)_", joined, start.elapsed().as_secs())
+            format!(
+                "```\n{}\n```\n_({}s elapsed)_",
+                joined,
+                start.elapsed().as_secs()
+            )
         };
 
         if let Some(mid) = &msg_id {
@@ -1935,14 +2401,21 @@ fn is_shell_prompt(output: &str) -> bool {
             continue;
         }
         // Common shell prompt characters
-        if trimmed == "$" || trimmed == "❯" || trimmed == "%" || trimmed == "#"
-            || trimmed == ">" || trimmed == ">>>"
+        if trimmed == "$"
+            || trimmed == "❯"
+            || trimmed == "%"
+            || trimmed == "#"
+            || trimmed == ">"
+            || trimmed == ">>>"
         {
             return true;
         }
         // Lines ending with $, ❯ but with short length (likely prompt)
-        if trimmed.len() <= 5 && (trimmed.ends_with('$') || trimmed.ends_with('❯')
-            || trimmed.ends_with('#') || trimmed.ends_with('%'))
+        if trimmed.len() <= 5
+            && (trimmed.ends_with('$')
+                || trimmed.ends_with('❯')
+                || trimmed.ends_with('#')
+                || trimmed.ends_with('%'))
         {
             return true;
         }
@@ -1993,8 +2466,12 @@ fn parse_usage_output(raw: &str) -> String {
 
         if !in_usage {
             // Also check for common box-drawing chars around "Usage"
-            if trimmed.replace('─', "").replace('╭', "").replace('│', "")
-                .trim().eq_ignore_ascii_case("usage")
+            if trimmed
+                .replace('─', "")
+                .replace('╭', "")
+                .replace('│', "")
+                .trim()
+                .eq_ignore_ascii_case("usage")
             {
                 in_usage = true;
             }
@@ -2002,18 +2479,31 @@ fn parse_usage_output(raw: &str) -> String {
         }
 
         // Stop at common modal boundaries
-        if trimmed.contains("q to close") || trimmed.contains("Press")
-            || trimmed.starts_with("══") || trimmed.starts_with("╰")
+        if trimmed.contains("q to close")
+            || trimmed.contains("Press")
+            || trimmed.starts_with("══")
+            || trimmed.starts_with("╰")
             || trimmed.starts_with("╭")
         {
             break;
         }
 
         // Skip separator lines (box drawing, dashes, etc.)
-        if trimmed.chars().all(|c| c == '─' || c == '═' || c == '╭'
-            || c == '╮' || c == '╰' || c == '╯' || c == '├' || c == '┤'
-            || c == '│' || c == ' ' || c == '═' || c == '━' || c == '┃')
-        {
+        if trimmed.chars().all(|c| {
+            c == '─'
+                || c == '═'
+                || c == '╭'
+                || c == '╮'
+                || c == '╰'
+                || c == '╯'
+                || c == '├'
+                || c == '┤'
+                || c == '│'
+                || c == ' '
+                || c == '═'
+                || c == '━'
+                || c == '┃'
+        }) {
             continue;
         }
         if trimmed.is_empty() || trimmed == "│" {
@@ -2021,7 +2511,8 @@ fn parse_usage_output(raw: &str) -> String {
         }
 
         // Replace multiple spaces with single space
-        let normalized: String = trimmed.chars()
+        let normalized: String = trimmed
+            .chars()
             .filter(|c| !c.is_control())
             .collect::<String>()
             .split_whitespace()
@@ -2051,7 +2542,8 @@ fn parse_usage_output(raw: &str) -> String {
         if !fallback.is_empty() {
             return fallback;
         }
-        return "No usage data available. The /usage modal may not be supported in this version.".into();
+        return "No usage data available. The /usage modal may not be supported in this version."
+            .into();
     }
 
     format!("📊 Usage:\n{}", lines.join("\n"))
@@ -2073,9 +2565,7 @@ fn extract_usage_fallback(text: &str) -> String {
     for line in text.lines() {
         for (label, _) in &patterns {
             if line.to_lowercase().contains(&label.to_lowercase()) {
-                let cleaned: String = line.chars()
-                    .filter(|c| !c.is_control())
-                    .collect();
+                let cleaned: String = line.chars().filter(|c| !c.is_control()).collect();
                 let parts: Vec<&str> = cleaned.split_whitespace().collect();
                 if parts.len() >= 2 {
                     let val = parts.last().unwrap_or(&"");
@@ -2121,7 +2611,9 @@ async fn transcribe_voice(api_key: &str, base_url: &str, audio_data: &[u8]) -> R
         .timeout(Duration::from_secs(30))
         .send()
         .await
-        .map_err(|e| atim_core::error::Error::Telegram(format!("transcription request failed: {e}")))?;
+        .map_err(|e| {
+            atim_core::error::Error::Telegram(format!("transcription request failed: {e}"))
+        })?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -2168,56 +2660,98 @@ fn ui_to_buttons(ui: &InteractiveUi) -> Vec<Vec<Button>> {
         UiKind::AskUserQuestion | UiKind::ExitPlanMode => {
             vec![
                 vec![
-                    Button { text: "⬆ Up".into(), callback_data: "ui:up".into() },
-                    Button { text: "⬇ Down".into(), callback_data: "ui:down".into() },
+                    Button {
+                        text: "⬆ Up".into(),
+                        callback_data: "ui:up".into(),
+                    },
+                    Button {
+                        text: "⬇ Down".into(),
+                        callback_data: "ui:down".into(),
+                    },
                 ],
                 vec![
-                    Button { text: "✔ Select".into(), callback_data: "ui:enter".into() },
-                    Button { text: "✖ Cancel".into(), callback_data: "ui:esc".into() },
+                    Button {
+                        text: "✔ Select".into(),
+                        callback_data: "ui:enter".into(),
+                    },
+                    Button {
+                        text: "✖ Cancel".into(),
+                        callback_data: "ui:esc".into(),
+                    },
                 ],
             ]
         }
         UiKind::PermissionPrompt | UiKind::BashApproval => {
             vec![
                 vec![
-                    Button { text: "✔ Yes".into(), callback_data: "ui:yes".into() },
-                    Button { text: "✖ No".into(), callback_data: "ui:no".into() },
+                    Button {
+                        text: "✔ Yes".into(),
+                        callback_data: "ui:yes".into(),
+                    },
+                    Button {
+                        text: "✖ No".into(),
+                        callback_data: "ui:no".into(),
+                    },
                 ],
-                vec![
-                    Button { text: "✖ Cancel".into(), callback_data: "ui:esc".into() },
-                ],
+                vec![Button {
+                    text: "✖ Cancel".into(),
+                    callback_data: "ui:esc".into(),
+                }],
             ]
         }
         UiKind::RestoreCheckpoint => {
             vec![
                 vec![
-                    Button { text: "⬆ Up".into(), callback_data: "ui:up".into() },
-                    Button { text: "⬇ Down".into(), callback_data: "ui:down".into() },
+                    Button {
+                        text: "⬆ Up".into(),
+                        callback_data: "ui:up".into(),
+                    },
+                    Button {
+                        text: "⬇ Down".into(),
+                        callback_data: "ui:down".into(),
+                    },
                 ],
                 vec![
-                    Button { text: "✔ Restore".into(), callback_data: "ui:enter".into() },
-                    Button { text: "✖ Skip".into(), callback_data: "ui:esc".into() },
+                    Button {
+                        text: "✔ Restore".into(),
+                        callback_data: "ui:enter".into(),
+                    },
+                    Button {
+                        text: "✖ Skip".into(),
+                        callback_data: "ui:esc".into(),
+                    },
                 ],
             ]
         }
         UiKind::Settings => {
             vec![
                 vec![
-                    Button { text: "⬆ Up".into(), callback_data: "ui:up".into() },
-                    Button { text: "⬇ Down".into(), callback_data: "ui:down".into() },
+                    Button {
+                        text: "⬆ Up".into(),
+                        callback_data: "ui:up".into(),
+                    },
+                    Button {
+                        text: "⬇ Down".into(),
+                        callback_data: "ui:down".into(),
+                    },
                 ],
                 vec![
-                    Button { text: "✔ Select".into(), callback_data: "ui:enter".into() },
-                    Button { text: "Esc".into(), callback_data: "ui:esc".into() },
+                    Button {
+                        text: "✔ Select".into(),
+                        callback_data: "ui:enter".into(),
+                    },
+                    Button {
+                        text: "Esc".into(),
+                        callback_data: "ui:esc".into(),
+                    },
                 ],
             ]
         }
         UiKind::Unknown => {
-            vec![
-                vec![
-                    Button { text: "Esc".into(), callback_data: "ui:esc".into() },
-                ],
-            ]
+            vec![vec![Button {
+                text: "Esc".into(),
+                callback_data: "ui:esc".into(),
+            }]]
         }
     }
 }
@@ -2325,7 +2859,8 @@ mod tests {
         assert!(callback_data.ends_with(":bind:@0"));
 
         // Extract token back
-        let extracted = callback_data.strip_prefix("cb:")
+        let extracted = callback_data
+            .strip_prefix("cb:")
             .and_then(|s| s.split(':').next())
             .unwrap();
         let ctx = Server::validate_callback_token(&mut contexts, extracted);
@@ -2381,10 +2916,16 @@ mod tests {
     #[test]
     fn test_ui_display_name_all_kinds() {
         assert_eq!(ui_display_name(UiKind::AskUserQuestion), "Ask user");
-        assert_eq!(ui_display_name(UiKind::PermissionPrompt), "Permission request");
+        assert_eq!(
+            ui_display_name(UiKind::PermissionPrompt),
+            "Permission request"
+        );
         assert_eq!(ui_display_name(UiKind::BashApproval), "Bash approval");
         assert_eq!(ui_display_name(UiKind::ExitPlanMode), "Plan review");
-        assert_eq!(ui_display_name(UiKind::RestoreCheckpoint), "Restore checkpoint");
+        assert_eq!(
+            ui_display_name(UiKind::RestoreCheckpoint),
+            "Restore checkpoint"
+        );
         assert_eq!(ui_display_name(UiKind::Settings), "Settings");
         assert_eq!(ui_display_name(UiKind::Unknown), "Interactive prompt");
     }

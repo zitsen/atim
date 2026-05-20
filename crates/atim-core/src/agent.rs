@@ -1,6 +1,6 @@
 pub mod claude;
-pub mod copilot;
 pub mod codex;
+pub mod copilot;
 pub mod trait_def;
 pub mod types;
 

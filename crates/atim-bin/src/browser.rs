@@ -26,13 +26,9 @@ pub enum BrowserMode {
     /// Browsing directories to pick a working directory.
     Browsing,
     /// Picking a Claude Code session to resume.
-    SessionPick {
-        sessions: Vec<ClaudeSession>,
-    },
+    SessionPick { sessions: Vec<ClaudeSession> },
     /// Picking an unbound tmux window to attach.
-    WindowPick {
-        windows: Vec<WindowEntry>,
-    },
+    WindowPick { windows: Vec<WindowEntry> },
 }
 
 /// Summary of a Claude Code session found in a directory.
@@ -108,11 +104,14 @@ impl DirectoryBrowser {
     /// Start a new browsing session for a user at a given path.
     pub async fn start_browsing(&self, user_id: i64, start_path: &Path) {
         let mut map = self.sessions.lock().await;
-        map.insert(user_id, BrowserState {
-            current_path: start_path.to_path_buf(),
-            page: 0,
-            mode: BrowserMode::Browsing,
-        });
+        map.insert(
+            user_id,
+            BrowserState {
+                current_path: start_path.to_path_buf(),
+                page: 0,
+                mode: BrowserMode::Browsing,
+            },
+        );
     }
 
     pub async fn get_state(&self, user_id: i64) -> Option<BrowserState> {
@@ -174,9 +173,7 @@ impl DirectoryBrowser {
                 BrowserMode::SessionPick { sessions } => {
                     sessions.len().saturating_sub(1) / PAGE_SIZE
                 }
-                BrowserMode::WindowPick { windows } => {
-                    windows.len().saturating_sub(1) / PAGE_SIZE
-                }
+                BrowserMode::WindowPick { windows } => windows.len().saturating_sub(1) / PAGE_SIZE,
             };
             state.page = page.min(max_page);
         }
@@ -194,11 +191,18 @@ pub fn get_dir_listing(state: &BrowserState) -> DirListing {
 
     // Insert ".." at the top if not at root
     if state.current_path.parent().is_some() {
-        entries.insert(0, DirEntry {
-            name: "..".into(),
-            is_dir: true,
-            path: state.current_path.parent().unwrap_or(&state.current_path).to_path_buf(),
-        });
+        entries.insert(
+            0,
+            DirEntry {
+                name: "..".into(),
+                is_dir: true,
+                path: state
+                    .current_path
+                    .parent()
+                    .unwrap_or(&state.current_path)
+                    .to_path_buf(),
+            },
+        );
     }
 
     let total_pages = (entries.len().saturating_sub(1) / PAGE_SIZE) + 1;
@@ -222,7 +226,12 @@ pub fn get_session_picker_page(state: &BrowserState) -> Option<SessionPickerPage
             let total_pages = (sessions.len().saturating_sub(1) / PAGE_SIZE) + 1;
             let page = state.page.min(total_pages.saturating_sub(1));
             let start = page * PAGE_SIZE;
-            let page_sessions: Vec<_> = sessions.iter().skip(start).take(PAGE_SIZE).cloned().collect();
+            let page_sessions: Vec<_> = sessions
+                .iter()
+                .skip(start)
+                .take(PAGE_SIZE)
+                .cloned()
+                .collect();
             Some(SessionPickerPage {
                 sessions: page_sessions,
                 page,
@@ -241,7 +250,12 @@ pub fn get_window_picker_page(state: &BrowserState) -> Option<WindowPickerPage> 
             let total_pages = (windows.len().saturating_sub(1) / PAGE_SIZE) + 1;
             let page = state.page.min(total_pages.saturating_sub(1));
             let start = page * PAGE_SIZE;
-            let page_windows: Vec<_> = windows.iter().skip(start).take(PAGE_SIZE).cloned().collect();
+            let page_windows: Vec<_> = windows
+                .iter()
+                .skip(start)
+                .take(PAGE_SIZE)
+                .cloned()
+                .collect();
             Some(WindowPickerPage {
                 windows: page_windows,
                 page,
@@ -380,8 +394,20 @@ mod tests {
             page: 0,
             mode: BrowserMode::SessionPick {
                 sessions: vec![
-                    ClaudeSession { id: "a".into(), project_slug: "my-proj".into(), summary: "A".into(), timestamp: "2026-01-01".into(), message_count: 1 },
-                    ClaudeSession { id: "b".into(), project_slug: "other-proj".into(), summary: "B".into(), timestamp: "2026-01-02".into(), message_count: 2 },
+                    ClaudeSession {
+                        id: "a".into(),
+                        project_slug: "my-proj".into(),
+                        summary: "A".into(),
+                        timestamp: "2026-01-01".into(),
+                        message_count: 1,
+                    },
+                    ClaudeSession {
+                        id: "b".into(),
+                        project_slug: "other-proj".into(),
+                        summary: "B".into(),
+                        timestamp: "2026-01-02".into(),
+                        message_count: 2,
+                    },
                 ],
             },
         };
@@ -406,15 +432,22 @@ mod tests {
         rt.block_on(async {
             browser.start_browsing(400, &std::env::temp_dir()).await;
             let windows = vec![
-                WindowEntry { window_id: "@1".into(), name: "atim-400".into(), current_command: "claude".into(), agent_type: "claude".into() },
-                WindowEntry { window_id: "@2".into(), name: "dev".into(), current_command: "nvim".into(), agent_type: String::new() },
+                WindowEntry {
+                    window_id: "@1".into(),
+                    name: "atim-400".into(),
+                    current_command: "claude".into(),
+                    agent_type: "claude".into(),
+                },
+                WindowEntry {
+                    window_id: "@2".into(),
+                    name: "dev".into(),
+                    current_command: "nvim".into(),
+                    agent_type: String::new(),
+                },
             ];
             browser.show_window_picker(400, windows.clone()).await;
             let state = browser.get_state(400).await.unwrap();
-            assert_eq!(
-                state.mode,
-                BrowserMode::WindowPick { windows }
-            );
+            assert_eq!(state.mode, BrowserMode::WindowPick { windows });
             browser.end_session(400).await;
         });
     }
@@ -422,8 +455,18 @@ mod tests {
     #[test]
     fn test_window_picker_page() {
         let windows = vec![
-            WindowEntry { window_id: "@1".into(), name: "w1".into(), current_command: "claude".into(), agent_type: "claude".into() },
-            WindowEntry { window_id: "@2".into(), name: "w2".into(), current_command: "bash".into(), agent_type: String::new() },
+            WindowEntry {
+                window_id: "@1".into(),
+                name: "w1".into(),
+                current_command: "claude".into(),
+                agent_type: "claude".into(),
+            },
+            WindowEntry {
+                window_id: "@2".into(),
+                name: "w2".into(),
+                current_command: "bash".into(),
+                agent_type: String::new(),
+            },
         ];
         let state = BrowserState {
             current_path: PathBuf::from("/tmp"),

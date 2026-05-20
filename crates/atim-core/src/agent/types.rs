@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use crate::message::AgentKind;
 
-use super::trait_def::{Agent, AgentId};
 use super::AgentParser;
+use super::trait_def::{Agent, AgentId};
 
 // ── AgentHandle ──
 
@@ -69,7 +69,10 @@ impl AgentHandle {
     pub fn discover_session_by_pid(&self, window_id: &str) -> crate::error::Result<Option<String>> {
         self.inner.discover_session_by_pid(window_id)
     }
-    pub fn scan_sessions(&self, path: &std::path::Path) -> crate::error::Result<Vec<crate::agent::DetectedSession>> {
+    pub fn scan_sessions(
+        &self,
+        path: &std::path::Path,
+    ) -> crate::error::Result<Vec<crate::agent::DetectedSession>> {
         self.inner.scan_sessions(path)
     }
 }
@@ -160,7 +163,10 @@ impl AgentRegistry {
 impl std::fmt::Debug for AgentRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AgentRegistry")
-            .field("agents", &self.agents.iter().map(|a| a.name()).collect::<Vec<_>>())
+            .field(
+                "agents",
+                &self.agents.iter().map(|a| a.name()).collect::<Vec<_>>(),
+            )
             .field("default", &self.default_name)
             .finish()
     }

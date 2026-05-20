@@ -3,24 +3,13 @@ use serde::{Deserialize, Serialize};
 use crate::message::SessionId;
 
 /// Persistent state for a tmux window.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WindowState {
     pub session_id: String,
     pub cwd: String,
     pub window_name: String,
     /// Agent type: "claude", "copilot", or "codex".
     pub agent_type: String,
-}
-
-impl Default for WindowState {
-    fn default() -> Self {
-        Self {
-            session_id: String::new(),
-            cwd: String::new(),
-            window_name: String::new(),
-            agent_type: String::new(),
-        }
-    }
 }
 
 /// Information about a Claude/Copilot/Codex session.
@@ -64,21 +53,11 @@ pub struct ThreadBinding {
 }
 
 /// Full persisted state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ServerState {
     pub window_states: std::collections::HashMap<String, WindowState>,
     pub thread_bindings: Vec<ThreadBinding>,
     pub window_display_names: std::collections::HashMap<String, String>,
-    pub user_window_offsets: std::collections::HashMap<String, std::collections::HashMap<String, u64>>, // user_id -> window_id -> offset
-}
-
-impl Default for ServerState {
-    fn default() -> Self {
-        Self {
-            window_states: std::collections::HashMap::new(),
-            thread_bindings: Vec::new(),
-            window_display_names: std::collections::HashMap::new(),
-            user_window_offsets: std::collections::HashMap::new(),
-        }
-    }
+    pub user_window_offsets:
+        std::collections::HashMap<String, std::collections::HashMap<String, u64>>, // user_id -> window_id -> offset
 }

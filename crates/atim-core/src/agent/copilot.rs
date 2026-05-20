@@ -3,9 +3,7 @@ use super::trait_def::{Agent, AgentId, OutputSource};
 use crate::message::{AgentKind, InteractiveUi, UiKind};
 
 /// Copilot CLI spinner characters (Braille dots).
-const STATUS_SPINNERS: &[char] = &[
-    '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏',
-];
+const STATUS_SPINNERS: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 /// Patterns for Copilot CLI interactive UIs.
 struct UiPatternDef {
@@ -67,7 +65,11 @@ impl AgentParser for CopilotParser {
             || pane_text.contains("Copilot CLI")
             || pane_text.lines().any(|l| {
                 let t = l.trim();
-                (t.starts_with("? ") && t.len() > 3 && t.as_bytes().get(2).map_or(false, |&c| c.is_ascii_uppercase() || c == b'['))
+                (t.starts_with("? ")
+                    && t.len() > 3
+                    && t.as_bytes()
+                        .get(2)
+                        .is_some_and(|&c| c.is_ascii_uppercase() || c == b'['))
                     || t.starts_with("❯ ") && t.len() > 2
             })
         {
@@ -84,14 +86,14 @@ impl AgentParser for CopilotParser {
             if trimmed.is_empty() {
                 continue;
             }
-            if let Some(c) = trimmed.chars().next() {
-                if STATUS_SPINNERS.contains(&c) {
-                    // Skip the multi-byte spinner character, get the rest
-                    let text: String = trimmed.chars().skip(1).collect();
-                    let text = text.trim().to_string();
-                    if !text.is_empty() {
-                        return Some(text);
-                    }
+            if let Some(c) = trimmed.chars().next()
+                && STATUS_SPINNERS.contains(&c)
+            {
+                // Skip the multi-byte spinner character, get the rest
+                let text: String = trimmed.chars().skip(1).collect();
+                let text = text.trim().to_string();
+                if !text.is_empty() {
+                    return Some(text);
                 }
             }
         }
@@ -104,9 +106,10 @@ impl AgentParser for CopilotParser {
 
         for def in UI_PATTERNS {
             // All `contains` strings must match on any line in the pane.
-            let matched: bool = def.contains.iter().all(|pat| {
-                lines.iter().any(|l| l.contains(pat))
-            });
+            let matched: bool = def
+                .contains
+                .iter()
+                .all(|pat| lines.iter().any(|l| l.contains(pat)));
             if !matched {
                 continue;
             }
@@ -118,10 +121,11 @@ impl AgentParser for CopilotParser {
             })?;
 
             // Collect content until we hit a non-matching line after the start.
-            let mut end = first;
-            for i in first..=last {
+            let mut end = last;
+            for (idx, line) in lines[first..=last].iter().enumerate() {
+                let i = first + idx;
                 end = i;
-                if lines[i].trim().is_empty() && i > first + 1 {
+                if line.trim().is_empty() && idx > 1 {
                     // Empty line ends the block
                     end = i.saturating_sub(1);
                     break;
@@ -192,19 +196,13 @@ mod tests {
 
     #[test]
     fn test_detect_by_process_name() {
-        assert_eq!(
-            CopilotParser::detect("", "copilot"),
-            AgentKind::CopilotCli
-        );
+        assert_eq!(CopilotParser::detect("", "copilot"), AgentKind::CopilotCli);
     }
 
     #[test]
     fn test_detect_by_pane_text() {
         let text = "Welcome to GitHub Copilot CLI!";
-        assert_eq!(
-            CopilotParser::detect(text, "bash"),
-            AgentKind::CopilotCli
-        );
+        assert_eq!(CopilotParser::detect(text, "bash"), AgentKind::CopilotCli);
     }
 
     #[test]

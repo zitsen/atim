@@ -74,7 +74,10 @@ impl StateManager {
     }
 
     /// Write the session map atomically.
-    pub async fn save_session_map(&self, map: &std::collections::HashMap<String, String>) -> Result<()> {
+    pub async fn save_session_map(
+        &self,
+        map: &std::collections::HashMap<String, String>,
+    ) -> Result<()> {
         let data = serde_json::to_string_pretty(map)?;
         atomic_write(&self.session_map_file, data.as_bytes()).await
     }
@@ -106,7 +109,10 @@ impl StateManager {
     }
 
     /// Save monitor byte offsets atomically.
-    pub async fn save_monitor_offsets(&self, offsets: &std::collections::HashMap<String, u64>) -> Result<()> {
+    pub async fn save_monitor_offsets(
+        &self,
+        offsets: &std::collections::HashMap<String, u64>,
+    ) -> Result<()> {
         let data = serde_json::to_string_pretty(offsets)?;
         atomic_write(&self.monitor_state_file, data.as_bytes()).await
     }
@@ -222,10 +228,7 @@ mod tests {
         // Read back
         let loaded = mgr.load_state().await.unwrap();
         assert_eq!(loaded.window_states.len(), 1);
-        assert_eq!(
-            loaded.window_states.get("@0").unwrap().session_id,
-            "sess_1"
-        );
+        assert_eq!(loaded.window_states.get("@0").unwrap().session_id, "sess_1");
 
         tokio::fs::remove_dir_all(&dir).await.unwrap();
     }

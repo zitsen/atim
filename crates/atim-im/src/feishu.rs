@@ -11,8 +11,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use tokio::sync::mpsc;
 use tokio::sync::RwLock;
+use tokio::sync::mpsc;
 
 use atim_core::error::{Error, Result};
 use atim_core::im::ImAdapter;
@@ -20,8 +20,8 @@ use atim_core::message::{
     Button, ChatId, ImEvent, ImEventKind, MessageId, MessageTarget, ThreadId, UserId,
 };
 
-use open_lark::ws_client::{EventDispatcherHandler, LarkWsClient};
 use open_lark::Config;
+use open_lark::ws_client::{EventDispatcherHandler, LarkWsClient};
 
 const FEISHU_BASE_URL: &str = "https://open.feishu.cn";
 
@@ -211,10 +211,7 @@ impl FeishuAdapter {
             let msg = json["msg"].as_str().unwrap_or("unknown");
             return Err(Error::Feishu(format!("image upload error: {msg}")));
         }
-        Ok(json["data"]["image_key"]
-            .as_str()
-            .unwrap_or("")
-            .to_string())
+        Ok(json["data"]["image_key"].as_str().unwrap_or("").to_string())
     }
 
     // ── ID mapping ──
@@ -237,7 +234,9 @@ impl FeishuAdapter {
     async fn register_user(&self, open_id: &str) -> UserId {
         let uid = Self::hash_id(open_id);
         let mut map = self.id_map.write().await;
-        map.user_ids.entry(uid).or_insert_with(|| open_id.to_string());
+        map.user_ids
+            .entry(uid)
+            .or_insert_with(|| open_id.to_string());
         UserId(uid)
     }
 
@@ -245,7 +244,9 @@ impl FeishuAdapter {
     async fn register_chat(&self, chat_id: &str) -> ChatId {
         let cid = Self::hash_id(chat_id);
         let mut map = self.id_map.write().await;
-        map.chat_ids.entry(cid).or_insert_with(|| chat_id.to_string());
+        map.chat_ids
+            .entry(cid)
+            .or_insert_with(|| chat_id.to_string());
         ChatId(cid)
     }
 
@@ -267,8 +268,18 @@ impl FeishuAdapter {
 
         let event_type = value["header"]["event_type"].as_str().unwrap_or("");
         if event_type == "card.action.trigger" {
-            tracing::debug!("Card payload top keys: {:?}", value.as_object().map(|o| o.keys().collect::<Vec<_>>()));
-            tracing::debug!("Card payload event: {}", &value["event"].to_string().chars().take(500).collect::<String>());
+            tracing::debug!(
+                "Card payload top keys: {:?}",
+                value.as_object().map(|o| o.keys().collect::<Vec<_>>())
+            );
+            tracing::debug!(
+                "Card payload event: {}",
+                &value["event"]
+                    .to_string()
+                    .chars()
+                    .take(500)
+                    .collect::<String>()
+            );
         }
         match event_type {
             "im.message.receive_v1" => handle_message_event(self, &value).await,
@@ -285,7 +296,10 @@ impl FeishuAdapter {
 
 impl TokenCache {
     async fn refresh(&mut self) -> Result<()> {
-        let url = format!("{}/open-apis/auth/v3/app_access_token/internal", FEISHU_BASE_URL);
+        let url = format!(
+            "{}/open-apis/auth/v3/app_access_token/internal",
+            FEISHU_BASE_URL
+        );
         let body = serde_json::json!({
             "app_id": self.app_id,
             "app_secret": self.app_secret,
@@ -306,7 +320,9 @@ impl TokenCache {
         let code = value["code"].as_i64().unwrap_or(-1);
         if code != 0 {
             let msg = value["msg"].as_str().unwrap_or("unknown");
-            return Err(Error::Feishu(format!("token API error: code={code} msg={msg}")));
+            return Err(Error::Feishu(format!(
+                "token API error: code={code} msg={msg}"
+            )));
         }
 
         // Feishu returns app_access_token at top level (not nested under "data")
@@ -443,7 +459,12 @@ impl ImAdapter for FeishuAdapter {
         Ok(MessageId(msg_id))
     }
 
-    async fn edit_message(&self, target: &MessageTarget, msg_id: &MessageId, text: &str) -> Result<()> {
+    async fn edit_message(
+        &self,
+        target: &MessageTarget,
+        msg_id: &MessageId,
+        text: &str,
+    ) -> Result<()> {
         let chat_id = self
             .resolve_chat(&target.chat_id)
             .await
@@ -461,10 +482,7 @@ impl ImAdapter for FeishuAdapter {
         // Try PATCH in-place first (works on card messages we sent earlier).
         // Only sends `content` per Feishu PATCH API spec.
         let token = self.get_token().await?;
-        let url = format!(
-            "{FEISHU_BASE_URL}/open-apis/im/v1/messages/{}",
-            msg_id.0
-        );
+        let url = format!("{FEISHU_BASE_URL}/open-apis/im/v1/messages/{}", msg_id.0);
         let patch_body = serde_json::json!({ "content": &card_str });
         let resp = self
             .client
@@ -504,7 +522,12 @@ impl ImAdapter for FeishuAdapter {
         }
     }
 
-    async fn send_photo(&self, target: &MessageTarget, filename: &str, data: &[u8]) -> Result<MessageId> {
+    async fn send_photo(
+        &self,
+        target: &MessageTarget,
+        filename: &str,
+        data: &[u8],
+    ) -> Result<MessageId> {
         let chat_id = self
             .resolve_chat(&target.chat_id)
             .await
@@ -565,12 +588,18 @@ impl ImAdapter for FeishuAdapter {
 
     async fn delete_message(&self, _target: &MessageTarget, msg_id: &MessageId) -> Result<()> {
         if Self::delete_enabled() {
-            match self.api_delete(&format!("/im/v1/messages/{}", msg_id.0)).await {
+            match self
+                .api_delete(&format!("/im/v1/messages/{}", msg_id.0))
+                .await
+            {
                 Ok(_) => tracing::debug!("Feishu message {} recalled", msg_id.0),
                 Err(e) => tracing::warn!("Feishu message recall failed: {e}"),
             }
         } else {
-            tracing::debug!("Feishu delete_message skipped (ATIM_FEISHU_ENABLE_DELETE not set, msg_id={})", msg_id.0);
+            tracing::debug!(
+                "Feishu delete_message skipped (ATIM_FEISHU_ENABLE_DELETE not set, msg_id={})",
+                msg_id.0
+            );
         }
         Ok(())
     }
@@ -593,10 +622,7 @@ impl ImAdapter for FeishuAdapter {
         });
 
         let token = self.get_token().await?;
-        let url = format!(
-            "{FEISHU_BASE_URL}/open-apis/im/v1/messages/{}",
-            msg_id.0
-        );
+        let url = format!("{FEISHU_BASE_URL}/open-apis/im/v1/messages/{}", msg_id.0);
         let resp = self
             .client
             .patch(&url)
@@ -613,7 +639,9 @@ impl ImAdapter for FeishuAdapter {
 
         if json["code"].as_i64().unwrap_or(-1) != 0 {
             let msg = json["msg"].as_str().unwrap_or("unknown");
-            tracing::warn!("Feishu edit_keyboard PATCH failed ({msg}), falling back to new message");
+            tracing::warn!(
+                "Feishu edit_keyboard PATCH failed ({msg}), falling back to new message"
+            );
             let _ = self.send_keyboard(target, "(updated)", buttons).await?;
         }
         Ok(())
@@ -678,9 +706,7 @@ impl FeishuAdapter {
     /// Download an image by its image_key from Feishu.
     async fn download_image(&self, image_key: &str) -> Result<Vec<u8>> {
         let token = self.get_token().await?;
-        let url = format!(
-            "{FEISHU_BASE_URL}/open-apis/im/v1/images/{image_key}/download"
-        );
+        let url = format!("{FEISHU_BASE_URL}/open-apis/im/v1/images/{image_key}/download");
         let resp = self
             .client
             .get(&url)
@@ -757,10 +783,8 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
         thread_id,
     };
 
-    let parsed_content: serde_json::Value = serde_json::from_str(
-        message["content"].as_str().unwrap_or("{}"),
-    )
-    .unwrap_or_default();
+    let parsed_content: serde_json::Value =
+        serde_json::from_str(message["content"].as_str().unwrap_or("{}")).unwrap_or_default();
 
     let mut text = String::new();
     let mut has_mention = false;
@@ -782,15 +806,17 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
                             None => false,
                         };
                         // Fallback: check by name
-                        let is_bot = is_bot || bot_name.as_ref().map_or(false, |name| {
-                            mention["name"].as_str().map_or(false, |n| {
-                                n.contains(name) || name.contains(n)
-                            })
-                        });
+                        let is_bot = is_bot
+                            || bot_name.as_ref().map_or(false, |name| {
+                                mention["name"]
+                                    .as_str()
+                                    .map_or(false, |n| n.contains(name) || name.contains(n))
+                            });
                         // Broader fallback: any mention named "bot" or the app_id prefix
-                        let is_bot = is_bot || mention["name"].as_str().map_or(false, |n| {
-                            n.contains("bot") || adapter.app_id.contains(n)
-                        });
+                        let is_bot = is_bot
+                            || mention["name"]
+                                .as_str()
+                                .map_or(false, |n| n.contains("bot") || adapter.app_id.contains(n));
                         if is_bot {
                             has_mention = true;
                         }
@@ -803,11 +829,17 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
                 // Permissive fallback: if mentions array exists and is non-empty but we
                 // couldn't match the bot's identity, treat any mention as a bot mention
                 if !has_mention && message["mentions"].as_array().map_or(0, |m| m.len()) > 0 {
-                    tracing::debug!("Mentions present but no bot match — permissive fallback, treating as @mention");
+                    tracing::debug!(
+                        "Mentions present but no bot match — permissive fallback, treating as @mention"
+                    );
                     has_mention = true;
                 }
             }
-            ImEventKind::Text { text: text.clone(), is_mention: has_mention, is_group: chat_type == "group" }
+            ImEventKind::Text {
+                text: text.clone(),
+                is_mention: has_mention,
+                is_group: chat_type == "group",
+            }
         }
         "post" => {
             // Rich text: extract from locale-aware content
@@ -828,7 +860,11 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
             if text.is_empty() {
                 text = parsed_content["text"].as_str().unwrap_or("").to_string();
             }
-            ImEventKind::Text { text: text.clone(), is_mention: has_mention, is_group: chat_type == "group" }
+            ImEventKind::Text {
+                text: text.clone(),
+                is_mention: has_mention,
+                is_group: chat_type == "group",
+            }
         }
         "image" => {
             let image_key = parsed_content["image_key"].as_str().unwrap_or("");
@@ -899,9 +935,7 @@ async fn handle_card_action(adapter: &FeishuAdapter, payload: &serde_json::Value
         None => action_value["data"]
             .as_str()
             .map(String::from)
-            .unwrap_or_else(|| {
-                serde_json::to_string(action_value).unwrap_or_default()
-            }),
+            .unwrap_or_else(|| serde_json::to_string(action_value).unwrap_or_default()),
     };
     tracing::debug!("Card action: data={data} chat_type={chat_type}");
 
@@ -957,9 +991,7 @@ fn build_card(text: &str, buttons: &[Vec<Button>]) -> serde_json::Value {
                     || btn.callback_data.contains("confirm")
                 {
                     "primary"
-                } else if btn.callback_data.contains("reject")
-                    || btn.callback_data.contains("no")
-                {
+                } else if btn.callback_data.contains("reject") || btn.callback_data.contains("no") {
                     "danger"
                 } else {
                     "default"

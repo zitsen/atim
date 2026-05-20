@@ -44,7 +44,10 @@ static UI_PATTERNS: &[UiPatternDef] = &[
     },
     UiPatternDef {
         kind: UiKind::BashApproval,
-        top: &[r"^\s*Bash command\s*$", r"^\s*This command requires approval"],
+        top: &[
+            r"^\s*Bash command\s*$",
+            r"^\s*This command requires approval",
+        ],
         bottom: &[r"^\s*Esc to cancel"],
     },
     UiPatternDef {
@@ -104,8 +107,9 @@ impl AgentParser for ClaudeParser {
                 continue;
             }
             if let Some(c) = line.chars().next()
-                && STATUS_SPINNERS.contains(&c) {
-                    return Some(line[1..].trim().to_string());
+                && STATUS_SPINNERS.contains(&c)
+            {
+                return Some(line[1..].trim().to_string());
             }
             return None;
         }
@@ -127,18 +131,12 @@ impl AgentParser for ClaudeParser {
 }
 
 fn try_extract(lines: &[&str], def: &UiPatternDef) -> Option<String> {
-    let top_re: Vec<Regex> = def
-        .top
-        .iter()
-        .map(|p| Regex::new(p).unwrap())
-        .collect();
-    let bottom_re: Vec<Regex> = def
-        .bottom
-        .iter()
-        .map(|p| Regex::new(p).unwrap())
-        .collect();
+    let top_re: Vec<Regex> = def.top.iter().map(|p| Regex::new(p).unwrap()).collect();
+    let bottom_re: Vec<Regex> = def.bottom.iter().map(|p| Regex::new(p).unwrap()).collect();
 
-    let top_idx = lines.iter().position(|l| top_re.iter().any(|r| r.is_match(l)))?;
+    let top_idx = lines
+        .iter()
+        .position(|l| top_re.iter().any(|r| r.is_match(l)))?;
     let bottom_idx = if bottom_re.is_empty() {
         // No bottom pattern → use last non-empty line
         lines[top_idx + 1..]
@@ -176,7 +174,10 @@ impl Agent for ClaudeAgent {
     }
 
     fn resume_command(&self, session_id: &str) -> Option<String> {
-        Some(format!("{} --resume {session_id}", self.new_session_command()))
+        Some(format!(
+            "{} --resume {session_id}",
+            self.new_session_command()
+        ))
     }
 
     fn supports_sessions(&self) -> bool {
@@ -237,8 +238,7 @@ fn discover_session_by_slug(
     }
 
     let mut candidates: Vec<(std::time::SystemTime, String)> = Vec::new();
-    let entries = std::fs::read_dir(&proj_dir)
-        .map_err(crate::error::Error::Io)?;
+    let entries = std::fs::read_dir(&proj_dir).map_err(crate::error::Error::Io)?;
 
     for entry in entries.flatten() {
         let path = entry.path();
@@ -303,7 +303,8 @@ fn discover_by_pid_lsof(window_id: &str) -> Result<Option<String>> {
             let out = String::from_utf8_lossy(&lsof_out.stdout);
             for line in out.lines() {
                 if let Some(path) = line.strip_prefix('n')
-                    && path.ends_with(".jsonl") && path.contains(".claude")
+                    && path.ends_with(".jsonl")
+                    && path.contains(".claude")
                     && let Some(stem) = std::path::Path::new(path).file_stem()
                 {
                     let sid = stem.to_string_lossy().to_string();
@@ -325,8 +326,7 @@ fn scan_claude_session_files() -> Result<Vec<DetectedSession>> {
     let claude_dir = claude_projects_dir()
         .ok_or_else(|| crate::error::Error::NotFound("no claude projects dir".into()))?;
     let projects_dir = claude_dir.join("projects");
-    let projects = std::fs::read_dir(&projects_dir)
-        .map_err(crate::error::Error::Io)?;
+    let projects = std::fs::read_dir(&projects_dir).map_err(crate::error::Error::Io)?;
 
     let mut sessions = Vec::new();
 
@@ -399,14 +399,15 @@ fn extract_session_summary(content: &str) -> String {
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
             let role = val["message"]["role"].as_str().unwrap_or("");
             if role == "user"
-                && let Some(blocks) = val["message"]["content"].as_array() {
-                    for block in blocks {
-                        let text = block["text"].as_str().unwrap_or("");
-                        if !text.is_empty() && text.len() > 3 {
-                            summary = text.to_string();
-                            break;
-                        }
+                && let Some(blocks) = val["message"]["content"].as_array()
+            {
+                for block in blocks {
+                    let text = block["text"].as_str().unwrap_or("");
+                    if !text.is_empty() && text.len() > 3 {
+                        summary = text.to_string();
+                        break;
                     }
+                }
             }
         }
         if !summary.is_empty() {
@@ -431,8 +432,9 @@ fn extract_timestamp(content: &str) -> String {
     for line in content.lines() {
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(line)
             && let Some(ts) = val["timestamp"].as_str()
-            && !ts.is_empty() {
-                return ts.to_string();
+            && !ts.is_empty()
+        {
+            return ts.to_string();
         }
     }
     String::new()

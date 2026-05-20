@@ -37,7 +37,10 @@ impl TerminalParser {
 
     /// Strip ANSI escape codes from terminal text.
     pub fn strip_ansi(text: &str) -> String {
-        let re = regex::Regex::new(r"\x1B\[[0-9;]*[a-zA-Z]|\x1B\][0-9;]*[^\x1B]*\x1B\\|[\x00-\x08\x0B\x0C\x0E-\x1F]").unwrap();
+        let re = regex::Regex::new(
+            r"\x1B\[[0-9;]*[a-zA-Z]|\x1B\][0-9;]*[^\x1B]*\x1B\\|[\x00-\x08\x0B\x0C\x0E-\x1F]",
+        )
+        .unwrap();
         re.replace_all(text, "").to_string()
     }
 

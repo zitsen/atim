@@ -3,17 +3,16 @@
 /// Tracks message frequency per chat and applies delays to stay under
 /// Telegram's rate limits. On 429 responses, sets a backoff timer.
 /// Status messages are dropped when the queue is deeply backed up.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
+use async_trait::async_trait;
 use atim_core::error::Result;
 use atim_core::im::ImAdapter;
 use atim_core::message::{Button, ImEvent, MessageId, MessageTarget};
-use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 /// Maximum messages per chat within the time window.
@@ -113,9 +112,7 @@ impl FloodControlledAdapter {
     pub async fn record_backoff(&self, chat_id: i64, retry_after_secs: u64) {
         let retry_after = Duration::from_secs(retry_after_secs.min(30));
         let until = Instant::now() + retry_after;
-        tracing::warn!(
-            "Rate limited (429) on chat {chat_id}, backing off for {retry_after_secs}s"
-        );
+        tracing::warn!("Rate limited (429) on chat {chat_id}, backing off for {retry_after_secs}s");
         self.backoffs.lock().await.insert(chat_id, until);
     }
 
@@ -179,7 +176,10 @@ impl ImAdapter for FloodControlledAdapter {
     ) -> Result<MessageId> {
         let chat_id = Self::get_chat_id(target).await;
         if self.rate_limit(chat_id, false).await {
-            return self.inner.send_message(target, "[photo dropped by flood control]").await;
+            return self
+                .inner
+                .send_message(target, "[photo dropped by flood control]")
+                .await;
         }
         let result = self.inner.send_photo(target, filename, data).await;
         if result.is_ok() {
@@ -257,19 +257,39 @@ mod tests {
             *self.send_count.lock().unwrap() += 1;
             Ok(MessageId("mock:1".into()))
         }
-        async fn edit_message(&self, _target: &MessageTarget, _msg_id: &MessageId, _text: &str) -> Result<()> {
+        async fn edit_message(
+            &self,
+            _target: &MessageTarget,
+            _msg_id: &MessageId,
+            _text: &str,
+        ) -> Result<()> {
             Ok(())
         }
-        async fn send_photo(&self, _target: &MessageTarget, _filename: &str, _data: &[u8]) -> Result<MessageId> {
+        async fn send_photo(
+            &self,
+            _target: &MessageTarget,
+            _filename: &str,
+            _data: &[u8],
+        ) -> Result<MessageId> {
             Ok(MessageId("mock:1".into()))
         }
-        async fn send_keyboard(&self, _target: &MessageTarget, _text: &str, _buttons: &[Vec<Button>]) -> Result<MessageId> {
+        async fn send_keyboard(
+            &self,
+            _target: &MessageTarget,
+            _text: &str,
+            _buttons: &[Vec<Button>],
+        ) -> Result<MessageId> {
             Ok(MessageId("mock:1".into()))
         }
         async fn delete_message(&self, _target: &MessageTarget, _msg_id: &MessageId) -> Result<()> {
             Ok(())
         }
-        async fn edit_keyboard(&self, _target: &MessageTarget, _msg_id: &MessageId, _buttons: &[Vec<Button>]) -> Result<()> {
+        async fn edit_keyboard(
+            &self,
+            _target: &MessageTarget,
+            _msg_id: &MessageId,
+            _buttons: &[Vec<Button>],
+        ) -> Result<()> {
             Ok(())
         }
         async fn send_chat_action(&self, _target: &MessageTarget) -> Result<()> {
@@ -309,7 +329,11 @@ mod tests {
         assert!(controller.chat_blocked(99999).await.is_none());
 
         // Set a backoff
-        controller.backoffs.lock().await.insert(99999, Instant::now() + Duration::from_secs(1));
+        controller
+            .backoffs
+            .lock()
+            .await
+            .insert(99999, Instant::now() + Duration::from_secs(1));
         assert!(controller.chat_blocked(99999).await.is_some());
     }
 }

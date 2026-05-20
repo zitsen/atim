@@ -33,17 +33,15 @@ mod tests {
 
     #[test]
     fn test_resolve_window_finds_binding() {
-        let router = Router::new(vec![
-            ThreadBinding {
-                user_id: 1,
-                thread_id: 100,
-                chat_id: -100,
-                window_id: "@0".into(),
-                display_name: "test".into(),
-                group_chat_id: None,
-                topic_name: None,
-            },
-        ]);
+        let router = Router::new(vec![ThreadBinding {
+            user_id: 1,
+            thread_id: 100,
+            chat_id: -100,
+            window_id: "@0".into(),
+            display_name: "test".into(),
+            group_chat_id: None,
+            topic_name: None,
+        }]);
 
         let target = MessageTarget {
             chat_id: ChatId(-100),
