@@ -142,6 +142,11 @@ Atim is designed for extensibility:
 - **New IM backend**: implement the `ImAdapter` trait — see `crates/atim-im/src/` for examples
 - **New agent**: implement the `AgentParser` trait — see `crates/atim-core/src/agent/` for examples
 
+## Acknowledgments
+
+- **[ccbot](https://github.com/zitsen/ccbot)** — Original Telegram-to-Claude-Code bridge that inspired this project
+- **[openlark](https://github.com/openlark)** — Feishu/Lark IM integration SDK
+
 ## License
 
 MIT
