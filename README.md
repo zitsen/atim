@@ -10,15 +10,22 @@ Atim bridges an IM chat directly to a tmux window running an AI coding agent. Ty
 
 ## Quick Install
 
+Download and install to ~/.local/bin with `installer.sh` with `curl`:
+
 ```bash
-# Download and install to ~/.local/bin
-curl -fsSL https://raw.githubusercontent.com/huolinhe/atim/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/zitsen/atim/main/install.sh | bash
+```
 
-# Or with wget
-wget -qO- https://raw.githubusercontent.com/huolinhe/atim/main/install.sh | bash
+Or with `wget`:
 
-# Install to a custom path
-curl -fsSL https://raw.githubusercontent.com/huolinhe/atim/main/install.sh | bash -s -- -b /usr/local/bin
+```bash
+wget -qO- https://raw.githubusercontent.com/zitsen/atim/main/install.sh | bash
+```
+
+Install to a custom path:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/zitsen/atim/main/install.sh | bash -s -- -b /usr/local/bin
 ```
 
 The installer downloads a statically-linked musl binary from the latest GitHub release.
@@ -37,8 +44,8 @@ The installer downloads a statically-linked musl binary from the latest GitHub r
 
 ```
   ┌──────────────┐     ┌──────────────────────────┐     ┌──────────────┐
-  │  Telegram     │     │     Atim Server          │     │   Feishu     │
-  │  Bot API      │◀───▶│                          │◀───▶│   Bot API    │
+  │  Telegram    │     │     Atim Server          │     │   Feishu     │
+  │  Bot API     │ <-> │                          │ <-> │   Bot API    │
   └──────────────┘     │  ┌──────┐  ┌───────────┐ │     └──────────────┘
                        │  │ Queue│  │  Monitor  │ │
                        │  └──┬───┘  └─────┬─────┘ │
@@ -61,16 +68,14 @@ The installer downloads a statically-linked musl binary from the latest GitHub r
 ## Quick Start
 
 ```bash
-# 1. Build
-cargo build --release
-
-# 2. Set up your IM backend
+# 1. Set up your IM backend
+#
 # Telegram: create a bot via @BotFather, get your user ID from @userinfobot
 export ATIM_TELEGRAM_TOKEN="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
 export ATIM_ALLOWED_USERS="123456789"
-
-# 3. Start a tmux session
-tmux new-session -d -s atim
+# Feishu: create a bot in https://open.feishu.cn/page/launcher or by luck-cli
+export ATIM_FEISHU_APP_ID=cli_xxxx
+export ATIM_FEISHU_APP_SECRET=xxxx
 
 # 4. Run Atim
 atim
@@ -91,16 +96,14 @@ Atim reads from environment variables (or a `~/.atim/.env` file):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ATIM_TELEGRAM_TOKEN` | — | Telegram Bot API token |
-| `ATIM_ALLOWED_USERS` | — | Comma-separated Telegram user IDs (empty = allow all) |
 | `ATIM_DIR` | `~/.atim` | Data directory |
 | `ATIM_TMUX_SESSION` | `atim` | Target tmux session |
 | `ATIM_AGENT_COMMAND` | `claude` | Agent CLI command |
 | `ATIM_FEISHU_APP_ID` | — | Feishu app ID (for Feishu backend) |
 | `ATIM_FEISHU_APP_SECRET` | — | Feishu app secret |
 | `ATIM_OPENAI_API_KEY` | — | For voice message transcription |
-
-Legacy fallbacks: `TELEGRAM_BOT_TOKEN`, `ALLOWED_USERS`, `OPENAI_API_KEY`, etc.
+| `ATIM_TELEGRAM_TOKEN` | — | Telegram Bot API token |
+| `ATIM_ALLOWED_USERS` | — | Comma-separated Telegram user IDs (empty = allow all) |
 
 ## Usage
 
