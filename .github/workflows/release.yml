@@ -1,0 +1,183 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+
+      - name: Build release binary
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package binary
+        shell: bash
+        run: |
+          BIN_NAME="atim"
+          TARGET_DIR="target/${{ matrix.target }}/release"
+          ARCHIVE_NAME="atim-${{ matrix.target }}.tar.gz"
+          cp "$TARGET_DIR/$BIN_NAME" "$BIN_NAME"
+          tar czf "$ARCHIVE_NAME" "$BIN_NAME"
+          echo "archive=$ARCHIVE_NAME" >> $GITHUB_ENV
+
+      - name: Generate checksum
+        run: |
+          sha256sum "${{ env.archive }}" > "${{ env.archive }}.sha256"
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: atim-${{ matrix.target }}
+          path: |
+            ${{ env.archive }}
+            ${{ env.archive }}.sha256
+
+  release:
+    name: Create release
+    needs: build
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
+      - name: Create release
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: atim ${{ steps.version.outputs.version }}
+          draft: true
+          prerelease: false
+          generate_release_notes: true
+
+  upload:
+    name: Upload assets
+    needs: [build, release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get version
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for dir in atim-*/; do
+            for file in "$dir"*; do
+              gh release upload "${{ github.ref_name }}" "$file" --clobber
+            done
+          done
+
+      - name: Generate Homebrew formula
+        run: |
+          X86_64_SHA=$(cat atim-x86_64-unknown-linux-gnu/atim-x86_64-unknown-linux-gnu.tar.gz.sha256 | awk '{print $1}')
+          AARCH64_SHA=$(cat atim-aarch64-unknown-linux-gnu/atim-aarch64-unknown-linux-gnu.tar.gz.sha256 | awk '{print $1}')
+          VERSION="${{ steps.version.outputs.version }}"
+
+          cat > atim.rb << FORMULA
+          class Atim < Formula
+            desc "IM-to-CLIs bridge via tmux"
+            homepage "https://github.com/${{ github.repository }}"
+            version "$VERSION"
+            license "MIT"
+
+            on_macos do
+              odie "atim does not support macOS yet. Please use Linux."
+            end
+
+            on_linux do
+              if Hardware::CPU.arm? && Hardware::CPU.is_64_bit?
+                url "https://github.com/${{ github.repository }}/releases/download/v#{version}/atim-aarch64-unknown-linux-gnu.tar.gz"
+                sha256 "$AARCH64_SHA"
+              else
+                url "https://github.com/${{ github.repository }}/releases/download/v#{version}/atim-x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "$X86_64_SHA"
+              end
+            end
+
+            def install
+              bin.install "atim"
+            end
+
+            test do
+              assert_match "atim", shell_output("\#{bin}/atim --help")
+            end
+          end
+          FORMULA
+
+      - name: Generate AUR PKGBUILD
+        run: |
+          X86_64_SHA=$(cat atim-x86_64-unknown-linux-gnu/atim-x86_64-unknown-linux-gnu.tar.gz.sha256 | awk '{print $1}')
+          VERSION="${{ steps.version.outputs.version }}"
+
+          cat > PKGBUILD << 'PKGBUILD_EOF'
+          # Maintainer: Atim maintainers
+          pkgname=atim
+          pkgver=__VERSION__
+          pkgrel=1
+          pkgdesc="IM-to-CLIs bridge via tmux"
+          arch=('x86_64')
+          url="https://github.com/__REPO__"
+          license=('MIT')
+          depends=('tmux')
+          source_x86_64=("${url}/releases/download/v${pkgver}/atim-x86_64-unknown-linux-gnu.tar.gz")
+          sha256sums_x86_64=('__SHA256__')
+
+          package() {
+            install -Dm755 atim "${pkgdir}/usr/bin/atim"
+          }
+          PKGBUILD_EOF
+
+          # Substitute placeholders
+          sed -i "s/__VERSION__/$VERSION/" PKGBUILD
+          sed -i "s/__REPO__/${{ github.repository }}/" PKGBUILD
+          sed -i "s/__SHA256__/$X86_64_SHA/" PKGBUILD
+
+      - name: Upload Homebrew formula
+        uses: actions/upload-artifact@v4
+        with:
+          name: homebrew-formula
+          path: atim.rb
+
+      - name: Upload AUR PKGBUILD
+        uses: actions/upload-artifact@v4
+        with:
+          name: aur-pkgbuild
+          path: PKGBUILD
