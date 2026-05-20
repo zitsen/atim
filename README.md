@@ -144,7 +144,7 @@ Atim is designed for extensibility:
 
 ## Acknowledgments
 
-- **[ccbot](https://github.com/zitsen/ccbot)** — Original Telegram-to-Claude-Code bridge that inspired this project
+- **[ccbot](https://github.com/six-ddc/ccbot)** — Original Telegram-to-Claude-Code bridge that inspired this project
 - **[openlark](https://github.com/openlark)** — Feishu/Lark IM integration SDK
 
 ## License
