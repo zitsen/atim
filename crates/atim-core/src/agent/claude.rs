@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 use regex::Regex;
 
 use super::AgentParser;
-use super::trait_def::{Agent, AgentId, DetectedSession, OutputSource, SessionDiscoverer};
+use super::trait_def::{Agent, AgentId, DetectedSession, OutputSource};
+use crate::error::Result;
 use crate::message::{AgentKind, InteractiveUi, UiKind};
 
 /// Patterns for Claude Code interactive UIs.
@@ -194,180 +195,188 @@ impl Agent for ClaudeAgent {
         Box::new(ClaudeParser)
     }
 
-    fn session_discoverer(&self) -> Option<Box<dyn SessionDiscoverer>> {
-        Some(Box::new(ClaudeSessionDiscoverer))
-    }
-
     fn graceful_shutdown_keys(&self) -> Vec<&'static str> {
         vec!["C-c"]
     }
-}
 
-// ── ClaudeSessionDiscoverer ──
+    // ── Session discovery ──
 
-/// Discovers Claude Code JSONL session files via lsof and project-slug matching.
-pub struct ClaudeSessionDiscoverer;
-
-#[async_trait::async_trait]
-impl SessionDiscoverer for ClaudeSessionDiscoverer {
-    /// Project-slug matching: derive slug from cwd, scan `~/.claude/projects/<slug>/`.
-    async fn discover(
+    fn discover_session(
         &self,
         cwd: &str,
         known_ids: &std::collections::HashSet<String>,
-    ) -> Option<String> {
-        let slug: String = cwd.split('/').collect::<Vec<_>>().join("-");
-        let proj_dir = claude_projects_dir()?.join("projects").join(&slug);
-        if !proj_dir.is_dir() {
-            tracing::debug!("No claude project dir at {:?} for cwd {cwd}", proj_dir);
-            return None;
-        }
+    ) -> Result<Option<String>> {
+        discover_session_by_slug(cwd, known_ids)
+    }
 
-        let mut candidates: Vec<(std::time::SystemTime, String)> = Vec::new();
-        let entries = std::fs::read_dir(&proj_dir).ok()?;
+    fn discover_session_by_pid(&self, window_id: &str) -> Result<Option<String>> {
+        discover_by_pid_lsof(window_id)
+    }
+
+    fn scan_sessions(&self, _path: &Path) -> Result<Vec<DetectedSession>> {
+        scan_claude_session_files()
+    }
+}
+
+// ── Session discovery implementation (Claude-specific) ──
+
+/// Discover a Claude Code session by project-slug matching against
+/// `~/.claude/projects/<slug>/`.
+fn discover_session_by_slug(
+    cwd: &str,
+    known_ids: &std::collections::HashSet<String>,
+) -> Result<Option<String>> {
+    let slug: String = cwd.split('/').collect::<Vec<_>>().join("-");
+    let proj_dir = claude_projects_dir()
+        .ok_or_else(|| crate::error::Error::NotFound("no claude projects dir".into()))?
+        .join("projects")
+        .join(&slug);
+    if !proj_dir.is_dir() {
+        tracing::debug!("No claude project dir at {:?} for cwd {cwd}", proj_dir);
+        return Ok(None);
+    }
+
+    let mut candidates: Vec<(std::time::SystemTime, String)> = Vec::new();
+    let entries = std::fs::read_dir(&proj_dir)
+        .map_err(crate::error::Error::Io)?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let stem = match path.file_stem().and_then(|s| s.to_str()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        if stem.len() != 36 || !stem.contains('-') {
+            continue;
+        }
+        if known_ids.contains(&stem) {
+            continue;
+        }
+        let mtime = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        candidates.push((mtime, stem));
+    }
+
+    candidates.sort_by_key(|b| std::cmp::Reverse(b.0));
+    let result = candidates.into_iter().next().map(|(_, sid)| sid);
+    if result.is_some() {
+        tracing::info!("Discovered session via project-slug matching (cwd={cwd}, slug={slug})");
+    }
+    Ok(result)
+}
+
+/// Trace a tmux pane PID to find an open Claude Code JSONL file via lsof.
+fn discover_by_pid_lsof(window_id: &str) -> Result<Option<String>> {
+    use std::process::Command;
+
+    let output = Command::new("tmux")
+        .args(["display-message", "-t", window_id, "-p", "#{pane_pid}"])
+        .output()
+        .map_err(crate::error::Error::Io)?;
+    let pane_pid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if pane_pid.is_empty() || pane_pid == "0" {
+        return Ok(None);
+    }
+
+    let mut all_pids = vec![pane_pid];
+    let mut idx = 0;
+    while idx < all_pids.len() {
+        if let Ok(child_out) = Command::new("pgrep").args(["-P", &all_pids[idx]]).output() {
+            for child in String::from_utf8_lossy(&child_out.stdout).lines() {
+                let c = child.trim().to_string();
+                if !c.is_empty() && !all_pids.contains(&c) {
+                    all_pids.push(c);
+                }
+            }
+        }
+        idx += 1;
+    }
+
+    for pid in &all_pids {
+        if let Ok(lsof_out) = Command::new("lsof").args(["-p", pid, "-F", "n"]).output() {
+            let out = String::from_utf8_lossy(&lsof_out.stdout);
+            for line in out.lines() {
+                if let Some(path) = line.strip_prefix('n')
+                    && path.ends_with(".jsonl") && path.contains(".claude")
+                    && let Some(stem) = std::path::Path::new(path).file_stem()
+                {
+                    let sid = stem.to_string_lossy().to_string();
+                    if sid.len() == 36 && sid.contains('-') {
+                        tracing::info!(
+                            "Discovered session {sid} for window {window_id} via lsof (PID {pid})"
+                        );
+                        return Ok(Some(sid));
+                    }
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Scan `~/.claude/projects/` for all session JSONL files.
+fn scan_claude_session_files() -> Result<Vec<DetectedSession>> {
+    let claude_dir = claude_projects_dir()
+        .ok_or_else(|| crate::error::Error::NotFound("no claude projects dir".into()))?;
+    let projects_dir = claude_dir.join("projects");
+    let projects = std::fs::read_dir(&projects_dir)
+        .map_err(crate::error::Error::Io)?;
+
+    let mut sessions = Vec::new();
+
+    for project_dir in projects.flatten() {
+        let proj_path = project_dir.path();
+        if !proj_path.is_dir() {
+            continue;
+        }
+        let slug = proj_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+
+        let entries = match std::fs::read_dir(&proj_path) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
 
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                 continue;
             }
-            let stem = match path.file_stem().and_then(|s| s.to_str()) {
-                Some(s) => s.to_string(),
-                None => continue,
+            let session_id = match path.file_stem().and_then(|s| s.to_str()) {
+                Some(s) if s.len() == 36 && s.contains('-') => s.to_string(),
+                _ => continue,
             };
-            if stem.len() != 36 || !stem.contains('-') {
-                continue;
-            }
-            if known_ids.contains(&stem) {
-                continue;
-            }
-            let mtime = entry
-                .metadata()
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-            candidates.push((mtime, stem));
-        }
 
-        candidates.sort_by_key(|b| std::cmp::Reverse(b.0));
-        let result = candidates.into_iter().next().map(|(_, sid)| sid);
-        if result.is_some() {
-            tracing::info!("Discovered session via project-slug matching (cwd={cwd}, slug={slug})");
-        }
-        result
-    }
-
-    /// Trace a pane PID with lsof to find the open JSONL file.
-    async fn discover_by_pid(&self, window_id: &str) -> Option<String> {
-        use std::process::Command;
-
-        let output = Command::new("tmux")
-            .args(["display-message", "-t", window_id, "-p", "#{pane_pid}"])
-            .output()
-            .ok()?;
-        let pane_pid = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if pane_pid.is_empty() || pane_pid == "0" {
-            return None;
-        }
-
-        let mut all_pids = vec![pane_pid];
-        let mut idx = 0;
-        while idx < all_pids.len() {
-            if let Ok(child_out) = Command::new("pgrep").args(["-P", &all_pids[idx]]).output() {
-                for child in String::from_utf8_lossy(&child_out.stdout).lines() {
-                    let c = child.trim().to_string();
-                    if !c.is_empty() && !all_pids.contains(&c) {
-                        all_pids.push(c);
-                    }
-                }
-            }
-            idx += 1;
-        }
-
-        for pid in &all_pids {
-            if let Ok(lsof_out) = Command::new("lsof").args(["-p", pid, "-F", "n"]).output() {
-                let out = String::from_utf8_lossy(&lsof_out.stdout);
-                for line in out.lines() {
-                    if let Some(path) = line.strip_prefix('n')
-                        && path.ends_with(".jsonl") && path.contains(".claude")
-                        && let Some(stem) = std::path::Path::new(path).file_stem() {
-                            let sid = stem.to_string_lossy().to_string();
-                            if sid.len() == 36 && sid.contains('-') {
-                                tracing::info!(
-                                    "Discovered session {sid} for window {window_id} via lsof (PID {pid})"
-                                );
-                                return Some(sid);
-                            }
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    /// Scan a directory for Claude Code session files.
-    async fn scan_sessions(&self, _path: &Path) -> Vec<DetectedSession> {
-        let claude_dir = match claude_projects_dir() {
-            Some(d) => d,
-            None => return vec![],
-        };
-
-        let projects_dir = claude_dir.join("projects");
-        let projects = match std::fs::read_dir(&projects_dir) {
-            Ok(d) => d,
-            Err(_) => return vec![],
-        };
-
-        let mut sessions = Vec::new();
-
-        for project_dir in projects.flatten() {
-            let proj_path = project_dir.path();
-            if !proj_path.is_dir() {
-                continue;
-            }
-            let slug = proj_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("")
-                .to_string();
-
-            let entries = match std::fs::read_dir(&proj_path) {
-                Ok(d) => d,
+            let content = match std::fs::read_to_string(&path) {
+                Ok(c) => c,
                 Err(_) => continue,
             };
 
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                    continue;
-                }
-                let session_id = match path.file_stem().and_then(|s| s.to_str()) {
-                    Some(s) if s.len() == 36 && s.contains('-') => s.to_string(),
-                    _ => continue,
-                };
+            let summary = extract_session_summary(&content);
+            let timestamp = extract_timestamp(&content);
+            let message_count = estimate_message_count(&content);
 
-                let content = match std::fs::read_to_string(&path) {
-                    Ok(c) => c,
-                    Err(_) => continue,
-                };
-
-                let summary = extract_session_summary(&content);
-                let timestamp = extract_timestamp(&content);
-                let message_count = estimate_message_count(&content);
-
-                sessions.push(DetectedSession {
-                    id: session_id,
-                    project_slug: slug.clone(),
-                    summary,
-                    timestamp,
-                    message_count,
-                });
-            }
+            sessions.push(DetectedSession {
+                id: session_id,
+                project_slug: slug.clone(),
+                summary,
+                timestamp,
+                message_count,
+            });
         }
-
-        sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-        sessions
     }
+
+    sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    Ok(sessions)
 }
 
 /// Resolve the claude projects directory: `~/.claude` or `$CLAUDE_DIR`.

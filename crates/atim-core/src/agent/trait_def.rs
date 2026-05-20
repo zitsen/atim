@@ -68,28 +68,6 @@ pub struct DetectedSession {
     pub message_count: usize,
 }
 
-// ── Session discoverer ──
-
-/// Discovers session logs for an agent (Claude JSONL, etc.).
-///
-/// Agents that don't support persistent sessions (Copilot CLI, Codex CLI)
-/// return `None` from `Agent::session_discoverer()`.
-#[async_trait::async_trait]
-pub trait SessionDiscoverer: Send + Sync {
-    /// Given a working directory, find the most recent untracked session_id.
-    async fn discover(
-        &self,
-        cwd: &str,
-        known_ids: &std::collections::HashSet<String>,
-    ) -> Option<String>;
-
-    /// Trace a pane PID and find the open session file via lsof.
-    async fn discover_by_pid(&self, window_id: &str) -> Option<String>;
-
-    /// Scan a directory for existing sessions (for the resume picker).
-    async fn scan_sessions(&self, path: &Path) -> Vec<DetectedSession>;
-}
-
 // ── Agent trait ──
 
 /// Unified agent definition — covers launch, session lifecycle,
@@ -149,6 +127,31 @@ pub trait Agent: Send + Sync {
         ))
     }
 
+    /// Given a working directory, find the most recent untracked session_id.
+    fn discover_session(
+        &self,
+        _cwd: &str,
+        _known_ids: &std::collections::HashSet<String>,
+    ) -> Result<Option<String>> {
+        Err(crate::error::Error::Unsupported(
+            "session discovery not supported for this agent".into(),
+        ))
+    }
+
+    /// Trace a pane PID with lsof (or equivalent) to find the active session file.
+    fn discover_session_by_pid(&self, _window_id: &str) -> Result<Option<String>> {
+        Err(crate::error::Error::Unsupported(
+            "session PID discovery not supported for this agent".into(),
+        ))
+    }
+
+    /// List all available sessions for the resume/session picker.
+    fn scan_sessions(&self, _path: &Path) -> Result<Vec<DetectedSession>> {
+        Err(crate::error::Error::Unsupported(
+            "session scanning not supported for this agent".into(),
+        ))
+    }
+
     // ── Response reading ──
 
     /// How this agent's terminal output is consumed.
@@ -156,11 +159,6 @@ pub trait Agent: Send + Sync {
 
     /// Return the terminal output parser for this agent.
     fn parser(&self) -> Box<dyn AgentParser>;
-
-    /// Build a discoverer for session output files, if applicable.
-    fn session_discoverer(&self) -> Option<Box<dyn SessionDiscoverer>> {
-        None
-    }
 
     // ── Runtime switching ──
 

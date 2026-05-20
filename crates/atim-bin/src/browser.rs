@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use atim_core::agent::SessionDiscoverer;
+use atim_core::agent::Agent;
 use tokio::sync::Mutex;
 
 /// Items per page in the directory listing.
@@ -276,10 +276,10 @@ fn read_dir_entries(path: &Path) -> Vec<DirEntry> {
     entries
 }
 
-/// Scan for existing Claude Code sessions using ClaudeSessionDiscoverer.
-pub async fn scan_claude_sessions(_path: &Path) -> Vec<ClaudeSession> {
-    let discoverer = atim_core::agent::claude::ClaudeSessionDiscoverer;
-    let detected = discoverer.scan_sessions(_path).await;
+/// Scan for existing Claude Code sessions using the Agent trait.
+pub fn scan_claude_sessions(_path: &Path) -> Vec<ClaudeSession> {
+    let agent = atim_core::agent::claude::ClaudeAgent;
+    let detected = agent.scan_sessions(_path).unwrap_or_default();
     detected
         .into_iter()
         .map(|s| ClaudeSession {
@@ -367,9 +367,9 @@ mod tests {
         assert!(listing.page <= listing.total_pages);
     }
 
-    #[tokio::test]
-    async fn test_scan_sessions_no_error() {
-        let sessions = scan_claude_sessions(&std::env::temp_dir()).await;
+    #[test]
+    fn test_scan_sessions_no_error() {
+        let sessions = scan_claude_sessions(&std::env::temp_dir());
         assert!(sessions.is_empty() || !sessions.is_empty());
     }
 

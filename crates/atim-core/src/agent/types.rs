@@ -56,11 +56,21 @@ impl AgentHandle {
     pub fn parser(&self) -> Box<dyn AgentParser> {
         self.inner.parser()
     }
-    pub fn session_discoverer(&self) -> Option<Box<dyn super::trait_def::SessionDiscoverer>> {
-        self.inner.session_discoverer()
-    }
     pub fn graceful_shutdown_keys(&self) -> Vec<&'static str> {
         self.inner.graceful_shutdown_keys()
+    }
+    pub fn discover_session(
+        &self,
+        cwd: &str,
+        known_ids: &std::collections::HashSet<String>,
+    ) -> crate::error::Result<Option<String>> {
+        self.inner.discover_session(cwd, known_ids)
+    }
+    pub fn discover_session_by_pid(&self, window_id: &str) -> crate::error::Result<Option<String>> {
+        self.inner.discover_session_by_pid(window_id)
+    }
+    pub fn scan_sessions(&self, path: &std::path::Path) -> crate::error::Result<Vec<crate::agent::DetectedSession>> {
+        self.inner.scan_sessions(path)
     }
 }
 

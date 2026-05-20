@@ -8,8 +8,7 @@ pub struct WindowState {
     pub session_id: String,
     pub cwd: String,
     pub window_name: String,
-    /// Agent type: "claude", "copilot", "codex", or "" (defaults to "claude" for backward compat).
-    #[serde(default)]
+    /// Agent type: "claude", "copilot", or "codex".
     pub agent_type: String,
 }
 

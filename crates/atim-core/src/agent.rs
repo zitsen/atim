@@ -39,5 +39,5 @@ pub fn parser_for(kind: AgentKind) -> Box<dyn AgentParser> {
 }
 
 // Re-exports for convenience.
-pub use trait_def::{Agent, AgentId, DetectedSession, OutputSource, SessionDiscoverer};
+pub use trait_def::{Agent, AgentId, DetectedSession, OutputSource};
 pub use types::{AgentHandle, AgentRegistry};

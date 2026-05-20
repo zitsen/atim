@@ -1,5 +1,5 @@
 use super::AgentParser;
-use super::trait_def::{Agent, AgentId, OutputSource, SessionDiscoverer};
+use super::trait_def::{Agent, AgentId, OutputSource};
 use crate::message::{AgentKind, InteractiveUi, UiKind};
 
 /// Copilot CLI spinner characters (Braille dots).
@@ -178,10 +178,6 @@ impl Agent for CopilotAgent {
 
     fn parser(&self) -> Box<dyn AgentParser> {
         Box::new(CopilotParser)
-    }
-
-    fn session_discoverer(&self) -> Option<Box<dyn SessionDiscoverer>> {
-        None
     }
 
     fn graceful_shutdown_keys(&self) -> Vec<&'static str> {

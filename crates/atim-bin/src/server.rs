@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use atim_core::agent::SessionDiscoverer;
+use atim_core::agent::OutputSource;
 use atim_core::config::Config;
 use atim_core::error::Result;
 use atim_core::im::ImAdapter;
@@ -370,11 +370,12 @@ impl Server {
                 let mut synced = 0;
                 for (window_id, session_id) in &session_map {
                     if let Some(ws) = state.window_states.get_mut(window_id) {
-                        // Only assign session_ids for Claude Code windows — other
-                        // agents (Copilot, Codex) don't produce JSONL logs.
-                        let at = ws.agent_type.as_str();
-                        if !at.is_empty() && at != "claude" {
-                            continue;
+                        // Only assign session_ids for agents that support
+                        // tracked sessions — skip agents with no JSONL logs.
+                        if let Some(agent) = self.config.agent_registry.get(&ws.agent_type) {
+                            if !agent.supports_sessions() {
+                                continue;
+                            }
                         }
                         if ws.session_id.is_empty() {
                             ws.session_id = session_id.clone();
@@ -1004,7 +1005,7 @@ impl Server {
             }
             "confirm" => {
                 // Scan the current directory for sessions and show picker
-                let sessions = browser::scan_claude_sessions(&state.current_path).await;
+                let sessions = browser::scan_claude_sessions(&state.current_path);
                 if sessions.is_empty() {
                     // No existing sessions — create new directly
                     let topic_name = self.topic_names.lock().await.remove(
@@ -1092,27 +1093,32 @@ impl Server {
         Ok(())
     }
 
-    /// After starting Claude in a new window, wait for the session_id to be
+    /// After starting an agent in a new window, wait for the session_id to be
     /// registered — first by polling session_map.json (the SessionStart hook),
-    /// then falling back to ClaudeSessionDiscoverer (lsof, project-slug).
+    /// then falling back to Agent::discover_session_by_pid / discover_session.
     ///
     /// `cwd_hint` is the working directory of the pane — used for the
-    /// project-slug fallback when lsof fails.
+    /// project-slug fallback when lsof fails (Claude only).
     async fn resolve_session_id(
         &self,
         window_id: &str,
         timeout: Duration,
         cwd_hint: Option<&str>,
     ) -> Option<String> {
-        // Only Claude Code produces JSONL session logs — skip for other agents.
-        let agent_type = self.state_mgr.load_state().await.ok()
+        // Determine the agent for this window to dispatch session discovery.
+        let agent = self.state_mgr.load_state().await.ok()
             .and_then(|s| s.window_states.get(window_id).cloned())
-            .map(|ws| ws.agent_type)
-            .unwrap_or_default();
-        if !agent_type.is_empty() && agent_type != "claude" {
-            tracing::debug!(
-                "Window {window_id} agent_type is '{agent_type}' — not Claude Code, skipping session_id resolution"
-            );
+            .and_then(|ws| {
+                if ws.agent_type == "claude" {
+                    Some(self.config.agent_registry.default().clone())
+                } else {
+                    self.config.agent_registry.get(&ws.agent_type).cloned()
+                }
+            })
+            .unwrap_or_else(|| self.config.agent_registry.default().clone());
+
+        // Only Claude Code supports sessions — skip for others.
+        if !agent.supports_sessions() {
             return None;
         }
 
@@ -1131,23 +1137,21 @@ impl Server {
             tokio::time::sleep(Duration::from_millis(300)).await;
         }
 
-        // Phase 2: Fallback — ClaudeSessionDiscoverer (lsof → project-slug)
+        // Phase 2: Fallback — agent session discovery (lsof → project-slug)
         tracing::warn!(
-            "SessionStart hook didn't register session_id for window {window_id} within {timeout:?}, trying discoverer"
+            "SessionStart hook didn't register session_id for window {window_id} within {timeout:?}, trying agent discovery"
         );
-        let discoverer = atim_core::agent::claude::ClaudeSessionDiscoverer;
 
-        // Phase 2a: lsof
-        if let Some(sid) = discoverer.discover_by_pid(window_id).await {
+        // Phase 2a: PID tracing
+        if let Ok(Some(sid)) = agent.discover_session_by_pid(window_id) {
             return Some(sid);
         }
 
-        // Phase 2b: project-slug matching
+        // Phase 2b: working-directory based discovery
         if let Some(cwd) = cwd_hint {
             tracing::warn!(
-                "lsof failed for window {window_id}, trying project-slug matching with cwd={cwd}"
+                "PID discovery failed for window {window_id}, trying path-based discovery with cwd={cwd}"
             );
-            use atim_core::agent::SessionDiscoverer;
             let state = self.state_mgr.load_state().await.ok()?;
             let mut known_ids: std::collections::HashSet<String> = state.window_states
                 .values()
@@ -1161,7 +1165,9 @@ impl Server {
                     }
                 }
             }
-            return discoverer.discover(cwd, &known_ids).await;
+            if let Ok(Some(sid)) = agent.discover_session(cwd, &known_ids) {
+                return Some(sid);
+            }
         }
 
         None
@@ -1246,13 +1252,16 @@ impl Server {
         let window_name = topic_name.unwrap_or(&name);
         let window_id = self.tmux_mgr.new_window(window_name, &cwd.to_string_lossy()).await?;
 
-        // Launch agent with --resume flag
-        // Resume is Claude-specific (JSONL sessions), so always use the
-        // claude agent regardless of the registry default.
-        let agent = self.config.agent_registry.get("claude")
-            .unwrap_or_else(|| self.config.agent_registry.default());
-        let resume_cmd = agent.resume_command(session_id)
-            .unwrap_or_else(|| format!("{} --resume {}", agent.new_session_command(), session_id));
+        // Launch agent with resume command
+        let agent = self.config.agent_registry.default();
+        let resume_cmd = match agent.resume_command(session_id) {
+            Some(cmd) => cmd,
+            None => {
+                tracing::error!("Agent '{}' does not support session resume", agent.name());
+                let _ = self.im_adapter.send_message(target, "This agent does not support resuming sessions.").await;
+                return Ok(());
+            }
+        };
         self.tmux_mgr.send_line(&window_id, &resume_cmd).await?;
 
         // Notify user the session is ready instead of sending the first line to Claude
@@ -1684,10 +1693,19 @@ impl Server {
                 Err(_) => continue, // window gone
             };
 
-            // Strip ANSI and detect interactive UI
+            // Strip ANSI
             let clean = atim_parser::terminal::TerminalParser::strip_ansi(&pane_text);
-            let agent = atim_parser::terminal::TerminalParser::detect_agent(&clean, "claude");
-            let ui = atim_parser::terminal::TerminalParser::detect_interactive(&clean, agent);
+
+            // Look up the per-window agent from WindowState
+            let agent_type = state.window_states.get(&binding.window_id)
+                .map(|ws| ws.agent_type.as_str())
+                .unwrap_or("");
+            let agent = self.config.agent_registry.get(agent_type)
+                .unwrap_or_else(|| self.config.agent_registry.default());
+
+            // Use the agent's own parser for interactive UI detection
+            let parser = agent.parser();
+            let ui = parser.detect_interactive(&clean);
 
             // Compute content hash
             let content_hash = ui.as_ref()
@@ -1696,8 +1714,8 @@ impl Server {
 
             let prev = ui_states.get(&binding.window_id);
             if prev == Some(&content_hash) {
-                // UI unchanged — still check for pane output if non-Claude
-                if agent != atim_core::message::AgentKind::ClaudeCode {
+                // UI unchanged — still forward pane output if agent uses PaneCapture
+                if agent.output_source() == OutputSource::PaneCapture {
                     self.forward_new_pane_output(&binding, &clean, &mut pane_outputs).await;
                 }
                 continue;
@@ -1716,8 +1734,8 @@ impl Server {
                 let _ = self.im_adapter.send_keyboard(&target, &text, &buttons).await;
             }
 
-            // For non-Claude agents, forward terminal output
-            if agent != atim_core::message::AgentKind::ClaudeCode {
+            // Forward terminal output for PaneCapture agents
+            if agent.output_source() == OutputSource::PaneCapture {
                 self.forward_new_pane_output(&binding, &clean, &mut pane_outputs).await;
             }
         }

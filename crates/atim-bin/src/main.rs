@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use atim_core::agent::SessionDiscoverer;
+use atim_core::agent::Agent;
 use atim_core::config::Config;
 use atim_core::im::ImAdapter;
 use clap::{Parser, Subcommand};
@@ -134,7 +134,7 @@ async fn main() -> anyhow::Result<()> {
         let agent_type = resolved_state.window_states.get(wid)
             .map(|ws| ws.agent_type.as_str())
             .unwrap_or("");
-        if !agent_type.is_empty() && agent_type != "claude" {
+        if agent_type != "claude" {
             tracing::debug!(
                 "Window {wid} agent_type is '{agent_type}' — not Claude Code, skipping session discovery"
             );
@@ -142,7 +142,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         tracing::info!("No session_id for window {wid}, attempting to discover...");
-        if let Some(sid) = discover_session_for_window(wid, cwd, &known_ids).await {
+        if let Some(sid) = discover_session_for_window(wid, cwd, &known_ids) {
             tracing::info!("Discovered session {sid} for window {wid}, syncing to state and session_map");
             if let Some(ws) = resolved_state.window_states.get_mut(wid) {
                 ws.session_id = sid.clone();
@@ -236,26 +236,28 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Discover a session ID for a tmux window using ClaudeSessionDiscoverer.
+/// Discover a session ID for a tmux window using the Agent trait.
 ///
 /// Tries lsof-based PID tracing first, then falls back to project-slug
 /// matching against `~/.claude/projects/<slug>/`.
-async fn discover_session_for_window(
+fn discover_session_for_window(
     window_id: &str,
     cwd: &str,
     known_ids: &std::collections::HashSet<String>,
 ) -> Option<String> {
-    let discoverer = atim_core::agent::claude::ClaudeSessionDiscoverer;
+    let agent = atim_core::agent::claude::ClaudeAgent;
 
     // Phase 1: trace the pane PID with lsof
-    if let Some(sid) = discoverer.discover_by_pid(window_id).await {
+    if let Ok(Some(sid)) = agent.discover_session_by_pid(window_id) {
         return Some(sid);
     }
 
     // Phase 2: fallback to project-slug matching
     if !cwd.is_empty() {
         tracing::info!("lsof failed for window {window_id}, trying project-slug matching (cwd={cwd})");
-        return discoverer.discover(cwd, known_ids).await;
+        if let Ok(Some(sid)) = agent.discover_session(cwd, known_ids) {
+            return Some(sid);
+        }
     }
 
     None
@@ -331,7 +333,7 @@ mod tests {
 
         let state = ServerState {
             window_states: HashMap::from([
-                ("@0".into(), WindowState { session_id: "sess_a".into(), cwd: "/home".into(), window_name: "atim-100".into(), agent_type: String::new() }),
+                ("@0".into(), WindowState { session_id: "sess_a".into(), cwd: "/home".into(), window_name: "atim-100".into(), agent_type: "claude".into() }),
             ]),
             thread_bindings: vec![
                 ThreadBinding {
@@ -356,7 +358,7 @@ mod tests {
         let windows = HashMap::new(); // no windows at all
         let state = ServerState {
             window_states: HashMap::from([
-                ("@9".into(), WindowState { session_id: "sess_x".into(), cwd: "/tmp".into(), window_name: "ghost".into(), agent_type: String::new() }),
+                ("@9".into(), WindowState { session_id: "sess_x".into(), cwd: "/tmp".into(), window_name: "ghost".into(), agent_type: "claude".into() }),
             ]),
             thread_bindings: vec![
                 ThreadBinding {
@@ -387,7 +389,7 @@ mod tests {
         // Stale window_id "@old" — should be re-resolved to "@42" by matching display_name / window_name
         let state = ServerState {
             window_states: HashMap::from([
-                ("@old".into(), WindowState { session_id: "sess_y".into(), cwd: "/projects".into(), window_name: "atim-300".into(), agent_type: String::new() }),
+                ("@old".into(), WindowState { session_id: "sess_y".into(), cwd: "/projects".into(), window_name: "atim-300".into(), agent_type: "claude".into() }),
             ]),
             thread_bindings: vec![
                 ThreadBinding {
@@ -424,8 +426,8 @@ mod tests {
 
         let state = ServerState {
             window_states: HashMap::from([
-                ("@10".into(), WindowState { session_id: "sess_keep".into(), cwd: "/a".into(), window_name: "alive".into(), agent_type: String::new() }),
-                ("@99".into(), WindowState { session_id: "sess_dead".into(), cwd: "/b".into(), window_name: "dead".into(), agent_type: String::new() }),
+                ("@10".into(), WindowState { session_id: "sess_keep".into(), cwd: "/a".into(), window_name: "alive".into(), agent_type: "claude".into() }),
+                ("@99".into(), WindowState { session_id: "sess_dead".into(), cwd: "/b".into(), window_name: "dead".into(), agent_type: "claude".into() }),
             ]),
             thread_bindings: vec![
                 ThreadBinding {
@@ -465,7 +467,7 @@ mod tests {
                     session_id: "sess_alpha".into(),
                     cwd: "/alpha".into(),
                     window_name: "project-alpha".into(),
-                    agent_type: String::new(),
+                    agent_type: "claude".into(),
                 }),
             ]),
             thread_bindings: vec![],

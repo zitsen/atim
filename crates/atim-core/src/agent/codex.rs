@@ -1,5 +1,5 @@
 use super::AgentParser;
-use super::trait_def::{Agent, AgentId, OutputSource, SessionDiscoverer};
+use super::trait_def::{Agent, AgentId, OutputSource};
 use crate::message::{AgentKind, InteractiveUi, UiKind};
 
 /// Codex CLI spinner characters (common TUI spinner set).
@@ -175,10 +175,6 @@ impl Agent for CodexAgent {
 
     fn parser(&self) -> Box<dyn AgentParser> {
         Box::new(CodexParser)
-    }
-
-    fn session_discoverer(&self) -> Option<Box<dyn SessionDiscoverer>> {
-        None
     }
 
     fn graceful_shutdown_keys(&self) -> Vec<&'static str> {
