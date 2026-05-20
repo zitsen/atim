@@ -86,9 +86,11 @@ impl AgentParser for CodexParser {
                     }
                 }
                 // Also look for bracket-enclosed status: "[processing something]"
-                if trimmed.starts_with('[') && trimmed.len() > 3
+                if trimmed.starts_with('[')
+                    && trimmed.len() > 3
                     && let Some(end) = trimmed.find(']')
-                    && end > 1 && end < 30
+                    && end > 1
+                    && end < 30
                 {
                     return Some(trimmed[..=end].to_string());
                 }
