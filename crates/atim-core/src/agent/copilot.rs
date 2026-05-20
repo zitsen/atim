@@ -254,24 +254,53 @@ fn discover_by_pid_lsof(window_id: &str) -> Result<Option<String>> {
     }
 
     for pid in &all_pids {
+        // Phase 1: Match any open file under .copilot/session-state/<uuid>/ via lsof.
         if let Ok(lsof_out) = Command::new("lsof").args(["-p", pid, "-F", "n"]).output() {
             let out = String::from_utf8_lossy(&lsof_out.stdout);
             for line in out.lines() {
                 if let Some(path) = line.strip_prefix('n') {
-                    // Look for Copilot session files: events.jsonl under .copilot/session-state/<uuid>/
+                    // Copilot keeps session.db open (events.jsonl is written then closed).
                     if path.contains(".copilot")
                         && path.contains("session-state")
-                        && path.ends_with("events.jsonl")
+                        && path.contains("/")
                     {
-                        // Extract UUID from path: .../session-state/<uuid>/events.jsonl
-                        if let Some(parent) = std::path::Path::new(path).parent()
-                            && let Some(sid) = parent.file_name().and_then(|n| n.to_str())
-                                && sid.len() == 36 && sid.contains('-') {
-                                    tracing::info!(
-                                        "Discovered Copilot session {sid} for window {window_id} via lsof (PID {pid})"
-                                    );
-                                    return Ok(Some(sid.to_string()));
-                                }
+                        // Extract UUID from path: .../session-state/<uuid>/...
+                        let parent = std::path::Path::new(path).parent();
+                        if let Some(sid) = parent
+                            .and_then(|p| p.file_name())
+                            .and_then(|n| n.to_str())
+                            && sid.len() == 36
+                            && sid.contains('-')
+                        {
+                            tracing::info!(
+                                "Discovered Copilot session {sid} for window {window_id} via lsof (PID {pid})"
+                            );
+                            return Ok(Some(sid.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Phase 2: Fallback — check inuse.*.lock files in the sessions directory.
+        if let Some(sessions_dir) = copilot_sessions_dir() {
+            if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
+                for entry in entries.flatten() {
+                    let sid = entry.file_name();
+                    let sid = sid.to_string_lossy();
+                    if sid.len() != 36 || !sid.contains('-') {
+                        continue;
+                    }
+                    let lock_file = entry.path().join(format!("inuse.{pid}.lock"));
+                    if lock_file.exists() {
+                        if let Ok(content) = std::fs::read_to_string(&lock_file) {
+                            if content.trim() == *pid {
+                                tracing::info!(
+                                    "Discovered Copilot session {sid} for window {window_id} via inuse lock (PID {pid})"
+                                );
+                                return Ok(Some(sid.to_string()));
+                            }
+                        }
                     }
                 }
             }

@@ -259,9 +259,8 @@ impl SessionMonitor {
                 }
         }
 
-        // Phase 3: Scan filesystem for untracked JSONL files (Claude Code
-        // sometimes rotates session IDs without invoking the SessionStart hook,
-        // so the new session never appears in session_map.json or state.json).
+        // Phase 3: Scan filesystem for untracked JSONL files.
+        // 3a: Claude Code sessions — ~/.claude/projects/<slug>/<session_id>.jsonl.
         if let Ok(home) = std::env::var("HOME") {
             let claude_dir = Path::new(&home).join(".claude").join("projects");
             if claude_dir.exists() && let Ok(mut dir) = tokio::fs::read_dir(&claude_dir).await {
@@ -299,6 +298,41 @@ impl SessionMonitor {
                             );
                             session_ids.push(sid_str);
                         }
+                    }
+                }
+            }
+        }
+
+        // 3b: Copilot CLI sessions — ~/.copilot/session-state/<uuid>/events.jsonl.
+        if let Ok(home) = std::env::var("HOME") {
+            let copilot_dir = Path::new(&home).join(".copilot").join("session-state");
+            if copilot_dir.is_dir() && let Ok(mut dir) = tokio::fs::read_dir(&copilot_dir).await {
+                while let Ok(Some(entry)) = dir.next_entry().await {
+                    let Ok(ft) = entry.file_type().await else { continue; };
+                    if !ft.is_dir() { continue; }
+                    let fname = entry.file_name();
+                    let Some(sid) = fname.to_str() else { continue; };
+                    let sid_str = sid.to_string();
+                    if sid.len() != 36 || !sid.contains('-') { continue; }
+                    let path = entry.path().join("events.jsonl");
+                    if session_ids.contains(&sid_str) || all_known.contains(&sid_str) { continue; }
+                    {
+                        let offsets = self.byte_offsets.lock().await;
+                        if offsets.contains_key(&sid_str) { continue; }
+                    }
+                    if let Ok(meta) = tokio::fs::metadata(&path).await {
+                        let is_recent = meta.modified()
+                            .map(|m| m.elapsed().map(|e| e.as_secs() < 3600).unwrap_or(true))
+                            .unwrap_or(true);
+                        if !is_recent { continue; }
+                        let file_len = meta.len();
+                        let mut offsets = self.byte_offsets.lock().await;
+                        offsets.insert(sid_str.clone(), file_len);
+                        self.jsonl_cache.lock().await.insert(sid_str.clone(), path.clone());
+                        tracing::info!(
+                            "[monitor] Discovered untracked Copilot session {sid_str} via fs scan"
+                        );
+                        session_ids.push(sid_str);
                     }
                 }
             }

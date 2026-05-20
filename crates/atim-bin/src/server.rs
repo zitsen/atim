@@ -953,7 +953,18 @@ impl Server {
                             }
                         }
                     }
-                    self.tmux_mgr.send_line(&window_id, text).await?;
+                    let is_copilot = state
+                        .window_states
+                        .get(&binding.window_id)
+                        .map(|ws| ws.agent_type == "copilot")
+                        .unwrap_or(false);
+                    if is_copilot {
+                        self.tmux_mgr
+                            .send_line_chars(&window_id, text, 10)
+                            .await?;
+                    } else {
+                        self.tmux_mgr.send_line(&window_id, text).await?;
+                    }
                     let sc_chat_id = binding.group_chat_id.unwrap_or(binding.chat_id);
                     self.status_consumed
                         .lock()
@@ -969,7 +980,40 @@ impl Server {
                         info.current_command,
                         text.len(),
                     );
-                    let result = self.tmux_mgr.send_line(&window_id, text).await;
+
+                    // Try to resolve empty session_id (e.g. copilot sessions)
+                    if let Some(ws) = state.window_states.get(&binding.window_id)
+                        && ws.session_id.is_empty()
+                        && ws.agent_type == "copilot"
+                    {
+                        if let Some(agent) = self.config.agent_registry.get("copilot") {
+                            if let Ok(Some(sid)) = agent.discover_session_by_pid(&window_id.0) {
+                                if let Ok(mut new_state) = self.state_mgr.load_state().await {
+                                    if let Some(ws) = new_state.window_states.get_mut(&binding.window_id) {
+                                        ws.session_id = sid.clone();
+                                        tracing::info!(
+                                            "[handle_text_message] Resolved copilot session_id={sid} for window {}",
+                                            binding.window_id,
+                                        );
+                                    }
+                                    let _ = self.state_mgr.save_state(&new_state).await;
+                                }
+                            }
+                        }
+                    }
+
+                    let is_copilot = state
+                        .window_states
+                        .get(&binding.window_id)
+                        .map(|ws| ws.agent_type == "copilot")
+                        .unwrap_or(false);
+                    let result = if is_copilot {
+                        self.tmux_mgr
+                            .send_line_chars(&window_id, text, 10)
+                            .await
+                    } else {
+                        self.tmux_mgr.send_line(&window_id, text).await
+                    };
                     match &result {
                         Ok(()) => tracing::info!(
                             "[handle_text_message] window={} send_line OK",
@@ -2515,6 +2559,40 @@ impl Server {
         let new_path = resolve_jsonl(session_id).await?;
         let new_parent = new_path.parent()?;
 
+        // Determine agent type from the session path
+        let is_copilot = new_path
+            .to_str()
+            .map(|p| p.contains(".copilot") && p.contains("session-state"))
+            .unwrap_or(false);
+
+        if is_copilot {
+            // Copilot sessions: match by PID using inuse lock files.
+            for (wid, ws) in &state.window_states {
+                if ws.agent_type != "copilot" { continue; }
+                let discovered = self
+                    .config
+                    .agent_registry
+                    .get("copilot")
+                    .and_then(|a| a.discover_session_by_pid(wid).ok()?);
+                if let Some(sid) = discovered {
+                    if sid == session_id {
+                        if let Ok(mut new_state) = self.state_mgr.load_state().await {
+                            if let Some(ws) = new_state.window_states.get_mut(wid) {
+                                ws.session_id = session_id.to_string();
+                                tracing::info!(
+                                    "[pipe] Updated copilot window {wid} session: {session_id}"
+                                );
+                            }
+                            let _ = self.state_mgr.save_state(&new_state).await;
+                        }
+                        return Some(wid.clone());
+                    }
+                }
+            }
+            return None;
+        }
+
+        // Claude Code sessions: match by project directory.
         for (wid, ws) in &state.window_states {
             if ws.session_id.is_empty() || ws.agent_type != "claude" {
                 continue;

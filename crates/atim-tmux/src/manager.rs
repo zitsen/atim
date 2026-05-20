@@ -260,6 +260,33 @@ impl TmuxManager {
         Ok(())
     }
 
+    /// Send text character-by-character followed by Enter.
+    ///
+    /// This is more reliable for bubbletea TUIs (e.g. Copilot CLI) that
+    /// process individual key events. Each character is sent as a separate
+    /// `send-keys -l` call with a `char_delay_ms` pause between them.
+    pub async fn send_line_chars(
+        &self,
+        window_id: &WindowId,
+        text: &str,
+        char_delay_ms: u64,
+    ) -> Result<()> {
+        for c in text.chars() {
+            let mut buf = [0u8; 4];
+            let s: &str = c.encode_utf8(&mut buf);
+            self.tmux(&["send-keys", "-t", &window_id.0, "-l", s])
+                .await?;
+            if char_delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(char_delay_ms)).await;
+            }
+        }
+        if !self.send_delay.is_zero() {
+            tokio::time::sleep(self.send_delay).await;
+        }
+        self.send_key(window_id, "Enter").await?;
+        Ok(())
+    }
+
     /// Interrupt whatever the agent is doing (Ctrl-C).
     pub async fn interrupt(&self, window_id: &WindowId) -> Result<()> {
         self.send_key(window_id, "C-c").await
