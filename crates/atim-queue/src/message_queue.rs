@@ -39,6 +39,12 @@ struct PendingContent {
     text: String,
 }
 
+impl Default for MessageQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MessageQueue {
     pub fn new() -> Self {
         Self {
@@ -77,8 +83,8 @@ impl MessageQueue {
     /// message, with old content trimmed to stay under the length limit.
     pub fn enqueue_content(&mut self, target: MessageTarget, text: String) {
         // Merge with existing pending content for the same target
-        if let Some(ref mut pc) = self.pending_content {
-            if pc.target == target {
+        if let Some(ref mut pc) = self.pending_content
+            && pc.target == target {
                 let merged = Self::merge_content(&pc.text, &text);
                 if merged.len() <= MAX_MSG_LEN {
                     pc.text = merged;
@@ -88,7 +94,6 @@ impl MessageQueue {
                 // start a new segment
                 self.flush_pending_content();
             }
-        }
 
         self.pending_content = Some(PendingContent { target, text });
     }

@@ -179,8 +179,8 @@ impl JsonlParser {
                                     });
                                 }
 
-                                if let Some(images) = extracted.images {
-                                    if !images.is_empty() {
+                                if let Some(images) = extracted.images
+                                    && !images.is_empty() {
                                         entries.push(ParsedEntry {
                                             role: role.clone(),
                                             text: String::new(),
@@ -191,7 +191,6 @@ impl JsonlParser {
                                             image_data: Some(images),
                                         });
                                     }
-                                }
 
                                 if !has_text && !has_images {
                                     full_text.push_str(&extracted.text);
@@ -356,13 +355,11 @@ fn extract_exit_code(text: &str) -> Option<i32> {
     for line in text.lines().rev() {
         let line = line.trim();
         // Match "[Exit 0]", "[Exit 1]", etc.
-        if let Some(cap) = line.strip_prefix("[Exit ") {
-            if let Some(code_str) = cap.strip_suffix(']') {
-                if let Ok(code) = code_str.parse::<i32>() {
+        if let Some(cap) = line.strip_prefix("[Exit ")
+            && let Some(code_str) = cap.strip_suffix(']')
+                && let Ok(code) = code_str.parse::<i32>() {
                     return Some(code);
                 }
-            }
-        }
         // Match "exit code N" or "exit code: N"
         if line.contains("exit code") || line.contains("exit_code") {
             for word in line.split_whitespace() {
@@ -434,15 +431,11 @@ fn extract_tool_result_text(content: Option<&serde_json::Value>) -> ExtractedCon
                         let source = block.get("source");
                         if let Some(media_type) =
                             source.and_then(|s| s.get("media_type").and_then(|v| v.as_str()))
-                        {
-                            if let Some(data) =
+                            && let Some(data) =
                                 source.and_then(|s| s.get("data").and_then(|v| v.as_str()))
-                            {
-                                if let Ok(bytes) = BASE64_STANDARD.decode(data) {
+                                && let Ok(bytes) = BASE64_STANDARD.decode(data) {
                                     images.push((media_type.to_string(), bytes));
                                 }
-                            }
-                        }
                     }
                     Some("tool_result_block") => {
                         let inner = extract_tool_result_text(Some(block));

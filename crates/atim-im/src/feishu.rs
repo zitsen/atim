@@ -42,6 +42,8 @@ pub struct FeishuAdapter {
     bot_open_id: Arc<RwLock<Option<String>>>,
     /// Bot's display name, also used for @-mention detection.
     bot_name: Arc<RwLock<Option<String>>>,
+    /// Cached group chat names: Feishu chat_id → display name.
+    chat_names: Arc<RwLock<HashMap<String, String>>>,
 }
 
 /// Cached tenant access token with auto-refresh via AuthService.
@@ -84,9 +86,10 @@ impl FeishuAdapter {
             event_tx: Arc::new(RwLock::new(None)),
             bot_open_id: Arc::new(RwLock::new(None)),
             bot_name: Arc::new(RwLock::new(None)),
+            chat_names: Arc::new(RwLock::new(HashMap::new())),
         };
         // Load persisted id_map so previously-registered chat_ids resolve on restart
-        let _ = adapter.load_id_map_sync();
+        adapter.load_id_map_sync();
         adapter
     }
 
@@ -291,13 +294,44 @@ impl FeishuAdapter {
         map.chat_ids.get(&cid.0).cloned()
     }
 
-    /// Add thread_id to a request body if the target has one.
-    async fn add_thread_id(&self, body: &mut serde_json::Value, target: &MessageTarget) {
-        if let Some(ref thread_id) = target.thread_id {
-            if let Some(root_id) = self.get_thread_root_id(thread_id).await {
-                body["thread_id"] = serde_json::json!(root_id);
+    /// Fetch the group chat name from Feishu API, caching the result.
+    ///
+    /// Returns `None` if the API call fails or the name is empty.
+    async fn fetch_chat_name(&self, chat_id: &str) -> Option<String> {
+        // Check cache first
+        {
+            let cache = self.chat_names.read().await;
+            if let Some(name) = cache.get(chat_id) {
+                return Some(name.clone());
             }
         }
+
+        // Fetch from API
+        let path = format!("/im/v1/chats/{chat_id}");
+        match self.api_get(&path).await {
+            Ok(data) => {
+                let name = data["name"].as_str().unwrap_or("").to_string();
+                if !name.is_empty() {
+                    let mut cache = self.chat_names.write().await;
+                    cache.insert(chat_id.to_string(), name.clone());
+                    Some(name)
+                } else {
+                    None
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to fetch chat name for {chat_id}: {e}");
+                None
+            }
+        }
+    }
+
+    /// Add thread_id to a request body if the target has one.
+    async fn add_thread_id(&self, body: &mut serde_json::Value, target: &MessageTarget) {
+        if let Some(ref thread_id) = target.thread_id
+            && let Some(root_id) = self.get_thread_root_id(thread_id).await {
+                body["thread_id"] = serde_json::json!(root_id);
+            }
     }
 
     /// Persist the current id_map to disk.
@@ -666,7 +700,7 @@ impl ImAdapter for FeishuAdapter {
             "send_keyboard to chat_id={chat_id} target_chat={:?} target_thread={:?} text={}",
             target.chat_id.0,
             target.thread_id,
-            &text[..text.len().min(50)]
+            &text[..text.floor_char_boundary(text.len().min(50))]
         );
 
         let card = build_card(text, buttons);
@@ -842,6 +876,7 @@ impl Clone for FeishuAdapter {
             event_tx: self.event_tx.clone(),
             bot_open_id: self.bot_open_id.clone(),
             bot_name: self.bot_name.clone(),
+            chat_names: self.chat_names.clone(),
         }
     }
 }
@@ -888,6 +923,24 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
         thread_id,
     };
 
+    // For group chats, fetch the chat name and emit TopicCreated so the
+    // server can use it as the window/topic name (e.g. "atim" instead of
+    // "atim-<user_id>").
+    if chat_type == "group"
+        && let Some(chat_name) = adapter.fetch_chat_name(chat_id).await {
+            let topic_target = MessageTarget {
+                chat_id: chat_id_atim,
+                thread_id,
+            };
+            if let Some(tx) = adapter.event_tx.read().await.as_ref() {
+                let _ = tx.send(ImEvent {
+                    user_id,
+                    target: topic_target,
+                    kind: ImEventKind::TopicCreated { name: chat_name },
+                });
+            }
+        }
+
     let parsed_content: serde_json::Value =
         serde_json::from_str(message["content"].as_str().unwrap_or("{}")).unwrap_or_default();
 
@@ -912,16 +965,16 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
                         };
                         // Fallback: check by name
                         let is_bot = is_bot
-                            || bot_name.as_ref().map_or(false, |name| {
+                            || bot_name.as_ref().is_some_and(|name| {
                                 mention["name"]
                                     .as_str()
-                                    .map_or(false, |n| n.contains(name) || name.contains(n))
+                                    .is_some_and(|n| n.contains(name) || name.contains(n))
                             });
                         // Broader fallback: any mention named "bot" or the app_id prefix
                         let is_bot = is_bot
                             || mention["name"]
                                 .as_str()
-                                .map_or(false, |n| n.contains("bot") || adapter.app_id.contains(n));
+                                .is_some_and(|n| n.contains("bot") || adapter.app_id.contains(n));
                         if is_bot {
                             has_mention = true;
                         }
@@ -1150,12 +1203,11 @@ fn build_card(text: &str, buttons: &[Vec<Button>]) -> serde_json::Value {
 fn extract_post_content_text(content: &serde_json::Value) -> String {
     let mut result = String::new();
 
-    if let Some(title) = content["title"].as_str() {
-        if !title.is_empty() {
+    if let Some(title) = content["title"].as_str()
+        && !title.is_empty() {
             result.push_str(title);
             result.push('\n');
         }
-    }
 
     if let Some(paragraphs) = content["content"].as_array() {
         for (i, para) in paragraphs.iter().enumerate() {

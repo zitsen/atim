@@ -13,7 +13,7 @@ use atim_core::message::{
 };
 use atim_core::message::{InteractiveUi, UiKind};
 use atim_core::session::{ThreadBinding, WindowState};
-use atim_monitor::monitor::MonitorEvent;
+use atim_monitor::monitor::{resolve_jsonl, MonitorEvent};
 use atim_queue::message_queue::MessageQueue;
 use atim_state::persistence::StateManager;
 use atim_tmux::manager::TmuxManager;
@@ -301,12 +301,27 @@ impl Server {
                     {
                         Some((wid, _)) => wid.clone(),
                         None => {
-                            tracing::warn!(
-                                "[pipe] No window_state for session_id={} (have {} window_states)",
-                                _sid,
-                                state.window_states.len(),
-                            );
-                            continue;
+                            // Fallback: session_id not in window_states. This happens when
+                            // Claude Code rotates sessions internally without triggering the
+                            // SessionStart hook. Try to match by checking if the unknown
+                            // session's JSONL shares a project directory with a known session.
+                            let matched = self.match_unknown_session(_sid, &state).await;
+                            match matched {
+                                Some(wid) => {
+                                    tracing::info!(
+                                        "[pipe] Fallback: matched unknown session {_sid} to window {wid}",
+                                    );
+                                    wid
+                                }
+                                None => {
+                                    tracing::warn!(
+                                        "[pipe] No window_state for session_id={} (have {} window_states) and fallback failed",
+                                        _sid,
+                                        state.window_states.len(),
+                                    );
+                                    continue;
+                                }
+                            }
                         }
                     };
 
@@ -405,8 +420,8 @@ impl Server {
                         match msg.content_type {
                             ContentType::ToolUse => {
                                 flush!();
-                                if let Some(tuid) = &msg.tool_use_id {
-                                    if let Ok(mid) =
+                                if let Some(tuid) = &msg.tool_use_id
+                                    && let Ok(mid) =
                                         self.im_adapter.send_message(&target, &msg.text).await
                                     {
                                         self.tool_use_msg_ids
@@ -414,7 +429,6 @@ impl Server {
                                             .await
                                             .insert((chat_id, thread_id_val, tuid.clone()), mid);
                                     }
-                                }
                             }
                             ContentType::ToolResult => {
                                 flush!();
@@ -461,11 +475,10 @@ impl Server {
                     if let Some(ws) = state.window_states.get_mut(window_id) {
                         // Only assign session_ids for agents that support
                         // tracked sessions — skip agents with no JSONL logs.
-                        if let Some(agent) = self.config.agent_registry.get(&ws.agent_type) {
-                            if !agent.supports_sessions() {
+                        if let Some(agent) = self.config.agent_registry.get(&ws.agent_type)
+                            && !agent.supports_sessions() {
                                 continue;
                             }
-                        }
                         if ws.session_id.is_empty() {
                             ws.session_id = session_id.clone();
                             synced += 1;
@@ -660,12 +673,11 @@ impl Server {
                 let mut stopped = false;
                 for _ in 0..10 {
                     tokio::time::sleep(Duration::from_millis(500)).await;
-                    if let Ok(info) = self.tmux_mgr.find_window(&window_id).await {
-                        if is_shell_process(&info.current_command) {
+                    if let Ok(info) = self.tmux_mgr.find_window(&window_id).await
+                        && is_shell_process(&info.current_command) {
                             stopped = true;
                             break;
                         }
-                    }
                 }
                 if !stopped {
                     tracing::warn!(
@@ -682,12 +694,11 @@ impl Server {
                 let mut started = false;
                 for _ in 0..10 {
                     tokio::time::sleep(Duration::from_millis(500)).await;
-                    if let Ok(info) = self.tmux_mgr.find_window(&window_id).await {
-                        if !is_shell_process(&info.current_command) {
+                    if let Ok(info) = self.tmux_mgr.find_window(&window_id).await
+                        && !is_shell_process(&info.current_command) {
                             started = true;
                             break;
                         }
-                    }
                 }
                 if !started {
                     tracing::warn!(
@@ -706,11 +717,10 @@ impl Server {
 
                 // Also remove the old session_id from session_map so that
                 // the next SessionMapChanged event won't re-fill it.
-                if let Ok(mut map) = self.state_mgr.load_session_map().await {
-                    if map.remove(&binding.window_id).is_some() {
+                if let Ok(mut map) = self.state_mgr.load_session_map().await
+                    && map.remove(&binding.window_id).is_some() {
                         let _ = self.state_mgr.save_session_map(&map).await;
                     }
-                }
 
                 let _ = self
                     .im_adapter
@@ -796,8 +806,8 @@ impl Server {
         }
 
         // If user has an active directory browsing session, use `z` for text-based navigation
-        if let Some(browser_state) = self.browser.get_state(user_id).await {
-            if browser_state.mode == crate::browser::BrowserMode::Browsing {
+        if let Some(browser_state) = self.browser.get_state(user_id).await
+            && browser_state.mode == crate::browser::BrowserMode::Browsing {
                 let trimmed = text.trim();
                 if !trimmed.is_empty() {
                     match zoxide_query(trimmed).await {
@@ -820,25 +830,34 @@ impl Server {
                     }
                 }
             }
-        }
 
         // Find binding for this user+thread
         if let Some(binding) = state.thread_bindings.iter().find(|b| {
             b.user_id == user_id && b.thread_id == target.thread_id.map(|t| t.0).unwrap_or(0)
         }) {
-            tracing::debug!(
-                "[Feishu] Found binding for user {user_id}: window={}",
-                binding.window_id
+            let agent_type = state
+                .window_states
+                .get(&binding.window_id)
+                .map(|ws| format!(
+                    "agent_type={} session_id={}",
+                    ws.agent_type,
+                    if ws.session_id.is_empty() { "none" } else { &ws.session_id }
+                ))
+                .unwrap_or_else(|| "no_window_state".into());
+            tracing::info!(
+                "[handle_text_message] user={user_id} window={} {} text={text:?}",
+                binding.window_id,
+                agent_type,
             );
             // Forward to existing window
             let window_id = atim_core::message::WindowId(binding.window_id.clone());
 
-            // Verify window is alive and agent (Claude Code) is actually running
+            // Verify window is alive and agent is actually running
             match self.tmux_mgr.find_window(&window_id).await {
-                Err(_) => {
+                Err(e) => {
                     // Window died — clear binding and notify user
                     tracing::warn!(
-                        "Window {} died, clearing binding for user {}",
+                        "[handle_text_message] Window {} died ({e}), clearing binding for user {}",
                         binding.window_id,
                         user_id
                     );
@@ -853,44 +872,110 @@ impl Server {
                     return Ok(());
                 }
                 Ok(info) if is_shell_process(&info.current_command) => {
-                    // Agent might still be starting — retry briefly before giving up
-                    for _ in 0..6 {
+                    tracing::info!(
+                        "[handle_text_message] window={} shell process '{}'",
+                        binding.window_id,
+                        info.current_command,
+                    );
+                    // Re-launch the agent if it exited to shell, then send the text.
+                    let agent_type_name = state
+                        .window_states
+                        .get(&binding.window_id)
+                        .map(|ws| ws.agent_type.as_str())
+                        .unwrap_or("claude");
+                    let agent = self
+                        .config
+                        .agent_registry
+                        .get(agent_type_name)
+                        .cloned()
+                        .unwrap_or_else(|| self.config.agent_registry.default().clone());
+                    tracing::info!(
+                        "[handle_text_message] re-launching {} for window {}",
+                        agent.name(),
+                        binding.window_id,
+                    );
+                    let launch_cmd = agent_launch_cmd(&agent);
+                    self.tmux_mgr
+                        .send_line(&window_id, &launch_cmd)
+                        .await?;
+                    // Poll until agent starts (up to 5s)
+                    let mut started = false;
+                    for _ in 0..10 {
                         tokio::time::sleep(Duration::from_millis(500)).await;
-                        if let Ok(info2) = self.tmux_mgr.find_window(&window_id).await {
-                            if !is_shell_process(&info2.current_command) {
-                                self.tmux_mgr.send_line(&window_id, text).await?;
-                                let sc_chat_id = binding.group_chat_id.unwrap_or(binding.chat_id);
-                                self.status_consumed
-                                    .lock()
-                                    .await
-                                    .remove(&(sc_chat_id, binding.thread_id));
-                                return Ok(());
-                            }
-                        } else {
+                        if let Ok(info2) = self.tmux_mgr.find_window(&window_id).await
+                            && !is_shell_process(&info2.current_command)
+                        {
+                            started = true;
                             break;
                         }
                     }
-                    tracing::warn!(
-                        "Window {} has shell '{}' running instead of '{}', clearing binding",
-                        binding.window_id,
-                        info.current_command,
-                        agent_launch_cmd(self.config.agent_registry.default())
-                    );
-                    let _ = self.tmux_mgr.kill_window(&window_id).await;
-                    let mut new_state = state.clone();
-                    new_state
-                        .thread_bindings
-                        .retain(|b| b.window_id != window_id.0);
-                    new_state.window_states.remove(&binding.window_id);
-                    self.state_mgr.save_state(&new_state).await?;
-                    let _ = self.im_adapter.send_message(&target,
-                        "Session expired. Please send your message again to start a new session."
-                    ).await;
+                    if !started {
+                        tracing::warn!(
+                            "[handle_text_message] {} did not start within 5s for window {}, \
+                             sending text anyway",
+                            agent.name(),
+                            binding.window_id,
+                        );
+                    }
+                    // Extra delay for TUI agents (Copilot/Codex) so bubbletea can set up
+                    if !agent.supports_sessions() {
+                        tokio::time::sleep(Duration::from_millis(1500)).await;
+                    }
+                    // For session-based agents (Claude Code), wait for the SessionStart hook
+                    // to register the new session_id, then sync to state.json so the monitor
+                    // can track and route responses.
+                    if agent.supports_sessions() {
+                        for _ in 0..10 {
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                            if let Ok(map) = self.state_mgr.load_session_map().await
+                                && map.get(&binding.window_id)
+                                    .map(|s| s.as_str())
+                                    != state.window_states.get(&binding.window_id)
+                                        .map(|ws| ws.session_id.as_str())
+                            {
+                                let mut new_state = self.state_mgr.load_state().await?;
+                                if let Some(sid) = map.get(&binding.window_id)
+                                    && let Some(ws) = new_state.window_states.get_mut(&binding.window_id)
+                                {
+                                    ws.session_id = sid.clone();
+                                }
+                                let _ = self.state_mgr.save_state(&new_state).await;
+                                tracing::info!(
+                                    "[handle_text_message] updated session_id for window {} after re-launch",
+                                    binding.window_id,
+                                );
+                                break;
+                            }
+                        }
+                    }
+                    self.tmux_mgr.send_line(&window_id, text).await?;
+                    let sc_chat_id = binding.group_chat_id.unwrap_or(binding.chat_id);
+                    self.status_consumed
+                        .lock()
+                        .await
+                        .remove(&(sc_chat_id, binding.thread_id));
                     return Ok(());
                 }
-                Ok(_) => {
+                Ok(info) => {
                     // Agent is running — send text
-                    self.tmux_mgr.send_line(&window_id, text).await?;
+                    tracing::info!(
+                        "[handle_text_message] window={} process='{}' sending text len={}",
+                        binding.window_id,
+                        info.current_command,
+                        text.len(),
+                    );
+                    let result = self.tmux_mgr.send_line(&window_id, text).await;
+                    match &result {
+                        Ok(()) => tracing::info!(
+                            "[handle_text_message] window={} send_line OK",
+                            binding.window_id,
+                        ),
+                        Err(e) => tracing::error!(
+                            "[handle_text_message] window={} send_line failed: {e}",
+                            binding.window_id,
+                        ),
+                    }
+                    result?;
                     let sc_chat_id = binding.group_chat_id.unwrap_or(binding.chat_id);
                     self.status_consumed
                         .lock()
@@ -1348,7 +1433,7 @@ impl Server {
                         .edit_message(target, msg_id, "Creating new session...")
                         .await;
                     self.create_and_bind_in_dir(
-                        &target,
+                        target,
                         user_id,
                         text,
                         &state.current_path,
@@ -1379,7 +1464,7 @@ impl Server {
                     .edit_message(target, msg_id, "Creating new session...")
                     .await;
                 self.create_and_bind_in_dir(
-                    &target,
+                    target,
                     user_id,
                     text,
                     &state.current_path,
@@ -1391,13 +1476,12 @@ impl Server {
                 // Navigate to a directory by index
                 let idx: usize = d[4..].parse().unwrap_or(0);
                 let listing = browser::get_dir_listing(&state);
-                if let Some(entry) = listing.entries.get(idx) {
-                    if entry.is_dir {
+                if let Some(entry) = listing.entries.get(idx)
+                    && entry.is_dir {
                         self.browser.navigate_to(user_id, &entry.path).await;
                         let _ = self.send_browser_keyboard(target, user_id, thread_id).await;
                         let _ = self.im_adapter.delete_message(target, msg_id).await;
                     }
-                }
             }
             s if s.starts_with("sel:") => {
                 // Select a session from the picker by index
@@ -1405,8 +1489,7 @@ impl Server {
                 let state_now = self.browser.get_state(user_id).await;
                 if let Some(BrowserMode::SessionPick { sessions }) =
                     state_now.as_ref().map(|s| &s.mode)
-                {
-                    if let Some(session) = sessions.get(idx) {
+                    && let Some(session) = sessions.get(idx) {
                         let topic_name = self
                             .topic_names
                             .lock()
@@ -1418,7 +1501,7 @@ impl Server {
                             .edit_message(target, msg_id, "Resuming session...")
                             .await;
                         self.create_and_bind_with_resume(
-                            &target,
+                            target,
                             user_id,
                             text,
                             &state.current_path,
@@ -1427,7 +1510,6 @@ impl Server {
                         )
                         .await?;
                     }
-                }
             }
             "new_win" => {
                 // User chose "New Session" from window picker — go to directory browser
@@ -1441,8 +1523,7 @@ impl Server {
                 let state_now = self.browser.get_state(user_id).await;
                 if let Some(BrowserMode::WindowPick { windows }) =
                     state_now.as_ref().map(|s| &s.mode)
-                {
-                    if let Some(entry) = windows.get(idx) {
+                    && let Some(entry) = windows.get(idx) {
                         self.browser.end_session(user_id).await;
                         let _ = self
                             .im_adapter
@@ -1454,7 +1535,7 @@ impl Server {
                             .await
                             .remove(&(target.chat_id.0, thread_id));
                         self.bind_window(
-                            &target,
+                            target,
                             user_id,
                             text,
                             &entry.window_id,
@@ -1462,7 +1543,6 @@ impl Server {
                         )
                         .await?;
                     }
-                }
             }
             _ => {
                 tracing::warn!("Unknown browser action: {action}");
@@ -1508,16 +1588,14 @@ impl Server {
 
         // Phase 1: Poll session_map.json for the hook's entry (every 300ms)
         while start.elapsed() < timeout {
-            if let Ok(map) = self.state_mgr.load_session_map().await {
-                if let Some(sid) = map.get(window_id) {
-                    if !sid.is_empty() {
+            if let Ok(map) = self.state_mgr.load_session_map().await
+                && let Some(sid) = map.get(window_id)
+                    && !sid.is_empty() {
                         tracing::info!(
                             "Found session {sid} for window {window_id} via session_map"
                         );
                         return Some(sid.clone());
                     }
-                }
-            }
             tokio::time::sleep(Duration::from_millis(300)).await;
         }
 
@@ -1602,11 +1680,10 @@ impl Server {
 
         // Wait for agent process to actually start (non-shell process appears)
         for _ in 0..10 {
-            if let Ok(info) = self.tmux_mgr.find_window(&window_id).await {
-                if !is_shell_process(&info.current_command) {
+            if let Ok(info) = self.tmux_mgr.find_window(&window_id).await
+                && !is_shell_process(&info.current_command) {
                     break;
                 }
-            }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
@@ -1754,8 +1831,8 @@ impl Server {
         let _ = self.tmux_mgr.rename_window(&wid, &window_name).await;
 
         // If the pane is running a shell (agent hasn't started), launch it now
-        if let Ok(info) = self.tmux_mgr.find_window(&wid).await {
-            if is_shell_process(&info.current_command) {
+        if let Ok(info) = self.tmux_mgr.find_window(&wid).await
+            && is_shell_process(&info.current_command) {
                 let agent = self
                     .resolve_agent(
                         user_id,
@@ -1767,15 +1844,13 @@ impl Server {
                 self.tmux_mgr.send_line(&wid, &launch_cmd).await?;
                 // Wait for agent process to start
                 for _ in 0..10 {
-                    if let Ok(info) = self.tmux_mgr.find_window(&wid).await {
-                        if !is_shell_process(&info.current_command) {
+                    if let Ok(info) = self.tmux_mgr.find_window(&wid).await
+                        && !is_shell_process(&info.current_command) {
                             break;
                         }
-                    }
                     tokio::time::sleep(Duration::from_millis(500)).await;
                 }
             }
-        }
 
         // Notify user the session is ready
         let _ = self
@@ -1851,11 +1926,10 @@ impl Server {
 
         // Wait for agent process to actually start (non-shell process appears)
         for _ in 0..10 {
-            if let Ok(info) = self.tmux_mgr.find_window(&window_id).await {
-                if !is_shell_process(&info.current_command) {
+            if let Ok(info) = self.tmux_mgr.find_window(&window_id).await
+                && !is_shell_process(&info.current_command) {
                     break;
                 }
-            }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
@@ -2078,7 +2152,7 @@ impl Server {
                     self.pending_agents
                         .lock()
                         .await
-                        .insert(key.clone(), agent_name.clone());
+                        .insert(key, agent_name.clone());
                 }
                 // Re-insert pending message for the subsequent setup flow
                 self.pending_messages.lock().await.insert(key, text);
@@ -2272,7 +2346,7 @@ impl Server {
             if prev == Some(&content_hash) {
                 // UI unchanged — still forward pane output if agent uses PaneCapture
                 if agent.output_source() == OutputSource::PaneCapture {
-                    self.forward_new_pane_output(&binding, &clean, &mut pane_outputs)
+                    self.forward_new_pane_output(binding, &clean, &mut pane_outputs)
                         .await;
                 }
                 continue;
@@ -2281,25 +2355,33 @@ impl Server {
 
             // New or changed UI — send keyboard
             if let Some(interactive) = ui {
-                let target = MessageTarget {
-                    chat_id: ChatId(binding.group_chat_id.unwrap_or(binding.chat_id)),
-                    thread_id: Some(ThreadId(binding.thread_id)),
-                };
-                let buttons = ui_to_buttons(&interactive);
-                let header = format!("🧭 {}:", ui_display_name(interactive.kind));
-                let text = format!(
-                    "{header}\n{content}",
-                    content = truncate_ui_content(&interactive.content, 200)
-                );
-                let _ = self
-                    .im_adapter
-                    .send_keyboard(&target, &text, &buttons)
-                    .await;
+                // For PaneCapture agents (Copilot, Codex), skip AskUser cards —
+                // their normal prompt (❯) is wrongly detected as a question via
+                // stale scrollback content. The response is forwarded via
+                // forward_new_pane_output instead.
+                let should_send_card = agent.output_source() != OutputSource::PaneCapture
+                    || interactive.kind != UiKind::AskUserQuestion;
+                if should_send_card {
+                    let target = MessageTarget {
+                        chat_id: ChatId(binding.group_chat_id.unwrap_or(binding.chat_id)),
+                        thread_id: Some(ThreadId(binding.thread_id)),
+                    };
+                    let buttons = ui_to_buttons(&interactive);
+                    let header = format!("🧭 {}:", ui_display_name(interactive.kind));
+                    let text = format!(
+                        "{header}\n{content}",
+                        content = truncate_ui_content(&interactive.content, 200)
+                    );
+                    let _ = self
+                        .im_adapter
+                        .send_keyboard(&target, &text, &buttons)
+                        .await;
+                }
             }
 
             // Forward terminal output for PaneCapture agents
             if agent.output_source() == OutputSource::PaneCapture {
-                self.forward_new_pane_output(&binding, &clean, &mut pane_outputs)
+                self.forward_new_pane_output(binding, &clean, &mut pane_outputs)
                     .await;
             }
         }
@@ -2411,6 +2493,48 @@ impl Server {
         };
 
         let _ = self.im_adapter.send_message(&target, &display).await;
+    }
+
+    /// Try to associate an unknown session_id with a window by matching the
+    /// JSONL project directory against the window's tracked session project dir.
+    ///
+    /// This handles the case where Claude Code rotates session IDs internally
+    /// without triggering the SessionStart hook. The monitor discovers the
+    /// new JSONL via filesystem scan, but the server needs to figure out
+    /// which window the new session belongs to.
+    async fn match_unknown_session(
+        &self,
+        session_id: &str,
+        state: &atim_core::session::ServerState,
+    ) -> Option<String> {
+        let new_path = resolve_jsonl(session_id).await?;
+        let new_parent = new_path.parent()?;
+
+        for (wid, ws) in &state.window_states {
+            if ws.session_id.is_empty() || ws.agent_type != "claude" {
+                continue;
+            }
+            // Compare project directories: if the old session's JSONL is in
+            // the same project directory as the new session's JSONL, assume
+            // they belong to the same window.
+            if let Some(old_path) = resolve_jsonl(&ws.session_id).await {
+                if old_path.parent() == Some(new_parent) {
+                    // Persist the new mapping so future lookups are direct
+                    if let Ok(mut new_state) = self.state_mgr.load_state().await {
+                        if let Some(ws) = new_state.window_states.get_mut(wid) {
+                            ws.session_id = session_id.to_string();
+                            tracing::info!(
+                                "[pipe] Updated window {wid} session: {} → {session_id}",
+                                ws.session_id,
+                            );
+                        }
+                        let _ = self.state_mgr.save_state(&new_state).await;
+                    }
+                    return Some(wid.clone());
+                }
+            }
+        }
+        None
     }
 }
 
@@ -2596,9 +2720,7 @@ fn parse_usage_output(raw: &str) -> String {
         if !in_usage {
             // Also check for common box-drawing chars around "Usage"
             if trimmed
-                .replace('─', "")
-                .replace('╭', "")
-                .replace('│', "")
+                .replace(['─', '╭', '│'], "")
                 .trim()
                 .eq_ignore_ascii_case("usage")
             {
@@ -2654,8 +2776,7 @@ fn parse_usage_output(raw: &str) -> String {
 
         // Clean up any remaining box-drawing chars
         let cleaned = normalized
-            .replace('│', "")
-            .replace('┃', "")
+            .replace(['│', '┃'], "")
             .trim()
             .to_string();
 
@@ -2779,7 +2900,8 @@ fn truncate_ui_content(content: &str, max_len: usize) -> String {
     if stripped.len() <= max_len {
         stripped
     } else {
-        format!("{}...", &stripped[..max_len])
+        let end = stripped.floor_char_boundary(max_len);
+        format!("{}...", &stripped[..end])
     }
 }
 

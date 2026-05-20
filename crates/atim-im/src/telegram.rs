@@ -38,17 +38,16 @@ fn markdown_to_html(text: &str) -> String {
                 Tag::Strong => out.push_str("<b>"),
                 Tag::Strikethrough => out.push_str("<s>"),
                 Tag::Link { dest_url, .. } => {
-                    let escaped = html_escape(&dest_url.to_string());
+                    let escaped = html_escape(dest_url.as_ref());
                     out.push_str(&format!("<a href=\"{escaped}\">"));
                 }
                 _ => {}
             },
             Event::End(tag) => match tag {
-                TagEnd::Paragraph => {
-                    if !in_list_item {
+                TagEnd::Paragraph
+                    if !in_list_item => {
                         out.push('\n');
                     }
-                }
                 TagEnd::Heading(_) => out.push_str("</b>\n"),
                 TagEnd::BlockQuote(..) => out.push_str("</blockquote>\n"),
                 TagEnd::CodeBlock => out.push_str("</pre>\n"),
@@ -283,8 +282,8 @@ impl ImAdapter for TelegramAdapter {
                         }
 
                         // Process message
-                        if let Some(msg) = update.get("message") {
-                            if let Some(event) = parse_message(msg) {
+                        if let Some(msg) = update.get("message")
+                            && let Some(event) = parse_message(msg) {
                                 let event = if matches!(event.kind, ImEventKind::Voice(..)) {
                                     if let Some(file_id) = msg["voice"]["file_id"].as_str() {
                                         match self.download_file(file_id).await {
@@ -305,14 +304,12 @@ impl ImAdapter for TelegramAdapter {
                                 };
                                 let _ = tx.send(event);
                             }
-                        }
 
                         // Process callback query
-                        if let Some(cq) = update.get("callback_query") {
-                            if let Some(event) = parse_callback_query(cq) {
+                        if let Some(cq) = update.get("callback_query")
+                            && let Some(event) = parse_callback_query(cq) {
                                 let _ = tx.send(event);
                             }
-                        }
                     }
                 }
                 Err(e) => {

@@ -10,6 +10,9 @@ use tokio::sync::{Mutex, mpsc};
 /// Polling interval for JSONL file changes.
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
+/// Save byte offsets to disk every N cycles.
+const SAVE_INTERVAL_CYCLES: u32 = 30;
+
 /// Result produced by the monitor.
 pub enum MonitorEvent {
     /// New messages from a session JSONL.
@@ -25,6 +28,10 @@ pub enum MonitorEvent {
 pub struct SessionMonitor {
     /// Path to the session_map.json (window_id → session_id).
     session_map_path: PathBuf,
+    /// Path to state.json (window_states, a secondary source of session_ids).
+    state_path: PathBuf,
+    /// Path to monitor_state.json (persisted byte offsets).
+    monitor_state_path: PathBuf,
     /// Known jsonl path per session_id (cached after first search).
     jsonl_cache: Arc<Mutex<HashMap<String, PathBuf>>>,
     /// Byte offsets per session (shared with state persistence).
@@ -33,31 +40,49 @@ pub struct SessionMonitor {
     poll_interval: Duration,
     /// Snapshot of the last known session IDs — used to detect new sessions.
     last_known_sessions: Vec<String>,
+    /// Cycle counter for periodic offset saving.
+    save_counter: u32,
 }
 
-/// Resolve the path to a session's JSONL file by searching ~/.claude/projects/.
-async fn resolve_jsonl(session_id: &str) -> Option<PathBuf> {
+/// Resolve the path to a session's JSONL file.
+///
+/// Checks multiple agent-specific paths:
+/// 1. `~/.claude/projects/<slug>/<session_id>.jsonl` (Claude Code)
+/// 2. `~/.copilot/session-state/<session_id>/events.jsonl` (Copilot CLI)
+pub async fn resolve_jsonl(session_id: &str) -> Option<PathBuf> {
     let home = std::env::var("HOME").ok()?;
-    let projects_dir = Path::new(&home).join(".claude").join("projects");
-    if !projects_dir.exists() {
-        return None;
-    }
-    let mut dir = tokio::fs::read_dir(&projects_dir).await.ok()?;
-    while let Some(entry) = dir.next_entry().await.ok()? {
-        if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
-            let path = entry.path().join(format!("{session_id}.jsonl"));
-            if path.exists() {
-                return Some(path);
+
+    // 1. Check Claude Code paths
+    let claude_dir = Path::new(&home).join(".claude").join("projects");
+    if claude_dir.exists() {
+        let mut dir = tokio::fs::read_dir(&claude_dir).await.ok()?;
+        while let Some(entry) = dir.next_entry().await.ok()? {
+            if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
+                let path = entry.path().join(format!("{session_id}.jsonl"));
+                if path.exists() {
+                    return Some(path);
+                }
             }
         }
     }
+
+    // 2. Check Copilot CLI paths
+    let copilot_path = Path::new(&home)
+        .join(".copilot")
+        .join("session-state")
+        .join(session_id)
+        .join("events.jsonl");
+    if copilot_path.exists() {
+        return Some(copilot_path);
+    }
+
     None
 }
 
 impl SessionMonitor {
     /// Create a new session monitor.
     ///
-    /// * `atim_dir` — the `~/.atim` directory (contains session_map.json)
+    /// * `atim_dir` — the `~/.atim` directory (contains session_map.json, state.json)
     /// * `byte_offsets` — shared offset map, usually loaded from monitor_state.json
     /// * `poll_interval_secs` — how often to poll (default 2.0)
     pub fn new(
@@ -67,6 +92,8 @@ impl SessionMonitor {
     ) -> Self {
         Self {
             session_map_path: atim_dir.join("session_map.json"),
+            state_path: atim_dir.join("state.json"),
+            monitor_state_path: atim_dir.join("monitor_state.json"),
             jsonl_cache: Arc::new(Mutex::new(HashMap::new())),
             byte_offsets,
             poll_interval: if poll_interval_secs > 0.0 {
@@ -75,6 +102,7 @@ impl SessionMonitor {
                 DEFAULT_POLL_INTERVAL
             },
             last_known_sessions: Vec::new(),
+            save_counter: 0,
         }
     }
 
@@ -93,21 +121,54 @@ impl SessionMonitor {
                 tracing::warn!("Session poll failed: {e}");
             }
 
+            // 3. Periodically persist byte offsets
+            self.save_counter += 1;
+            if self.save_counter % SAVE_INTERVAL_CYCLES == 0 {
+                self.save_offsets().await;
+            }
+
             tokio::time::sleep(self.poll_interval).await;
         }
     }
 
-    /// Check the session map for new or removed sessions.
-    async fn check_session_map(&mut self, tx: &mpsc::UnboundedSender<MonitorEvent>) -> Result<()> {
-        if !self.session_map_path.exists() {
-            return Ok(());
+    /// Collect all known session_ids from session_map.json and state.json window_states.
+    async fn collect_known_sessions(&self) -> Vec<String> {
+        let mut sessions = Vec::new();
+
+        // Primary source: session_map.json (SessionStart hook writes here).
+        if self.session_map_path.exists()
+            && let Ok(data) = tokio::fs::read_to_string(&self.session_map_path).await
+            && let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&data)
+        {
+            for sid in map.values() {
+                if !sessions.contains(sid) {
+                    sessions.push(sid.clone());
+                }
+            }
         }
 
-        let data = tokio::fs::read_to_string(&self.session_map_path).await?;
-        let map: HashMap<String, String> = serde_json::from_str(&data)
-            .map_err(|e| atim_core::error::Error::Parse(format!("invalid session map: {e}")))?;
+        // Secondary source: state.json window_states — catches sessions that
+        // predated the session_map or were created outside the hook.
+        if self.state_path.exists()
+            && let Ok(data) = tokio::fs::read_to_string(&self.state_path).await
+            && let Ok(state) = serde_json::from_str::<serde_json::Value>(&data)
+            && let Some(ws) = state.get("window_states").and_then(|v| v.as_object())
+        {
+            for entry in ws.values() {
+                if let Some(sid) = entry.get("session_id").and_then(|v| v.as_str()) {
+                    if !sid.is_empty() && !sessions.contains(&sid.to_string()) {
+                        sessions.push(sid.to_string());
+                    }
+                }
+            }
+        }
 
-        let current_sessions: Vec<String> = map.values().cloned().collect();
+        sessions
+    }
+
+    /// Check the session map for new or removed sessions.
+    async fn check_session_map(&mut self, tx: &mpsc::UnboundedSender<MonitorEvent>) -> Result<()> {
+        let current_sessions: Vec<String> = self.collect_known_sessions().await;
 
         // Detect new sessions
         let mut found_new = false;
@@ -149,10 +210,21 @@ impl SessionMonitor {
             );
         }
 
-        // Clean up stale sessions
-        let mut offsets = self.byte_offsets.lock().await;
-        offsets.retain(|id, _| current_sessions.contains(id));
-        drop(offsets);
+        // Clean up stale sessions — remove sessions whose JSONL no longer exists.
+        // This avoids purging filesystem-discovered sessions (which wouldn't be in
+        // current_sessions since they're not in session_map.json or state.json).
+        {
+            let mut offsets = self.byte_offsets.lock().await;
+            let tracked: Vec<String> = offsets.keys().cloned().collect();
+            for id in &tracked {
+                if !current_sessions.contains(id)
+                    && resolve_jsonl(id).await.is_none()
+                {
+                    offsets.remove(id);
+                    tracing::debug!("[monitor] Removed stale session {id}");
+                }
+            }
+        }
 
         // CRITICAL: actually track known sessions so we don't re-detect them next cycle
         self.last_known_sessions = current_sessions;
@@ -167,24 +239,65 @@ impl SessionMonitor {
             let offsets = self.byte_offsets.lock().await;
             offsets.keys().cloned().collect()
         };
-        // Check if any sessions in the map are missing from byte_offsets (jsonl appeared late)
-        if self.session_map_path.exists() {
-            if let Ok(data) = tokio::fs::read_to_string(&self.session_map_path).await {
-                if let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&data) {
-                    for sid in map.values() {
-                        if !session_ids.contains(sid) {
-                            if let Some(path) = resolve_jsonl(sid).await {
-                                if let Ok(meta) = tokio::fs::metadata(&path).await {
-                                    let file_len = meta.len();
-                                    let mut offsets = self.byte_offsets.lock().await;
-                                    offsets.entry(sid.clone()).or_insert(file_len);
-                                    self.jsonl_cache.lock().await.insert(sid.clone(), path);
-                                    tracing::info!(
-                                        "[monitor] Late-caught session {sid}: jsonl exists, offset set to {file_len}",
-                                    );
-                                }
-                                session_ids.push(sid.clone());
-                            }
+        // Check if any sessions from session_map.json or state.json are missing from
+        // byte_offsets (jsonl appeared late, or session not in session_map).
+        let all_known = self.collect_known_sessions().await;
+        for sid in &all_known {
+            if !session_ids.contains(sid)
+                && let Some(path) = resolve_jsonl(sid).await
+                {
+                    if let Ok(meta) = tokio::fs::metadata(&path).await {
+                        let file_len = meta.len();
+                        let mut offsets = self.byte_offsets.lock().await;
+                        offsets.entry(sid.clone()).or_insert(file_len);
+                        self.jsonl_cache.lock().await.insert(sid.clone(), path);
+                        tracing::info!(
+                            "[monitor] Late-caught session {sid}: jsonl exists, offset set to {file_len}",
+                        );
+                    }
+                    session_ids.push(sid.clone());
+                }
+        }
+
+        // Phase 3: Scan filesystem for untracked JSONL files (Claude Code
+        // sometimes rotates session IDs without invoking the SessionStart hook,
+        // so the new session never appears in session_map.json or state.json).
+        if let Some(home) = std::env::var("HOME").ok() {
+            let claude_dir = Path::new(&home).join(".claude").join("projects");
+            if claude_dir.exists() && let Ok(mut dir) = tokio::fs::read_dir(&claude_dir).await {
+                while let Ok(Some(entry)) = dir.next_entry().await {
+                    let Ok(ft) = entry.file_type().await else { continue; };
+                    if !ft.is_dir() { continue; }
+                    let slug_dir = entry.path();
+                    let Ok(mut slug_reader) = tokio::fs::read_dir(&slug_dir).await else { continue; };
+                    while let Ok(Some(file_entry)) = slug_reader.next_entry().await {
+                        let path = file_entry.path();
+                        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                            continue;
+                        }
+                        let Some(session_id) = path.file_stem().and_then(|s| s.to_str()) else { continue; };
+                        let sid_str = session_id.to_string();
+                        // Skip if already tracked
+                        if session_ids.contains(&sid_str) || all_known.contains(&sid_str) { continue; }
+                        {
+                            let offsets = self.byte_offsets.lock().await;
+                            if offsets.contains_key(&sid_str) { continue; }
+                        }
+                        // Only track files modified within the last hour
+                        if let Ok(meta) = tokio::fs::metadata(&path).await {
+                            let is_recent = meta.modified()
+                                .map(|m| m.elapsed().map(|e| e.as_secs() < 3600).unwrap_or(true))
+                                .unwrap_or(true);
+                            if !is_recent { continue; }
+                            let file_len = meta.len();
+                            let mut offsets = self.byte_offsets.lock().await;
+                            offsets.insert(sid_str.clone(), file_len);
+                            self.jsonl_cache.lock().await.insert(sid_str.clone(), path.clone());
+                            tracing::info!(
+                                "[monitor] Discovered untracked session {sid_str} via fs scan (slug: {:?})",
+                                slug_dir.file_name(),
+                            );
+                            session_ids.push(sid_str);
                         }
                     }
                 }
@@ -197,11 +310,10 @@ impl SessionMonitor {
             session_id: &str,
         ) -> Option<PathBuf> {
             let cache_lock = cache.lock().await;
-            if let Some(path) = cache_lock.get(session_id) {
-                if path.exists() {
+            if let Some(path) = cache_lock.get(session_id)
+                && path.exists() {
                     return Some(path.clone());
                 }
-            }
             drop(cache_lock);
             // Cache miss — search and cache the result
             if let Some(path) = resolve_jsonl(session_id).await {
@@ -227,7 +339,7 @@ impl SessionMonitor {
             };
 
             let (entries, file_size) =
-                atim_parser::jsonl::JsonlParser::read_new(&path, offset).await?;
+                atim_parser::read_jsonl(&path, offset).await?;
 
             if !entries.is_empty() {
                 let mut offsets = self.byte_offsets.lock().await;
@@ -265,5 +377,19 @@ impl SessionMonitor {
         }
 
         Ok(())
+    }
+
+    /// Save current byte offsets to disk atomically.
+    async fn save_offsets(&self) {
+        let offsets = self.byte_offsets.lock().await;
+        if let Ok(data) = serde_json::to_string_pretty(&*offsets) {
+            // Write to temp then rename for atomicity
+            let tmp_path = self.monitor_state_path.with_extension("json.tmp");
+            if tokio::fs::write(&tmp_path, &data).await.is_ok()
+                && tokio::fs::rename(&tmp_path, &self.monitor_state_path).await.is_ok()
+            {
+                tracing::debug!("[monitor] Saved {} byte offsets", offsets.len());
+            }
+        }
     }
 }

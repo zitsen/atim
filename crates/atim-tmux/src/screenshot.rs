@@ -127,18 +127,17 @@ fn push_segment(segments: &mut Vec<Segment>, text: &str, style: Style) {
         return;
     }
     // Merge with previous segment if same style
-    if let Some(last) = segments.last_mut() {
-        if last.style == style {
-            let has_cjk = text.chars().any(|c| is_cjk(c));
+    if let Some(last) = segments.last_mut()
+        && last.style == style {
+            let has_cjk = text.chars().any(is_cjk);
             last.has_cjk = last.has_cjk || has_cjk;
             last.text.push_str(text);
             return;
         }
-    }
     segments.push(Segment {
         text: text.to_string(),
         style,
-        has_cjk: text.chars().any(|c| is_cjk(c)),
+        has_cjk: text.chars().any(is_cjk),
     });
 }
 
@@ -197,11 +196,10 @@ fn apply_sgr(mut style: Style, codes: &[u8]) -> Style {
 /// Attempt to load a font from a list of candidate paths.
 fn load_font(candidates: &[&str]) -> Result<FontArc> {
     for path in candidates {
-        if let Ok(data) = std::fs::read(path) {
-            if let Ok(font) = FontArc::try_from_vec(data) {
+        if let Ok(data) = std::fs::read(path)
+            && let Ok(font) = FontArc::try_from_vec(data) {
                 return Ok(font);
             }
-        }
     }
     Err(Error::Font("no suitable font found".into()))
 }
