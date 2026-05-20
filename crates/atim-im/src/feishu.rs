@@ -873,11 +873,12 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
     let chat_id_atim = adapter.register_chat(chat_id).await;
 
     // For topic/thread messages, use root_id as thread_id (consistent per-topic routing).
-    // For non-topic group chats, use sender's user hash as thread_id.
+    // For non-topic group chats, use the chat_id as thread_id — each Feishu group chat
+    // is equivalent to a Telegram topic thread in atim's binding model.
     let thread_id = if let Some(root_id) = root_id {
         Some(adapter.register_thread(root_id).await)
     } else if chat_type == "group" {
-        Some(ThreadId(adapter.register_user(open_id).await.0))
+        Some(ThreadId(adapter.register_chat(chat_id).await.0))
     } else {
         None
     };
@@ -1053,8 +1054,8 @@ async fn handle_card_action(adapter: &FeishuAdapter, payload: &serde_json::Value
     let thread_id = if let Some(tid) = ctx_thread_id.or(root_id) {
         Some(adapter.register_thread(tid).await)
     } else if is_group {
-        // Fallback: use sender's user hash as thread_id (non-topic groups)
-        Some(ThreadId(adapter.register_user(open_id).await.0))
+        // Fallback: use chat_id as thread_id (distinguishes group chats)
+        Some(ThreadId(adapter.register_chat(chat_id).await.0))
     } else {
         None
     };
