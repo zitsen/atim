@@ -2404,12 +2404,9 @@ impl Server {
 
             // New or changed UI — send keyboard
             if let Some(interactive) = ui {
-                // For PaneCapture agents (Copilot, Codex), skip AskUser cards —
-                // their normal prompt (❯) is wrongly detected as a question via
-                // stale scrollback content. The response is forwarded via
-                // forward_new_pane_output instead.
-                let should_send_card = agent.output_source() != OutputSource::PaneCapture
-                    || interactive.kind != UiKind::AskUserQuestion;
+                // Skip AskUser cards — the TUI prompt (❯) from any agent is
+                // wrongly detected as a question via stale scrollback content.
+                let should_send_card = interactive.kind != UiKind::AskUserQuestion;
                 if should_send_card {
                     let target = MessageTarget {
                         chat_id: ChatId(binding.group_chat_id.unwrap_or(binding.chat_id)),
