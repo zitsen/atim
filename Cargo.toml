@@ -16,7 +16,8 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 description = "AI Agent Through IM"
-repository = "https://github.com/huolink/atim"
+repository = "https://github.com/zitsen/atim"
+keywords = ["ai", "agent", "bot", "telegram", "claude"]
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
