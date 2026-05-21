@@ -15,7 +15,7 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "IM-to-Claude-Code bridge for Telegram and Feishu"
+description = "AI Agent Through IM"
 repository = "https://github.com/huolink/atim"
 
 [workspace.dependencies]
