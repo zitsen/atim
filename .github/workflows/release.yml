@@ -115,7 +115,7 @@ jobs:
 
           cat > atim.rb << FORMULA
           class Atim < Formula
-            desc "IM-to-CLIs bridge via tmux"
+            desc "AI Agent Through IM"
             homepage "https://github.com/${{ github.repository }}"
             version "$VERSION"
             license "MIT"
@@ -154,7 +154,7 @@ jobs:
           pkgname=atim
           pkgver=__VERSION__
           pkgrel=1
-          pkgdesc="IM-to-CLIs bridge via tmux"
+          pkgdesc="AI Agent Through IM"
           arch=('x86_64')
           url="https://github.com/__REPO__"
           license=('MIT')
@@ -167,9 +167,9 @@ jobs:
           }
           PKGBUILD_EOF
 
-          sed -i "s/__VERSION__/$VERSION/" PKGBUILD
-          sed -i "s/__REPO__/${{ github.repository }}/" PKGBUILD
-          sed -i "s/__SHA256__/$X86_64_SHA/" PKGBUILD
+          sed -i "s|__VERSION__|$VERSION|" PKGBUILD
+          sed -i "s|__REPO__|${{ github.repository }}|" PKGBUILD
+          sed -i "s|__SHA256__|$X86_64_SHA|" PKGBUILD
 
       - name: Upload Homebrew formula
         uses: actions/upload-artifact@v4
