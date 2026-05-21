@@ -198,11 +198,7 @@ fn summarize_tool_use(tool_name: &str, input: Option<&serde_json::Value>) -> Str
         return format!("🔧 {tool_name}: {path}");
     }
     if let Some(cmd) = input.get("command").and_then(|v| v.as_str()) {
-        let truncated = if cmd.len() > 50 {
-            format!("{}…", &cmd[..47])
-        } else {
-            cmd.to_string()
-        };
+        let truncated = crate::truncate_utf8(cmd, 47);
         return format!("🔧 {tool_name}: {truncated}");
     }
     if let Some(query) = input.get("query").and_then(|v| v.as_str()) {

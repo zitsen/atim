@@ -3,6 +3,18 @@ pub mod jsonl;
 pub mod table;
 pub mod terminal;
 
+/// Truncate a string to at most `max_chars` characters (not bytes),
+/// appending "…" if truncated. Safe for multi-byte UTF-8 strings.
+pub fn truncate_utf8(s: &str, max_chars: usize) -> String {
+    if s.len() <= max_chars {
+        return s.to_string();
+    }
+    match s.char_indices().nth(max_chars) {
+        Some((end, _)) => format!("{}…", &s[..end]),
+        None => s.to_string(),
+    }
+}
+
 /// Dispatch JSONL reading to the appropriate parser based on file path.
 ///
 /// Paths containing `.copilot` use `CopilotJsonlParser`; everything else
