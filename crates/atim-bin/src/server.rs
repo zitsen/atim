@@ -822,31 +822,72 @@ impl Server {
             return Ok(());
         }
 
-        // If user has an active directory browsing session, use `z` for text-based navigation
+        // If user has an active directory browsing session, use `z` for text-based navigation.
+        // If zoxide doesn't match, return early with feedback rather than falling through
+        // to the no-binding flow (which would show the agent picker again).
         if let Some(browser_state) = self.browser.get_state(user_id).await
-            && browser_state.mode == crate::browser::BrowserMode::Browsing {
-                let trimmed = text.trim();
-                if !trimmed.is_empty() {
-                    match zoxide_query(trimmed).await {
-                        Ok(Some(matched_path)) => {
-                            if matched_path.is_dir() {
-                                self.browser.navigate_to(user_id, &matched_path).await;
-                                let thread_id = target.thread_id.map(|t| t.0).unwrap_or(0);
-                                let _ = self
-                                    .send_browser_keyboard(&target, user_id, thread_id)
-                                    .await;
-                                return Ok(());
-                            }
-                        }
-                        Ok(None) => {
-                            // No match — check if text is a path or keep current
-                        }
-                        Err(e) => {
-                            tracing::warn!("zoxide query failed: {e}");
-                        }
+            && browser_state.mode == crate::browser::BrowserMode::Browsing
+            && !text.trim().is_empty()
+        {
+            let trimmed = text.trim();
+            match zoxide_query(trimmed).await {
+                Ok(Some(matched_path)) if matched_path.is_dir() => {
+                    self.browser.navigate_to(user_id, &matched_path).await;
+                    let thread_id = target.thread_id.map(|t| t.0).unwrap_or(0);
+                    let _ = self
+                        .send_browser_keyboard(&target, user_id, thread_id)
+                        .await;
+                    return Ok(());
+                }
+                Ok(Some(path)) => {
+                    // zoxide matched but path isn't a directory
+                    let _ = self
+                        .im_adapter
+                        .send_message(
+                            &target,
+                            &format!("zoxide matched '{}' but it is not a directory.", path.display()),
+                        )
+                        .await;
+                    return Ok(());
+                }
+                Ok(None) => {
+                    // Try resolving as a filesystem path
+                    let path = Path::new(trimmed);
+                    if path.is_absolute() && path.is_dir() {
+                        self.browser.navigate_to(user_id, path).await;
+                        let thread_id = target.thread_id.map(|t| t.0).unwrap_or(0);
+                        let _ = self
+                            .send_browser_keyboard(&target, user_id, thread_id)
+                            .await;
+                    } else {
+                        let _ = self
+                            .im_adapter
+                            .send_message(
+                                &target,
+                                &format!(
+                                    "No zoxide match for '{}'. Use the directory buttons to navigate, or try a different name.",
+                                    trimmed,
+                                ),
+                            )
+                            .await;
                     }
+                    return Ok(());
+                }
+                Err(e) => {
+                    tracing::warn!("zoxide query failed: {e}");
+                    let _ = self
+                        .im_adapter
+                        .send_message(
+                            &target,
+                            &format!(
+                                "zoxide lookup failed: {e}. Use the directory buttons to navigate instead."
+                            ),
+                        )
+                        .await;
+                    return Ok(());
                 }
             }
+        }
 
         // Find binding for this user+thread
         if let Some(binding) = state.thread_bindings.iter().find(|b| {
@@ -876,6 +917,118 @@ impl Server {
                     tracing::warn!(
                         "[handle_text_message] Window {} died ({e}), recreating for user {}",
                         binding.window_id,
+                        user_id
+                    );
+
+                    let ws = state.window_states.get(&binding.window_id).cloned();
+                    let cwd = ws.as_ref().map(|w| w.cwd.as_str()).unwrap_or("~");
+                    let agent_type_name = ws
+                        .as_ref()
+                        .map(|w| w.agent_type.as_str())
+                        .unwrap_or("claude");
+                    let agent = self
+                        .config
+                        .agent_registry
+                        .get(agent_type_name)
+                        .cloned()
+                        .unwrap_or_else(|| self.config.agent_registry.default().clone());
+
+                    let _ = self
+                        .im_adapter
+                        .send_message(&target, "🔄 Reconnecting session...")
+                        .await;
+
+                    // Create new tmux window in the same working directory
+                    let window_name = &binding.display_name;
+                    let new_window_id = self
+                        .tmux_mgr
+                        .new_window(window_name, cwd)
+                        .await?;
+
+                    // Re-launch the agent
+                    let launch_cmd = agent_launch_cmd(&agent);
+                    self.tmux_mgr
+                        .send_line(&new_window_id, &launch_cmd)
+                        .await?;
+
+                    // Wait for agent process to start
+                    for _ in 0..10 {
+                        if let Ok(info) = self.tmux_mgr.find_window(&new_window_id).await
+                            && !is_shell_process(&info.current_command)
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
+
+                    // Extra delay for non-session agents so TUI can set up
+                    if !agent.supports_sessions() {
+                        tokio::time::sleep(Duration::from_millis(1500)).await;
+                    }
+
+                    // Update state: re-key window_states and binding to the new window_id
+                    let mut new_state = self.state_mgr.load_state().await?;
+                    if let Some(old_ws) = new_state.window_states.remove(&binding.window_id) {
+                        new_state
+                            .window_states
+                            .insert(new_window_id.0.clone(), old_ws);
+                    }
+                    if let Some(b) = new_state.thread_bindings.iter_mut().find(|b| {
+                        b.user_id == user_id
+                            && b.thread_id == target.thread_id.map(|t| t.0).unwrap_or(0)
+                    }) {
+                        b.window_id = new_window_id.0.clone();
+                    }
+                    // Also clean up stale session_map entries for the old window_id
+                    if let Ok(mut map) = self.state_mgr.load_session_map().await
+                        && map.remove(&binding.window_id).is_some()
+                    {
+                        let _ = self.state_mgr.save_session_map(&map).await;
+                    }
+                    self.state_mgr.save_state(&new_state).await?;
+
+                    // For session-based agents, resolve the new session_id
+                    if agent.supports_sessions() {
+                        let wid = new_window_id.0.clone();
+                        if let Some(sid) = self
+                            .resolve_session_id(&wid, Duration::from_secs(15), Some(cwd))
+                            .await
+                            && let Ok(mut final_state) = self.state_mgr.load_state().await
+                        {
+                            if let Some(ws) = final_state.window_states.get_mut(&wid) {
+                                ws.session_id = sid;
+                            }
+                            let _ = self.state_mgr.save_state(&final_state).await;
+                        }
+                    }
+
+                    // Forward the user's original text to the new window
+                    let is_copilot = agent.name() == "copilot";
+                    if is_copilot {
+                        self.tmux_mgr
+                            .send_line_chars(&new_window_id, text, 10)
+                            .await?;
+                    } else {
+                        self.tmux_mgr
+                            .send_line(&new_window_id, text)
+                            .await?;
+                    }
+
+                    let sc_chat_id = binding.group_chat_id.unwrap_or(binding.chat_id);
+                    self.status_consumed
+                        .lock()
+                        .await
+                        .remove(&(sc_chat_id, binding.thread_id));
+                    return Ok(());
+                }
+                Ok(info) if info.name != binding.display_name => {
+                    // tmux renumbered windows — this window_id now points to a different window.
+                    // Treat as stale and recreate, same as a dead window.
+                    tracing::warn!(
+                        "[handle_text_message] Window {} name mismatch: expected='{}' actual='{}' (tmux renumbering?), recreating for user {}",
+                        binding.window_id,
+                        binding.display_name,
+                        info.name,
                         user_id
                     );
 

@@ -112,6 +112,20 @@ Atim reads from environment variables (or a `~/.atim/.env` file):
 3. **Chat with the agent** — every message goes to the agent's terminal.
 4. **Close the topic** when done — the binding is cleaned up.
 
+### Slash Commands
+
+Send these in the IM chat to control the agent session:
+
+| Command | Description |
+|---------|-------------|
+| `/ss` or `/screenshot` | Capture a screenshot of the tmux terminal |
+| `/usage` | Show Claude Code usage/quota info |
+| `/switch <agent>` | Switch to a different agent (`claude`, `copilot`, `codex`) |
+| `/esc` or `/dismiss` | Send Escape key to dismiss modals/help screens |
+| `!<command>` | Run a shell command in the agent's tmux window and stream output |
+
+During directory browsing, text input acts as a `zoxide` query to jump to matching directories.
+
 ### Session Hook (recommended)
 
 Install the SessionStart hook for reliable session tracking:
@@ -121,6 +135,25 @@ atim hook --install
 ```
 
 This registers each Claude Code session UUID so Atim knows which JSONL logs to watch.
+
+### Service Management
+
+Atim can be managed as a systemd service:
+
+```bash
+# Install the service unit
+atim service --install
+
+# Start/stop/restart/status (user-level by default)
+atim service --start
+atim service --stop
+atim service --restart
+atim service --status
+
+# System-level service (requires root)
+atim service --system --install
+atim service --system --start
+```
 
 ## Project Structure
 
