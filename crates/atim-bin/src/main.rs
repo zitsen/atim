@@ -11,6 +11,7 @@ mod browser;
 mod hook;
 mod router;
 mod server;
+mod service;
 
 #[derive(Parser)]
 #[command(name = "atim", about = "IM-to-Claude-Code bridge via tmux")]
@@ -26,6 +27,27 @@ enum Command {
         /// Install the hook script to ~/.config/claude/hooks/SessionStart
         #[arg(long, short)]
         install: bool,
+    },
+    /// Manage atim as a systemd service (user-level by default)
+    Service {
+        /// Install the systemd service unit
+        #[arg(long)]
+        install: bool,
+        /// Start the service
+        #[arg(long)]
+        start: bool,
+        /// Stop the service
+        #[arg(long)]
+        stop: bool,
+        /// Restart the service
+        #[arg(long)]
+        restart: bool,
+        /// Show service status
+        #[arg(long)]
+        status: bool,
+        /// Use system-level service instead of user-level (requires root)
+        #[arg(long)]
+        system: bool,
     },
 }
 
@@ -45,6 +67,31 @@ async fn main() -> anyhow::Result<()> {
             };
             if let Err(e) = hook::run_hook(cmd) {
                 eprintln!("atim hook error: {e}");
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
+        Some(Command::Service {
+            install,
+            start,
+            stop,
+            restart,
+            status: _,
+            system,
+        }) => {
+            let cmd = if install {
+                service::ServiceCommand::Install
+            } else if start {
+                service::ServiceCommand::Start
+            } else if stop {
+                service::ServiceCommand::Stop
+            } else if restart {
+                service::ServiceCommand::Restart
+            } else {
+                service::ServiceCommand::Status
+            };
+            if let Err(e) = service::run_service(cmd, system) {
+                eprintln!("atim service error: {e}");
                 std::process::exit(1);
             }
             return Ok(());
