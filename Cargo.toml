@@ -15,6 +15,8 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+description = "IM-to-Claude-Code bridge for Telegram and Feishu"
+repository = "https://github.com/huolink/atim"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
