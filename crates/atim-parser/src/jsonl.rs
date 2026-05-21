@@ -239,7 +239,10 @@ fn summarize_tool_use(tool_name: &str, input: Option<&serde_json::Value>) -> Str
     }
     if let Some(cmd) = input.get("command").and_then(|v| v.as_str()) {
         let truncated = if cmd.len() > 50 {
-            format!("{}…", &cmd[..47])
+            match cmd.char_indices().nth(47) {
+                Some((end, _)) => format!("{}…", &cmd[..end]),
+                None => cmd.to_string(),
+            }
         } else {
             cmd.to_string()
         };
@@ -250,7 +253,10 @@ fn summarize_tool_use(tool_name: &str, input: Option<&serde_json::Value>) -> Str
     }
     if let Some(content) = input.get("content").and_then(|v| v.as_str()) {
         let truncated = if content.len() > 50 {
-            format!("{}…", &content[..47])
+            match content.char_indices().nth(47) {
+                Some((end, _)) => format!("{}…", &content[..end]),
+                None => content.to_string(),
+            }
         } else {
             content.to_string()
         };
