@@ -240,7 +240,8 @@ impl FeishuAdapter {
             hash ^= byte as u64;
             hash = hash.wrapping_mul(0x100000001b3); // FNV prime
         }
-        hash as i64
+        // Clear sign bit so the result is always non-negative
+        (hash & i64::MAX as u64) as i64
     }
 
     /// Register a Feishu open_id and return its stable i64 UserId.
@@ -277,6 +278,21 @@ impl FeishuAdapter {
             map.thread_ids
                 .entry(tid)
                 .or_insert_with(|| root_id.to_string());
+        }
+        self.save_id_map().await;
+        ThreadId(tid)
+    }
+
+    /// Register a Feishu group chat as a thread-like entity, producing a
+    /// thread_id that is distinct from the chat_id.
+    async fn register_chat_thread(&self, chat_id: &str) -> ThreadId {
+        let threaded_id = format!("\0thread\0{chat_id}");
+        let tid = Self::hash_id(&threaded_id);
+        {
+            let mut map = self.id_map.write().await;
+            map.thread_ids
+                .entry(tid)
+                .or_insert_with(|| chat_id.to_string());
         }
         self.save_id_map().await;
         ThreadId(tid)
@@ -908,12 +924,13 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
     let chat_id_atim = adapter.register_chat(chat_id).await;
 
     // For topic/thread messages, use root_id as thread_id (consistent per-topic routing).
-    // For non-topic group chats, use the chat_id as thread_id — each Feishu group chat
-    // is equivalent to a Telegram topic thread in atim's binding model.
+    // For non-topic group chats, use a thread_id derived from chat_id but
+    // distinct from it, so the binding model has a unique (chat_id, thread_id)
+    // pair per group without conflating the two dimensions.
     let thread_id = if let Some(root_id) = root_id {
         Some(adapter.register_thread(root_id).await)
     } else if chat_type == "group" {
-        Some(ThreadId(adapter.register_chat(chat_id).await.0))
+        Some(adapter.register_chat_thread(chat_id).await)
     } else {
         None
     };
@@ -1131,8 +1148,10 @@ async fn handle_card_action(adapter: &FeishuAdapter, payload: &serde_json::Value
     let thread_id = if let Some(tid) = ctx_thread_id.or(root_id) {
         Some(adapter.register_thread(tid).await)
     } else if is_group {
-        // Fallback: use chat_id as thread_id (distinguishes group chats)
-        Some(ThreadId(adapter.register_chat(chat_id).await.0))
+        // Fallback: derive a thread_id from chat_id that is distinct from
+        // the chat_id itself, so the binding model has a unique (chat_id,
+        // thread_id) pair per group without conflating the two dimensions.
+        Some(adapter.register_chat_thread(chat_id).await)
     } else {
         None
     };

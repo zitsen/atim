@@ -31,10 +31,10 @@ pub fn run_service(cmd: ServiceCommand, system_level: bool) -> Result<(), Box<dy
                 .stderr(std::process::Stdio::inherit())
                 .status()?;
 
-            if !status.success() {
-                if let Some(code) = status.code() {
-                    std::process::exit(code);
-                }
+            if !status.success()
+                && let Some(code) = status.code()
+            {
+                std::process::exit(code);
             }
             Ok(())
         }

@@ -339,7 +339,9 @@ fn re_resolve_state(
     mut state: atim_core::session::ServerState,
     windows: &std::collections::HashMap<String, atim_tmux::manager::WindowInfo>,
 ) -> atim_core::session::ServerState {
-    // 1. Resolve window_states — re-key by matching window_name
+    // 1. Resolve window_states — re-key by matching window_name.
+    //    Stale entries (window not in tmux) are KEPT so they can be
+    //    resurrected later when a message arrives.
     let mut resolved_windows = std::collections::HashMap::new();
     for (wid, ws) in &state.window_states {
         if windows.contains_key(wid) {
@@ -354,14 +356,16 @@ fn re_resolve_state(
             );
         } else {
             tracing::info!(
-                "Removing stale window_state {wid} ('{}') — no matching tmux window",
+                "Keeping stale window_state {wid} ('{}') for later resurrection",
                 ws.window_name
             );
+            resolved_windows.insert(wid.clone(), ws.clone());
         }
     }
     state.window_states = resolved_windows;
 
-    // 2. Resolve thread_bindings — update window_id by matching display_name
+    // 2. Resolve thread_bindings — update window_id by matching display_name.
+    //    Stale entries are KEPT for later resurrection.
     let mut resolved_bindings = Vec::new();
     for tb in &state.thread_bindings {
         if windows.contains_key(&tb.window_id) {
@@ -381,18 +385,19 @@ fn re_resolve_state(
             );
         } else {
             tracing::info!(
-                "Removing stale ThreadBinding for window {} ('{}')",
+                "Keeping stale ThreadBinding for window {} ('{}') for later resurrection",
                 tb.window_id,
                 tb.display_name
             );
+            resolved_bindings.push(tb.clone());
         }
     }
     state.thread_bindings = resolved_bindings;
 
-    // 3. Clean up display_names HashMap
-    state
-        .window_display_names
-        .retain(|wid, _| windows.contains_key(wid) || state.window_states.contains_key(wid));
+    // 3. Keep all display_names entries — stale ones may be needed for resurrection
+    state.window_display_names.retain(|wid, _| {
+        windows.contains_key(wid) || state.window_states.contains_key(wid)
+    });
 
     state
 }
@@ -454,7 +459,7 @@ mod tests {
     }
 
     #[test]
-    fn test_re_resolve_stale_removed() {
+    fn test_re_resolve_stale_kept_for_resurrection() {
         let windows = HashMap::new(); // no windows at all
         let state = ServerState {
             window_states: HashMap::from([(
@@ -480,9 +485,12 @@ mod tests {
         };
 
         let resolved = super::re_resolve_state(state, &windows);
-        assert_eq!(resolved.window_states.len(), 0);
-        assert_eq!(resolved.thread_bindings.len(), 0);
-        assert_eq!(resolved.window_display_names.len(), 0);
+        // Stale entries are KEPT for later resurrection
+        assert_eq!(resolved.window_states.len(), 1);
+        assert!(resolved.window_states.contains_key("@9"));
+        assert_eq!(resolved.thread_bindings.len(), 1);
+        assert_eq!(resolved.thread_bindings[0].window_id, "@9");
+        assert!(resolved.window_display_names.contains_key("@9"));
     }
 
     #[test]
@@ -595,10 +603,11 @@ mod tests {
         };
 
         let resolved = super::re_resolve_state(state, &windows);
-        assert_eq!(resolved.window_states.len(), 1);
+        // Live entry kept, stale entry also kept for resurrection
+        assert_eq!(resolved.window_states.len(), 2);
         assert!(resolved.window_states.contains_key("@10"));
-        assert_eq!(resolved.thread_bindings.len(), 1);
-        assert_eq!(resolved.thread_bindings[0].window_id, "@10");
+        assert!(resolved.window_states.contains_key("@99"));
+        assert_eq!(resolved.thread_bindings.len(), 2);
     }
 
     #[test]

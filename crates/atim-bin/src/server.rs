@@ -872,20 +872,112 @@ impl Server {
             // Verify window is alive and agent is actually running
             match self.tmux_mgr.find_window(&window_id).await {
                 Err(e) => {
-                    // Window died — clear binding and notify user
+                    // Window died — recreate it automatically and forward the message
                     tracing::warn!(
-                        "[handle_text_message] Window {} died ({e}), clearing binding for user {}",
+                        "[handle_text_message] Window {} died ({e}), recreating for user {}",
                         binding.window_id,
                         user_id
                     );
-                    let mut new_state = state.clone();
-                    new_state
-                        .thread_bindings
-                        .retain(|b| b.window_id != window_id.0);
+
+                    let ws = state.window_states.get(&binding.window_id).cloned();
+                    let cwd = ws.as_ref().map(|w| w.cwd.as_str()).unwrap_or("~");
+                    let agent_type_name = ws
+                        .as_ref()
+                        .map(|w| w.agent_type.as_str())
+                        .unwrap_or("claude");
+                    let agent = self
+                        .config
+                        .agent_registry
+                        .get(agent_type_name)
+                        .cloned()
+                        .unwrap_or_else(|| self.config.agent_registry.default().clone());
+
+                    let _ = self
+                        .im_adapter
+                        .send_message(&target, "🔄 Reconnecting session...")
+                        .await;
+
+                    // Create new tmux window in the same working directory
+                    let window_name = &binding.display_name;
+                    let new_window_id = self
+                        .tmux_mgr
+                        .new_window(window_name, cwd)
+                        .await?;
+
+                    // Re-launch the agent
+                    let launch_cmd = agent_launch_cmd(&agent);
+                    self.tmux_mgr
+                        .send_line(&new_window_id, &launch_cmd)
+                        .await?;
+
+                    // Wait for agent process to start
+                    for _ in 0..10 {
+                        if let Ok(info) = self.tmux_mgr.find_window(&new_window_id).await
+                            && !is_shell_process(&info.current_command)
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
+
+                    // Extra delay for non-session agents so TUI can set up
+                    if !agent.supports_sessions() {
+                        tokio::time::sleep(Duration::from_millis(1500)).await;
+                    }
+
+                    // Update state: re-key window_states and binding to the new window_id
+                    let mut new_state = self.state_mgr.load_state().await?;
+                    if let Some(old_ws) = new_state.window_states.remove(&binding.window_id) {
+                        new_state
+                            .window_states
+                            .insert(new_window_id.0.clone(), old_ws);
+                    }
+                    if let Some(b) = new_state.thread_bindings.iter_mut().find(|b| {
+                        b.user_id == user_id
+                            && b.thread_id == target.thread_id.map(|t| t.0).unwrap_or(0)
+                    }) {
+                        b.window_id = new_window_id.0.clone();
+                    }
+                    // Also clean up stale session_map entries for the old window_id
+                    if let Ok(mut map) = self.state_mgr.load_session_map().await
+                        && map.remove(&binding.window_id).is_some()
+                    {
+                        let _ = self.state_mgr.save_session_map(&map).await;
+                    }
                     self.state_mgr.save_state(&new_state).await?;
-                    let _ = self.im_adapter.send_message(&target,
-                        "Session window no longer exists. Please send your message again to start a new session."
-                    ).await;
+
+                    // For session-based agents, resolve the new session_id
+                    if agent.supports_sessions() {
+                        let wid = new_window_id.0.clone();
+                        if let Some(sid) = self
+                            .resolve_session_id(&wid, Duration::from_secs(15), Some(cwd))
+                            .await
+                            && let Ok(mut final_state) = self.state_mgr.load_state().await
+                        {
+                            if let Some(ws) = final_state.window_states.get_mut(&wid) {
+                                ws.session_id = sid;
+                            }
+                            let _ = self.state_mgr.save_state(&final_state).await;
+                        }
+                    }
+
+                    // Forward the user's original text to the new window
+                    let is_copilot = agent.name() == "copilot";
+                    if is_copilot {
+                        self.tmux_mgr
+                            .send_line_chars(&new_window_id, text, 10)
+                            .await?;
+                    } else {
+                        self.tmux_mgr
+                            .send_line(&new_window_id, text)
+                            .await?;
+                    }
+
+                    let sc_chat_id = binding.group_chat_id.unwrap_or(binding.chat_id);
+                    self.status_consumed
+                        .lock()
+                        .await
+                        .remove(&(sc_chat_id, binding.thread_id));
                     return Ok(());
                 }
                 Ok(info) if is_shell_process(&info.current_command) => {
@@ -1150,11 +1242,8 @@ impl Server {
             self.show_window_picker(target, user_id, &unbound, thread_id)
                 .await?;
         } else {
-            let _ = self
-                .topic_names
-                .lock()
-                .await
-                .remove(&(target.chat_id.0, thread_id));
+            // topic_name is NOT consumed here — the browser action handler
+            // or callback handler will consume it when creating the binding.
             self.show_directory_browser(target, user_id, thread_id)
                 .await?;
         }
