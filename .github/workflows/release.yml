@@ -30,9 +30,14 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Install zig
-        uses: ziglang/actions-setup-zig@v2
-        with:
-          version: 0.14.0
+        run: |
+          case "${{ matrix.target }}" in
+            x86_64*)  arch="x86_64" ;;
+            aarch64*) arch="aarch64" ;;
+          esac
+          curl -LO "https://ziglang.org/download/0.14.0/zig-linux-${arch}-0.14.0.tar.xz"
+          tar xf "zig-linux-${arch}-0.14.0.tar.xz"
+          echo "$PWD/zig-linux-${arch}-0.14.0" >> "$GITHUB_PATH"
 
       - name: Install cargo-zigbuild
         uses: taiki-e/install-action@cargo-zigbuild
