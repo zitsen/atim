@@ -941,56 +941,68 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
             }
         }
 
+    let content_str = message["content"].as_str().unwrap_or("{}");
+    tracing::debug!(
+        "Feishu received: root_id={:?} chat_type={chat_type} msg_type={msg_type} chat_id={chat_id} from={open_id} raw_content={}",
+        root_id.unwrap_or("(none)"),
+        content_str,
+    );
+
     let parsed_content: serde_json::Value =
-        serde_json::from_str(message["content"].as_str().unwrap_or("{}")).unwrap_or_default();
+        serde_json::from_str(content_str).unwrap_or_default();
 
     let mut text = String::new();
     let mut has_mention = false;
+
+    // Check for @-mention of the bot in group chats (shared by text/post types)
+    if chat_type == "group" {
+        let bot_id = adapter.bot_open_id.read().await;
+        let bot_name = adapter.bot_name.read().await;
+        let mentions = message["mentions"].as_array();
+        if let Some(mentions) = mentions {
+            for mention in mentions {
+                // Check by bot open_id (preferred)
+                let is_bot = match bot_id.as_ref() {
+                    Some(bid) => mention["id"]["open_id"].as_str() == Some(bid),
+                    None => false,
+                };
+                // Fallback: check by name
+                let is_bot = is_bot
+                    || bot_name.as_ref().is_some_and(|name| {
+                        mention["name"]
+                            .as_str()
+                            .is_some_and(|n| n.contains(name) || name.contains(n))
+                    });
+                // Broader fallback: any mention named "bot" or the app_id prefix
+                let is_bot = is_bot
+                    || mention["name"]
+                        .as_str()
+                        .is_some_and(|n| n.contains("bot") || adapter.app_id.contains(n));
+                if is_bot {
+                    has_mention = true;
+                }
+            }
+        }
+        // Permissive fallback: if mentions array exists and is non-empty but we
+        // couldn't match the bot's identity, treat any mention as a bot mention
+        if !has_mention && message["mentions"].as_array().map_or(0, |m| m.len()) > 0 {
+            tracing::debug!(
+                "Mentions present but no bot match — permissive fallback, treating as @mention"
+            );
+            has_mention = true;
+        }
+    }
 
     let kind = match msg_type {
         "text" => {
             let raw = parsed_content["text"].as_str().unwrap_or("").to_string();
             text = raw.clone();
-            // Check for @-mention of the bot in group chats
-            if chat_type == "group" {
-                let bot_id = adapter.bot_open_id.read().await;
-                let bot_name = adapter.bot_name.read().await;
-                let mentions = message["mentions"].as_array();
-                if let Some(mentions) = mentions {
-                    for mention in mentions {
-                        // Check by bot open_id (preferred)
-                        let is_bot = match bot_id.as_ref() {
-                            Some(bid) => mention["id"]["open_id"].as_str() == Some(bid),
-                            None => false,
-                        };
-                        // Fallback: check by name
-                        let is_bot = is_bot
-                            || bot_name.as_ref().is_some_and(|name| {
-                                mention["name"]
-                                    .as_str()
-                                    .is_some_and(|n| n.contains(name) || name.contains(n))
-                            });
-                        // Broader fallback: any mention named "bot" or the app_id prefix
-                        let is_bot = is_bot
-                            || mention["name"]
-                                .as_str()
-                                .is_some_and(|n| n.contains("bot") || adapter.app_id.contains(n));
-                        if is_bot {
-                            has_mention = true;
-                        }
-                        // Strip mention placeholder from text
-                        if let Some(key) = mention["key"].as_str() {
-                            text = text.replace(key, "").trim().to_string();
-                        }
+            // Strip mention placeholder from text
+            if let Some(mentions) = message["mentions"].as_array() {
+                for mention in mentions {
+                    if let Some(key) = mention["key"].as_str() {
+                        text = text.replace(key, "").trim().to_string();
                     }
-                }
-                // Permissive fallback: if mentions array exists and is non-empty but we
-                // couldn't match the bot's identity, treat any mention as a bot mention
-                if !has_mention && message["mentions"].as_array().map_or(0, |m| m.len()) > 0 {
-                    tracing::debug!(
-                        "Mentions present but no bot match — permissive fallback, treating as @mention"
-                    );
-                    has_mention = true;
                 }
             }
             ImEventKind::Text {
@@ -1000,23 +1012,31 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
             }
         }
         "post" => {
-            // Rich text: extract from locale-aware content
-            let content = &parsed_content;
-            let locale = if content["zh_cn"].is_object() {
+            // Rich text: extract from post content.
+            // Feishu post content has multiple possible formats:
+            //   Format 1 (locale-wrapped):
+            //     {"post": {"zh_cn": {"title": "...", "content": [[...]]}}}
+            //   Format 2 (direct, no locale wrapper):
+            //     {"title": "", "content": [[...]]}
+            //
+            // Different Feishu clients send different formats, so we try
+            // both.
+            let post_obj = &parsed_content["post"];
+            let locale = if post_obj["zh_cn"].is_object() {
                 "zh_cn"
-            } else if content["en_us"].is_object() {
+            } else if post_obj["en_us"].is_object() {
                 "en_us"
-            } else if content["ja_jp"].is_object() {
+            } else if post_obj["ja_jp"].is_object() {
                 "ja_jp"
             } else {
                 ""
             };
 
             if !locale.is_empty() {
-                text = extract_post_text(&content[locale]);
-            }
-            if text.is_empty() {
-                text = parsed_content["text"].as_str().unwrap_or("").to_string();
+                text = extract_post_text(&post_obj[locale]);
+            } else if parsed_content["content"].is_array() {
+                // Format 2: direct content without locale wrapper
+                text = extract_post_text(&parsed_content);
             }
             ImEventKind::Text {
                 text: text.clone(),
@@ -1039,7 +1059,11 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
         }
     };
 
-    tracing::debug!("Forwarding Feishu message to event loop");
+    tracing::debug!(
+        "Feishu emit: user_id={user_id:?} msg_type={msg_type} chat_type={chat_type} has_mention={has_mention} text_len={} text_preview={:?}",
+        text.len(),
+        &text.chars().take(100).collect::<String>(),
+    );
     if let Some(tx) = adapter.event_tx.read().await.as_ref() {
         let _ = tx.send(ImEvent {
             user_id,

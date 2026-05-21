@@ -142,6 +142,18 @@ impl Server {
             event.kind.variant_name()
         );
 
+        // Log full text for Text events to debug multi-line message routing
+        if let ImEventKind::Text { ref text, is_mention, is_group } = event.kind {
+            tracing::debug!(
+                "[Feishu] Text event: user_id={:?} chat_id={} thread_id={:?} is_mention={is_mention} is_group={is_group} text_len={} text_preview={:?}",
+                event.user_id,
+                event.target.chat_id.0,
+                event.target.thread_id.map(|t| t.0),
+                text.len(),
+                &text.chars().take(120).collect::<String>(),
+            );
+        }
+
         // Check user authorization
         if !self.config.is_user_allowed(event.user_id.0) {
             tracing::warn!("Unauthorized user: {:?}", event.user_id);
