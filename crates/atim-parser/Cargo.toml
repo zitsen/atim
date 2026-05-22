@@ -16,4 +16,4 @@ thiserror = { workspace = true }
 regex = { workspace = true }
 chrono = { workspace = true }
 base64 = "0.22"
-atim-core = { path = "../atim-core", version = "0.1.0" }
+atim-core = { path = "../atim-core", version = "0.2.0" }
