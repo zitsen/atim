@@ -6,10 +6,22 @@ use regex::Regex;
 use atim_core::error::{Error, Result};
 
 /// Default font paths (Latin monospace).
+///
+/// Order: Nerd Font variants first (richer glyph coverage), then
+/// DejaVu Sans Mono, then Adwaita Mono as a last resort.
 const LATIN_FONT_PATHS: &[&str] = &[
+    // Meslo Nerd Font (most popular, ships with many dev setups)
+    "/usr/share/fonts/TTF/MesloLGMNerdFontMono-Regular.ttf",
+    "/usr/share/fonts/TTF/MesloLGLNerdFontMono-Regular.ttf",
+    "/usr/share/fonts/TTF/MesloLGSNerdFontMono-Regular.ttf",
+    // User-installed Nerd Fonts (home directory)
+    "/home/huolinhe/.local/share/fonts/MesloLGMNerdFontMono-Regular.ttf",
+    "/home/huolinhe/.local/share/fonts/MesloLGLNerdFontMono-Regular.ttf",
+    // DejaVu fallback
     "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
     "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",
+    // Last resort
     "/usr/share/fonts/Adwaita/AdwaitaMono-Regular.ttf",
 ];
 
