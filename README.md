@@ -67,90 +67,84 @@ The installer downloads a statically-linked musl binary from the latest GitHub r
 
 ## Quick Start
 
-### 1. Create a Feishu Bot (recommended)
 
+
+<details>
+<summary>
+### Configure Feishu Bot
+</summary>
 Open the [Feishu Launcher](https://open.feishu.cn/page/launcher) to create a bot in one click:
 
 ![Feishu Launcher](assets/feishu-launcher.png)
 
-Enter any name (e.g. "AtimBot"), optionally upload an avatar, and click **Create**. After creation, you'll find your app in the [console](https://open.feishu.cn/app):
-
-![App List](assets/feishu-apps-list.png)
-
-#### Get Credentials
-
-Open your app and navigate to **Credentials & Basics** to find your App ID and App Secret:
+Enter any name (e.g. "AtimBot"), optionally upload an avatar, and click **Create**. After creation, you'll see your App ID and App Secret:
 
 ![App Credentials](assets/feishu-app-credentials.png)
 
-#### Enable Bot
+For bot management, you can find your app in the [console](https://open.feishu.cn/app):
 
-Go to **Bot** settings and enable the bot feature:
+![App List](assets/feishu-apps-list.png)
 
-![Bot Settings](assets/feishu-bot-settings.png)
 
-#### Add Permissions
-
-Go to **Permissions & Scopes** and add the following scopes:
-
-| Scope | Purpose |
-|-------|---------|
-| `im:message` | Send and receive messages |
-| `im:chat` | Read chat info |
-| `im:resource` | Download message resources (images, files) |
-
-![Permissions](assets/feishu-permissions.png)
-
-#### Subscribe to Events
-
-Go to **Events & Callbacks**, switch to **Persistent Connection (WebSocket)** mode, and subscribe to these events:
-
-| Event | Purpose |
-|-------|---------|
-| `im.message.receive_v1` | Receive messages |
-| `im.message.reaction.created_v1` | Track reaction added |
-| `im.message.reaction.deleted_v1` | Track reaction removed |
-| `im.message.message_read_v1` | Track message read receipts |
-
-![Events](assets/feishu-events.png)
-
-### 2. Configure and Run
+Set `~/.atim/.env` with App ID and Secret:
 
 ```bash
-# Feishu backend (recommended)
-export ATIM_FEISHU_APP_ID=cli_xxxx
-export ATIM_FEISHU_APP_SECRET=xxxx
-
-# OR Telegram backend
-# export ATIM_TELEGRAM_TOKEN="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
-# export ATIM_ALLOWED_USERS="123456789"
-
-atim
+ATIM_IM_BACKEND=feishu
+ATIM_FEISHU_APP_ID=cli_xxxx
+ATIM_FEISHU_APP_SECRET=xxxx
 ```
+
+Recommend to install `atim` as a systemd service:
+
+```bash
+atim service --install
+```
+</details>
+
+<details>
+<summary>
+### Configure Telegram Bot
+</summary>
+First create Telegram bot via [@BotFather](https://t.me/botfather).
+
+And then get your User ID from [@userinfobot](https://t.me/userinfobot).
+
+Set `~/.atim/.env` with bot token and user id:
+
+```bash
+ATIM_IM_BACKEND=telegram
+ATIM_TELEGRAM_TOKEN="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+ATIM_ALLOWED_USERS="123456789"
+```
+
+Recommend to install `atim` as a systemd service:
+
+```bash
+atim service --install
+```
+</details>
 
 ### Prerequisites
 
-| Requirement | Notes |
-|-------------|-------|
-| **tmux** | Atim manages agent windows through tmux |
-| **Rust 1.85+** | Edition 2024 |
-| **Feishu Bot** | Create at [open.feishu.cn/page/launcher](https://open.feishu.cn/page/launcher) |
-| **or Telegram Bot** | Create via [@BotFather](https://t.me/botfather), get your User ID from [@userinfobot](https://t.me/userinfobot) |
+| Requirement | Notes                                   |
+| ----------- | --------------------------------------- |
+| **tmux**    | Atim manages agent windows through tmux |
+| **zoxide**  | Optional. For fast directory search     |
 
 ## Configuration
 
 Atim reads from environment variables (or a `~/.atim/.env` file):
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ATIM_DIR` | `~/.atim` | Data directory |
-| `ATIM_TMUX_SESSION` | `atim` | Target tmux session |
-| `ATIM_AGENT_COMMAND` | `claude` | Agent CLI command |
-| `ATIM_FEISHU_APP_ID` | — | Feishu App ID |
-| `ATIM_FEISHU_APP_SECRET` | — | Feishu App Secret |
-| `ATIM_TELEGRAM_TOKEN` | — | Telegram Bot API token |
-| `ATIM_ALLOWED_USERS` | — | Comma-separated Telegram user IDs (empty = allow all) |
-| `ATIM_OPENAI_API_KEY` | — | For voice message transcription |
+| Variable                 | Default   | Description                                           |
+| ------------------------ | --------- | ----------------------------------------------------- |
+| `ATIM_DIR`               | `~/.atim` | Data directory                                        |
+| `ATIM_TMUX_SESSION`      | `atim`    | Target tmux session                                   |
+| `ATIM_AGENT_COMMAND`     | `claude`  | Agent CLI command                                     |
+| `ATIM_FEISHU_APP_ID`     | —         | Feishu App ID                                         |
+| `ATIM_FEISHU_APP_SECRET` | —         | Feishu App Secret                                     |
+| `ATIM_TELEGRAM_TOKEN`    | —         | Telegram Bot API token                                |
+| `ATIM_ALLOWED_USERS`     | —         | Comma-separated Telegram user IDs (empty = allow all) |
+| `ATIM_OPENAI_API_KEY`    | —         | For voice message transcription                       |
 
 ## Usage
 
@@ -163,13 +157,13 @@ Atim reads from environment variables (or a `~/.atim/.env` file):
 
 Send these in the IM chat to control the agent session:
 
-| Command | Description |
-|---------|-------------|
-| `/ss` or `/screenshot` | Capture a screenshot of the tmux terminal |
-| `/usage` | Show Claude Code usage/quota info |
-| `/switch <agent>` | Switch to a different agent (`claude`, `copilot`, `codex`) |
-| `/esc` or `/dismiss` | Send Escape key to dismiss modals/help screens |
-| `!<command>` | Run a shell command in the agent's tmux window and stream output |
+| Command                | Description                                                      |
+| ---------------------- | ---------------------------------------------------------------- |
+| `/ss` or `/screenshot` | Capture a screenshot of the tmux terminal                        |
+| `/usage`               | Show Claude Code usage/quota info                                |
+| `/switch <agent>`      | Switch to a different agent (`claude`, `copilot`, `codex`)       |
+| `/esc` or `/dismiss`   | Send Escape key to dismiss modals/help screens                   |
+| `!<command>`           | Run a shell command in the agent's tmux window and stream output |
 
 During directory browsing, text input acts as a `zoxide` query to jump to matching directories.
 
@@ -204,16 +198,16 @@ atim service --system --start
 
 ## Project Structure
 
-| Crate | Purpose |
-|-------|---------|
-| `atim-core` | Config, error types, IM trait, message types, agent abstraction |
-| `atim-im` | Telegram + Feishu adapter implementations |
-| `atim-tmux` | tmux window lifecycle and terminal I/O |
-| `atim-parser` | JSONL log and terminal output parsing |
-| `atim-monitor` | Session log polling with byte-offset tracking |
-| `atim-queue` | Per-user async message queues with flood control |
-| `atim-state` | Thread binding and window state persistence |
-| `atim-bin` | Entry point — server + CLI |
+| Crate          | Purpose                                                         |
+| -------------- | --------------------------------------------------------------- |
+| `atim-core`    | Config, error types, IM trait, message types, agent abstraction |
+| `atim-im`      | Telegram + Feishu adapter implementations                       |
+| `atim-tmux`    | tmux window lifecycle and terminal I/O                          |
+| `atim-parser`  | JSONL log and terminal output parsing                           |
+| `atim-monitor` | Session log polling with byte-offset tracking                   |
+| `atim-queue`   | Per-user async message queues with flood control                |
+| `atim-state`   | Thread binding and window state persistence                     |
+| `atim-bin`     | Entry point — server + CLI                                      |
 
 ## Extending
 
