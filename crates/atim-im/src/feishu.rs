@@ -18,7 +18,8 @@ use tokio::sync::mpsc;
 use atim_core::error::{Error, Result};
 use atim_core::im::ImAdapter;
 use atim_core::message::{
-    Button, ChatId, ImEvent, ImEventKind, MessageId, MessageTarget, ThreadId, UserId,
+    Button, ChatId, CheckItem, ImEvent, ImEventKind, MessageId, MessageTarget,
+    ThreadId, UserId,
 };
 
 use open_lark::Config;
@@ -589,6 +590,59 @@ impl ImAdapter for FeishuAdapter {
             "elements": [
                 { "tag": "markdown", "content": text },
             ],
+        });
+
+        let mut body = serde_json::json!({
+            "receive_id": chat_id,
+            "msg_type": "interactive",
+            "content": serde_json::to_string(&card)
+                .map_err(|e| Error::Feishu(format!("card serialization: {e}")))?,
+        });
+
+        self.add_thread_id(&mut body, target).await;
+
+        let data = self
+            .api_post("/im/v1/messages?receive_id_type=chat_id", &body)
+            .await?;
+        let msg_id = data["message_id"].as_str().unwrap_or("").to_string();
+        Ok(MessageId(msg_id))
+    }
+
+    async fn send_check_card(
+        &self,
+        target: &MessageTarget,
+        title: &str,
+        items: &[CheckItem],
+    ) -> Result<MessageId> {
+        let chat_id = self
+            .resolve_chat(&target.chat_id)
+            .await
+            .ok_or_else(|| Error::Feishu("unknown chat_id".into()))?;
+
+        let mut elements: Vec<serde_json::Value> = Vec::new();
+
+        for item in items {
+            let emoji = item.status.emoji();
+            elements.push(serde_json::json!({
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": format!("**{} {}**\n{}", emoji, item.label, item.detail),
+                },
+            }));
+            elements.push(serde_json::json!({"tag": "hr"}));
+        }
+
+        // Remove trailing divider
+        elements.pop();
+
+        let card = serde_json::json!({
+            "config": { "wide_screen_mode": true },
+            "header": {
+                "title": { "tag": "plain_text", "content": title },
+                "template": "blue",
+            },
+            "elements": elements,
         });
 
         let mut body = serde_json::json!({

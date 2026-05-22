@@ -9,7 +9,8 @@ use atim_core::config::Config;
 use atim_core::error::Result;
 use atim_core::im::ImAdapter;
 use atim_core::message::{
-    Button, ChatId, ImEvent, ImEventKind, MessageId, MessageTarget, ThreadId, WindowId,
+    Button, ChatId, CheckItem, CheckStatus, ImEvent, ImEventKind, MessageId, MessageTarget,
+    ThreadId, WindowId,
 };
 use atim_core::message::{InteractiveUi, UiKind};
 use atim_core::session::{ThreadBinding, WindowState};
@@ -967,6 +968,156 @@ impl Server {
                         .send_message(&target, &format!("🔄 Rebound: {}", changes.join(", ")))
                         .await;
                 }
+            } else {
+                let _ = self
+                    .im_adapter
+                    .send_message(&target, "No active session.")
+                    .await;
+            }
+            return Ok(());
+        }
+
+        // Handle /check — health check report card
+        if text.trim() == "/check" {
+            if let Some(binding) = state.thread_bindings.iter().find(|b| {
+                b.user_id == user_id && b.thread_id == target.thread_id.map(|t| t.0).unwrap_or(0)
+            }) {
+                let mut items: Vec<CheckItem> = Vec::new();
+                let window_id = WindowId(binding.window_id.clone());
+
+                // 1. Tmux window check
+                let window_alive = self.tmux_mgr.find_window(&window_id).await;
+                match &window_alive {
+                    Ok(info) => items.push(CheckItem {
+                        label: "Tmux Window".into(),
+                        status: CheckStatus::Ok,
+                        detail: format!("{} — `{}`", info.name, info.current_command),
+                    }),
+                    Err(e) => items.push(CheckItem {
+                        label: "Tmux Window".into(),
+                        status: CheckStatus::Fail,
+                        detail: format!("{}: {e}", binding.window_id),
+                    }),
+                }
+
+                // 2. Chat binding
+                let chat_name = target
+                    .chat_name
+                    .as_deref()
+                    .unwrap_or(&binding.display_name);
+                items.push(CheckItem {
+                    label: "Chat Binding".into(),
+                    status: CheckStatus::Info,
+                    detail: format!(
+                        "chat={} display={} window={}",
+                        chat_name, binding.display_name, binding.window_id,
+                    ),
+                });
+
+                // 3. Session & agent
+                let ws = state.window_states.get(&binding.window_id);
+                let (agent_type, sid) = match ws {
+                    Some(ws) => (ws.agent_type.as_str(), ws.session_id.as_str()),
+                    None => ("?", ""),
+                };
+
+                items.push(CheckItem {
+                    label: "Agent".into(),
+                    status: if agent_type != "?" {
+                        CheckStatus::Ok
+                    } else {
+                        CheckStatus::Warn
+                    },
+                    detail: format!("{} session={}", agent_type, sid),
+                });
+
+                // 4. Session file status
+                if !sid.is_empty() {
+                    let jsonl_path = resolve_jsonl(sid).await;
+                    match jsonl_path {
+                        Some(path) if path.exists() => {
+                            let meta = match std::fs::metadata(&path) {
+                                Ok(m) => m,
+                                Err(_) => {
+                                    items.push(CheckItem {
+                                        label: "Session File".into(),
+                                        status: CheckStatus::Fail,
+                                        detail: "cannot read metadata".into(),
+                                    });
+                                    return Ok(());
+                                }
+                            };
+                            let file_size = meta.len();
+                            let mtime = meta.modified().ok();
+                            let offset = { self.byte_offsets.lock().await.get(sid).copied() };
+
+                            let offset_str = offset
+                                .map(|o| format!("{:.1}KB", o as f64 / 1024.0))
+                                .unwrap_or_else(|| "none".into());
+                            let behind = offset
+                                .map(|o| {
+                                    if file_size > o as u64 {
+                                        format!(
+                                            " ({}KB behind)",
+                                            (file_size - o as u64) as f64 / 1024.0
+                                        )
+                                    } else {
+                                        String::new()
+                                    }
+                                })
+                                .unwrap_or_default();
+
+                            let time_str = mtime
+                                .and_then(|t| {
+                                    std::time::SystemTime::now()
+                                        .duration_since(t)
+                                        .ok()
+                                        .map(|d| {
+                                            let mins = d.as_secs() / 60;
+                                            if mins < 1 {
+                                                "just now".into()
+                                            } else {
+                                                format!("{mins}min ago")
+                                            }
+                                        })
+                                })
+                                .unwrap_or_else(|| "unknown".into());
+
+                            items.push(CheckItem {
+                                label: "Session File".into(),
+                                status: CheckStatus::Ok,
+                                detail: format!(
+                                    "{} ({:.1}KB) offset={}{} last_activity={}",
+                                    path.file_name()
+                                        .map(|n| n.to_string_lossy())
+                                        .unwrap_or_default(),
+                                    file_size as f64 / 1024.0,
+                                    offset_str,
+                                    behind,
+                                    time_str,
+                                ),
+                            });
+                        }
+                        _ => {
+                            items.push(CheckItem {
+                                label: "Session File".into(),
+                                status: CheckStatus::Warn,
+                                detail: "not found".into(),
+                            });
+                        }
+                    }
+                } else {
+                    items.push(CheckItem {
+                        label: "Session".into(),
+                        status: CheckStatus::Warn,
+                        detail: "no session bound".into(),
+                    });
+                }
+
+                let _ = self
+                    .im_adapter
+                    .send_check_card(&target, "🔍 系统巡检", &items)
+                    .await;
             } else {
                 let _ = self
                     .im_adapter

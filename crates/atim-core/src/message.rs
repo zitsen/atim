@@ -1,5 +1,35 @@
 use serde::{Deserialize, Serialize};
 
+// ── Check report ──
+
+/// A single check item in a health check report.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckItem {
+    pub label: String,
+    pub status: CheckStatus,
+    pub detail: String,
+}
+
+/// Status of a check item.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CheckStatus {
+    Ok,
+    Fail,
+    Warn,
+    Info,
+}
+
+impl CheckStatus {
+    pub fn emoji(&self) -> &'static str {
+        match self {
+            CheckStatus::Ok => "✅",
+            CheckStatus::Fail => "❌",
+            CheckStatus::Warn => "⚠️",
+            CheckStatus::Info => "ℹ️",
+        }
+    }
+}
+
 // ── Identifiers ──
 
 /// Telegram/Flybook user ID.

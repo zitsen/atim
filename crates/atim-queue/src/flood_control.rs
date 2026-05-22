@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 use async_trait::async_trait;
 use atim_core::error::Result;
 use atim_core::im::ImAdapter;
-use atim_core::message::{Button, ImEvent, MessageId, MessageTarget};
+use atim_core::message::{Button, CheckItem, ImEvent, MessageId, MessageTarget};
 use tokio::sync::mpsc;
 
 /// Maximum messages per chat within the time window.
@@ -233,6 +233,23 @@ impl ImAdapter for FloodControlledAdapter {
         self.inner.send_chat_action(target).await
     }
 
+    async fn send_check_card(
+        &self,
+        target: &MessageTarget,
+        title: &str,
+        items: &[CheckItem],
+    ) -> Result<MessageId> {
+        let chat_id = Self::get_chat_id(target).await;
+        if self.rate_limit(chat_id, true).await {
+            return self.inner.send_message(target, title).await;
+        }
+        let result = self.inner.send_check_card(target, title, items).await;
+        if result.is_ok() {
+            self.record_send(chat_id).await;
+        }
+        result
+    }
+
     async fn answer_callback(&self, callback_query_id: &str, text: &str) -> Result<()> {
         // Don't rate-limit callback answers
         self.inner.answer_callback(callback_query_id, text).await
@@ -294,6 +311,14 @@ mod tests {
         }
         async fn send_chat_action(&self, _target: &MessageTarget) -> Result<()> {
             Ok(())
+        }
+        async fn send_check_card(
+            &self,
+            _target: &MessageTarget,
+            _title: &str,
+            _items: &[CheckItem],
+        ) -> Result<MessageId> {
+            Ok(MessageId("mock:1".into()))
         }
         async fn answer_callback(&self, _callback_query_id: &str, _text: &str) -> Result<()> {
             Ok(())

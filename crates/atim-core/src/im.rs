@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use crate::error::Result;
-use crate::message::{Button, ImEvent, MessageId, MessageTarget};
+use crate::message::{Button, CheckItem, ImEvent, MessageId, MessageTarget};
 
 /// Unified IM interface — Telegram and Feishu implement this trait.
 ///
@@ -56,6 +56,16 @@ pub trait ImAdapter: Send + Sync {
         msg_id: &MessageId,
         buttons: &[Vec<Button>],
     ) -> Result<()>;
+
+    /// Send a structured check report card.
+    ///
+    /// Feishu renders a rich interactive card; Telegram uses formatted text fallback.
+    async fn send_check_card(
+        &self,
+        target: &MessageTarget,
+        title: &str,
+        items: &[CheckItem],
+    ) -> Result<MessageId>;
 
     /// Send a chat action (typing indicator, etc.).
     ///

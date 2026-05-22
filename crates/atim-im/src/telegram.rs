@@ -4,7 +4,9 @@ use tokio::sync::mpsc;
 
 use atim_core::error::{Error, Result};
 use atim_core::im::ImAdapter;
-use atim_core::message::{Button, ImEvent, ImEventKind, MessageId, MessageTarget};
+use atim_core::message::{
+    Button, CheckItem, ImEvent, ImEventKind, MessageId, MessageTarget,
+};
 
 /// Convert Markdown text to Telegram-compatible HTML.
 ///
@@ -323,6 +325,35 @@ impl ImAdapter for TelegramAdapter {
 
     async fn send_message(&self, target: &MessageTarget, text: &str) -> Result<MessageId> {
         let html = markdown_to_html(text);
+        let mut params = serde_json::json!({
+            "chat_id": target.chat_id.0,
+            "text": html,
+            "parse_mode": "HTML",
+        });
+        if let Some(thread) = target.thread_id {
+            params["message_thread_id"] = serde_json::json!(thread.0);
+        }
+        let result = self.api_post("sendMessage", &params).await?;
+        Ok(MessageId(
+            result["message_id"].as_i64().unwrap_or(0).to_string(),
+        ))
+    }
+
+    async fn send_check_card(
+        &self,
+        target: &MessageTarget,
+        title: &str,
+        items: &[CheckItem],
+    ) -> Result<MessageId> {
+        let mut html_parts = vec![format!("🔍 <b>{}</b>", title)];
+        for item in items {
+            let emoji = item.status.emoji();
+            html_parts.push(format!(
+                "{} <b>{}</b> — {}",
+                emoji, item.label, item.detail
+            ));
+        }
+        let html = html_parts.join("\n");
         let mut params = serde_json::json!({
             "chat_id": target.chat_id.0,
             "text": html,
