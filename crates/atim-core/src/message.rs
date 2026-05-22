@@ -36,6 +36,9 @@ pub struct ThreadId(pub i64);
 pub struct MessageTarget {
     pub chat_id: ChatId,
     pub thread_id: Option<ThreadId>,
+    /// Human-readable name for the chat/group (e.g. "My Project Group").
+    /// Set by the IM adapter when the message originates from a group chat.
+    pub chat_name: Option<String>,
 }
 
 // ── Inbound events from IM ──

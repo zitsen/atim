@@ -214,8 +214,9 @@ impl Agent for ClaudeAgent {
         discover_by_pid_lsof(window_id)
     }
 
-    fn scan_sessions(&self, _path: &Path) -> Result<Vec<DetectedSession>> {
-        scan_claude_session_files()
+    fn scan_sessions(&self, path: &Path) -> Result<Vec<DetectedSession>> {
+        let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        scan_claude_session_files(Some(&canonical))
     }
 }
 
@@ -321,14 +322,62 @@ fn discover_by_pid_lsof(window_id: &str) -> Result<Option<String>> {
     Ok(None)
 }
 
-/// Scan `~/.claude/projects/` for all session JSONL files.
-fn scan_claude_session_files() -> Result<Vec<DetectedSession>> {
+/// Maximum sessions shown in the unfiltered fallback.
+const FALLBACK_MAX_SESSIONS: usize = 25;
+
+/// Scan `~/.claude/projects/` for session JSONL files.
+///
+/// When a working directory is provided, tries slug-filtered scanning first
+/// (only sessions whose project directory name matches the path-derived slug).
+/// If no sessions match the slug, falls back to scanning all projects — limited
+/// to the most recent `FALLBACK_MAX_SESSIONS` — so the user never gets an empty
+/// picker when the slug heuristic misses (bind mounts, canonicalization, etc.).
+fn scan_claude_session_files(cwd: Option<&Path>) -> Result<Vec<DetectedSession>> {
     let claude_dir = claude_projects_dir()
         .ok_or_else(|| crate::error::Error::NotFound("no claude projects dir".into()))?;
     let projects_dir = claude_dir.join("projects");
-    let projects = std::fs::read_dir(&projects_dir).map_err(crate::error::Error::Io)?;
 
+    let target_slug = cwd.map(|p| {
+        p.iter()
+            .filter_map(|c| c.to_str())
+            .collect::<Vec<_>>()
+            .join("-")
+    });
+
+    // First pass: slug-filtered scan
+    let mut sessions = scan_projects_dir(&projects_dir, target_slug.as_deref())?;
+
+    // Fallback: slug filter yielded nothing despite a slug being specified.
+    // Return the most recent sessions across all projects instead.
+    if sessions.is_empty() && target_slug.is_some() {
+        tracing::debug!(
+            "No sessions found for slug {:?}, falling back to full scan (capped at {})",
+            target_slug,
+            FALLBACK_MAX_SESSIONS,
+        );
+        sessions = scan_projects_dir(&projects_dir, None)?;
+        sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        sessions.truncate(FALLBACK_MAX_SESSIONS);
+    } else {
+        sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    }
+
+    Ok(sessions)
+}
+
+/// Scan one or all project directories under `projects_dir`.
+///
+/// If `filter_slug` is `Some`, only the project directory whose name matches
+/// exactly is scanned. If `None`, all project directories are scanned.
+fn scan_projects_dir(
+    projects_dir: &Path,
+    filter_slug: Option<&str>,
+) -> Result<Vec<DetectedSession>> {
     let mut sessions = Vec::new();
+    let projects = match std::fs::read_dir(projects_dir) {
+        Ok(d) => d,
+        Err(e) => return Err(crate::error::Error::Io(e)),
+    };
 
     for project_dir in projects.flatten() {
         let proj_path = project_dir.path();
@@ -340,6 +389,12 @@ fn scan_claude_session_files() -> Result<Vec<DetectedSession>> {
             .and_then(|n| n.to_str())
             .unwrap_or("")
             .to_string();
+
+        if let Some(target) = filter_slug {
+            if slug != target {
+                continue;
+            }
+        }
 
         let entries = match std::fs::read_dir(&proj_path) {
             Ok(d) => d,
@@ -375,7 +430,6 @@ fn scan_claude_session_files() -> Result<Vec<DetectedSession>> {
         }
     }
 
-    sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
     Ok(sessions)
 }
 

@@ -517,9 +517,14 @@ fn parse_message(msg: &serde_json::Value) -> Option<ImEvent> {
         .filter(|&b| b)
         .and_then(|_| msg["message_thread_id"].as_i64());
 
+    let chat_type = msg["chat"]["type"].as_str().unwrap_or("private");
+    let is_group = chat_type == "group" || chat_type == "supergroup";
+    let chat_name = msg["chat"]["title"].as_str().map(String::from);
+
     let target = MessageTarget {
         chat_id: atim_core::message::ChatId(chat_id),
         thread_id: thread_id.map(atim_core::message::ThreadId),
+        chat_name,
     };
 
     let kind = if let Some(tc) = msg.get("forum_topic_created") {
@@ -538,7 +543,7 @@ fn parse_message(msg: &serde_json::Value) -> Option<ImEvent> {
         ImEventKind::Text {
             text: text.to_string(),
             is_mention: false,
-            is_group: false,
+            is_group,
         }
     } else if msg.get("photo").is_some() {
         ImEventKind::Photo {
@@ -579,6 +584,7 @@ fn parse_callback_query(cq: &serde_json::Value) -> Option<ImEvent> {
         target: MessageTarget {
             chat_id: atim_core::message::ChatId(chat_id),
             thread_id: thread_id.map(atim_core::message::ThreadId),
+            chat_name: None,
         },
         kind: ImEventKind::CallbackQuery {
             data: data.to_string(),

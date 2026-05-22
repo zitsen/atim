@@ -46,6 +46,7 @@ mod tests {
         let target = MessageTarget {
             chat_id: ChatId(-100),
             thread_id: Some(ThreadId(100)),
+            chat_name: None,
         };
 
         let result = router.resolve_window(&target);
@@ -59,6 +60,7 @@ mod tests {
         let target = MessageTarget {
             chat_id: ChatId(-200),
             thread_id: Some(ThreadId(999)),
+            chat_name: None,
         };
 
         assert_eq!(router.resolve_window(&target), None);
@@ -90,6 +92,7 @@ mod tests {
         let target = MessageTarget {
             chat_id: ChatId(-100),
             thread_id: Some(ThreadId(55)),
+            chat_name: None,
         };
 
         // Returns the first binding with matching thread_id

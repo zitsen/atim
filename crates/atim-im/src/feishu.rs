@@ -935,25 +935,31 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
         None
     };
 
+    let chat_name = if chat_type == "group" {
+        adapter.fetch_chat_name(chat_id).await
+    } else {
+        None
+    };
     let target = MessageTarget {
         chat_id: chat_id_atim,
         thread_id,
+        chat_name: chat_name.clone(),
     };
 
     // For group chats, fetch the chat name and emit TopicCreated so the
     // server can use it as the window/topic name (e.g. "atim" instead of
     // "atim-<user_id>").
-    if chat_type == "group"
-        && let Some(chat_name) = adapter.fetch_chat_name(chat_id).await {
+    if let Some(ref cn) = chat_name {
             let topic_target = MessageTarget {
                 chat_id: chat_id_atim,
                 thread_id,
+                chat_name: Some(cn.clone()),
             };
             if let Some(tx) = adapter.event_tx.read().await.as_ref() {
                 let _ = tx.send(ImEvent {
                     user_id,
                     target: topic_target,
-                    kind: ImEventKind::TopicCreated { name: chat_name },
+                    kind: ImEventKind::TopicCreated { name: cn.clone() },
                 });
             }
         }
@@ -1159,6 +1165,7 @@ async fn handle_card_action(adapter: &FeishuAdapter, payload: &serde_json::Value
     let target = MessageTarget {
         chat_id: adapter.register_chat(chat_id).await,
         thread_id,
+        chat_name: None,
     };
 
     let action_token = event["action"]["token"]

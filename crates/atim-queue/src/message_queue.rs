@@ -169,6 +169,7 @@ mod tests {
         MessageTarget {
             chat_id: ChatId(-123),
             thread_id: Some(ThreadId(456)),
+            chat_name: None,
         }
     }
 

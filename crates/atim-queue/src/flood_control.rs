@@ -309,6 +309,7 @@ mod tests {
         let target = MessageTarget {
             chat_id: atim_core::message::ChatId(12345),
             thread_id: None,
+            chat_name: None,
         };
 
         // Send 5 messages quickly — should be allowed
