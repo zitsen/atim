@@ -6,7 +6,7 @@
 Telegram / Feishu  ↔  tmux  ↔  Claude Code
 ```
 
-Atim bridges an IM chat directly to a tmux window running an AI coding agent. Type in Telegram — it reaches the agent's terminal. The agent responds — you see it in Telegram.
+Atim bridges an IM chat directly to a tmux window running an AI coding agent. Type in Feishu or Telegram — it reaches the agent's terminal. The agent responds — you see it in the same chat.
 
 ## Quick Install
 
@@ -32,7 +32,7 @@ The installer downloads a statically-linked musl binary from the latest GitHub r
 
 ## Features
 
-- **Multi-IM**: Telegram (stable) + Feishu/Lark (beta)
+- **Multi-IM**: Feishu/Lark (beta) + Telegram (stable)
 - **Multi-agent**: Claude Code, Copilot CLI, Codex CLI — auto-detected by pane inspection
 - **Topic isolation**: Each Telegram topic groups → a dedicated tmux window
 - **Interactive UIs**: Inline keyboards for directory browsing, window picking, session selection
@@ -85,7 +85,6 @@ For bot management, you can find your app in the [console](https://open.feishu.c
 
 ![App List](assets/feishu-apps-list.png)
 
-
 Set `~/.atim/.env` with App ID and Secret:
 
 ```bash
@@ -94,11 +93,7 @@ ATIM_FEISHU_APP_ID=cli_xxxx
 ATIM_FEISHU_APP_SECRET=xxxx
 ```
 
-Recommend to install `atim` as a systemd service:
-
-```bash
-atim service --install
-```
+Then run `atim`.
 </details>
 
 <details>
@@ -107,9 +102,9 @@ atim service --install
 </summary>
 First create Telegram bot via [@BotFather](https://t.me/botfather).
 
-And then get your User ID from [@userinfobot](https://t.me/userinfobot).
+Get your User ID from [@userinfobot](https://t.me/userinfobot).
 
-Set `~/.atim/.env` with bot token and user id:
+Set `~/.atim/.env`:
 
 ```bash
 ATIM_IM_BACKEND=telegram
@@ -117,11 +112,7 @@ ATIM_TELEGRAM_TOKEN="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
 ATIM_ALLOWED_USERS="123456789"
 ```
 
-Recommend to install `atim` as a systemd service:
-
-```bash
-atim service --install
-```
+Then run `atim`.
 </details>
 
 ### Prerequisites
@@ -140,6 +131,7 @@ Atim reads from environment variables (or a `~/.atim/.env` file):
 | `ATIM_DIR`               | `~/.atim` | Data directory                                        |
 | `ATIM_TMUX_SESSION`      | `atim`    | Target tmux session                                   |
 | `ATIM_AGENT_COMMAND`     | `claude`  | Agent CLI command                                     |
+| `ATIM_IM_BACKEND`        | —         | IM backend to use (`feishu` or `telegram`)            |
 | `ATIM_FEISHU_APP_ID`     | —         | Feishu App ID                                         |
 | `ATIM_FEISHU_APP_SECRET` | —         | Feishu App Secret                                     |
 | `ATIM_TELEGRAM_TOKEN`    | —         | Telegram Bot API token                                |
