@@ -70,9 +70,7 @@ The installer downloads a statically-linked musl binary from the latest GitHub r
 
 
 <details>
-<summary>
-### Configure Feishu Bot
-</summary>
+<summary><strong>Configure Feishu Bot</strong></summary>
 Open the [Feishu Launcher](https://open.feishu.cn/page/launcher) to create a bot in one click:
 
 ![Feishu Launcher](assets/feishu-launcher.png)
@@ -97,9 +95,7 @@ Then run `atim`.
 </details>
 
 <details>
-<summary>
-### Configure Telegram Bot
-</summary>
+<summary><strong>Configure Telegram Bot</strong></summary>
 First create Telegram bot via [@BotFather](https://t.me/botfather).
 
 Get your User ID from [@userinfobot](https://t.me/userinfobot).
