@@ -114,6 +114,8 @@ pub enum ImEventKind {
     TopicClosed,
     /// Forum topic was renamed (topic title changed).
     TopicEdited { new_name: String },
+    /// Bot was added to a group chat.
+    BotAdded { chat_name: Option<String> },
 }
 
 impl ImEventKind {
@@ -126,6 +128,7 @@ impl ImEventKind {
             ImEventKind::TopicCreated { .. } => "TopicCreated",
             ImEventKind::TopicClosed => "TopicClosed",
             ImEventKind::TopicEdited { .. } => "TopicEdited",
+            ImEventKind::BotAdded { .. } => "BotAdded",
         }
     }
 }

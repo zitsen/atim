@@ -63,6 +63,8 @@ pub struct Server {
     /// Pending rename names: (user_id, chat_id, thread_id) -> new chat_name.
     /// Set when the rename prompt is shown; consumed by the rename callback.
     pub pending_rename_names: Arc<Mutex<HashMap<UserTriple, String>>>,
+    /// Track which chat_ids have received the welcome message (in-memory, resets on restart).
+    pub welcome_sent: Arc<Mutex<HashSet<i64>>>,
 }
 
 /// Maximum Telegram message length for merged content.
@@ -276,6 +278,9 @@ impl Server {
             }
             ImEventKind::TopicEdited { new_name } => {
                 self.handle_topic_edited(&event.target, &new_name).await?;
+            }
+            ImEventKind::BotAdded { .. } => {
+                self.handle_bot_added(&event.target).await?;
             }
         }
 
@@ -1073,11 +1078,8 @@ impl Server {
                                 .unwrap_or_else(|| "none".into());
                             let behind = offset
                                 .map(|o| {
-                                    if file_size > o as u64 {
-                                        format!(
-                                            " ({}KB behind)",
-                                            (file_size - o as u64) as f64 / 1024.0
-                                        )
+                                    if file_size > o {
+                                        format!(" ({}KB behind)", (file_size - o) as f64 / 1024.0)
                                     } else {
                                         String::new()
                                     }
@@ -1649,9 +1651,7 @@ impl Server {
                         .get(&binding.window_id)
                         .map(|ws| ws.agent_type == "copilot")
                         .unwrap_or(false);
-                    let result = self
-                        .send_text_to_agent(&window_id, text, is_copilot)
-                        .await;
+                    let result = self.send_text_to_agent(&window_id, text, is_copilot).await;
                     match &result {
                         Ok(()) => {
                             tracing::info!(
@@ -1689,6 +1689,19 @@ impl Server {
                 "[Feishu] No binding for user {user_id}, showing picker (is_mention={is_mention}, is_group={is_group})"
             );
 
+            // Send welcome message on first interaction in this chat
+            {
+                let mut sent = self.welcome_sent.lock().await;
+                if sent.insert(target.chat_id.0) {
+                    let welcome = concat!(
+                        "👋 Thanks for adding me!\n\n",
+                        "I'm **atim** — a bridge between IM and Claude Code agents.\n",
+                        "Send `/atim help` to see available commands."
+                    );
+                    let _ = self.im_adapter.send_message(&target, welcome).await;
+                }
+            }
+
             // No binding — save pending text, then show agent picker
             let key = (
                 user_id,
@@ -1704,6 +1717,20 @@ impl Server {
                 .await?;
         }
 
+        Ok(())
+    }
+
+    /// Send a welcome message when the bot is added to a group chat.
+    async fn handle_bot_added(&self, target: &MessageTarget) -> Result<()> {
+        let mut sent = self.welcome_sent.lock().await;
+        if sent.insert(target.chat_id.0) {
+            let welcome = concat!(
+                "👋 Thanks for adding me!\n\n",
+                "I'm **atim** — a bridge between IM and Claude Code agents.\n",
+                "Send `/atim help` to see available commands."
+            );
+            let _ = self.im_adapter.send_message(target, welcome).await;
+        }
         Ok(())
     }
 
@@ -3651,19 +3678,19 @@ impl Server {
                 }
 
                 // Uptime
-                match tokio::process::Command::new("uptime")
+                if let Ok(out) = tokio::process::Command::new("uptime")
                     .args(["-p"])
                     .output()
                     .await
                 {
-                    Ok(out) => {
-                        let uptime = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                        lines.push(format!("**Uptime**: {}", uptime));
-                    }
-                    Err(_) => {}
+                    let uptime = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    lines.push(format!("**Uptime**: {}", uptime));
                 }
 
-                let _ = self.im_adapter.send_message(target, &lines.join("\n")).await;
+                let _ = self
+                    .im_adapter
+                    .send_message(target, &lines.join("\n"))
+                    .await;
             }
             "help" | "h" | "-h" | "--help" => {
                 let help = concat!(

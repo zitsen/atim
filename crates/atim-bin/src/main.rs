@@ -287,6 +287,7 @@ async fn main() -> anyhow::Result<()> {
         last_ui_states: Arc::new(Mutex::new(std::collections::HashMap::new())),
         last_pane_output: Arc::new(Mutex::new(std::collections::HashMap::new())),
         pending_rename_names: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        welcome_sent: Arc::new(Mutex::new(std::collections::HashSet::new())),
     };
 
     server.run(im_rx, &mut monitor_rx).await?;

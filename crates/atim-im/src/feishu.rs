@@ -430,6 +430,7 @@ impl FeishuAdapter {
         match event_type {
             "im.message.receive_v1" => handle_message_event(self, &value).await,
             "card.action.trigger" => handle_card_action(self, &value).await,
+            "im.chat.member.bot.added_v1" => handle_bot_added_event(self, &value).await,
             _ => {
                 tracing::debug!("Unhandled Feishu event type: {event_type}");
                 Ok(())
@@ -1254,6 +1255,32 @@ async fn handle_card_action(adapter: &FeishuAdapter, payload: &serde_json::Value
         });
     }
 
+    Ok(())
+}
+
+async fn handle_bot_added_event(
+    adapter: &FeishuAdapter,
+    payload: &serde_json::Value,
+) -> Result<()> {
+    let chat_id_str = payload["event"]["chat_id"].as_str().unwrap_or("");
+    if chat_id_str.is_empty() {
+        return Ok(());
+    }
+    let chat_id = ChatId(FeishuAdapter::hash_id(chat_id_str));
+    let chat_name = payload["event"]["chat_name"]
+        .as_str()
+        .map(|s| s.to_string());
+    if let Some(tx) = adapter.event_tx.read().await.as_ref() {
+        let _ = tx.send(ImEvent {
+            user_id: UserId(0),
+            target: MessageTarget {
+                chat_id,
+                thread_id: None,
+                chat_name,
+            },
+            kind: ImEventKind::BotAdded { chat_name: None },
+        });
+    }
     Ok(())
 }
 

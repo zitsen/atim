@@ -4,7 +4,9 @@ use tokio::sync::mpsc;
 
 use atim_core::error::{Error, Result};
 use atim_core::im::ImAdapter;
-use atim_core::message::{Button, CheckItem, ImEvent, ImEventKind, MessageId, MessageTarget};
+use atim_core::message::{
+    Button, ChatId, CheckItem, ImEvent, ImEventKind, MessageId, MessageTarget, UserId,
+};
 
 /// Convert Markdown text to Telegram-compatible HTML.
 ///
@@ -308,6 +310,13 @@ impl ImAdapter for TelegramAdapter {
                         // Process callback query
                         if let Some(cq) = update.get("callback_query")
                             && let Some(event) = parse_callback_query(cq)
+                        {
+                            let _ = tx.send(event);
+                        }
+
+                        // Process bot added to group
+                        if let Some(mcm) = update.get("my_chat_member")
+                            && let Some(event) = parse_bot_added(mcm)
                         {
                             let _ = tx.send(event);
                         }
@@ -634,5 +643,25 @@ fn parse_callback_query(cq: &serde_json::Value) -> Option<ImEvent> {
             msg_id: MessageId(msg_id.to_string()),
             callback_query_id: query_id,
         },
+    })
+}
+
+fn parse_bot_added(mcm: &serde_json::Value) -> Option<ImEvent> {
+    let chat_id = mcm["chat"]["id"].as_i64()?;
+    let new_status = mcm["new_chat_member"]["status"].as_str()?;
+    if new_status != "member" && new_status != "administrator" {
+        return None;
+    }
+    let chat_name = mcm["chat"]
+        .get("title")
+        .and_then(|v| v.as_str().map(|s| s.to_string()));
+    Some(ImEvent {
+        user_id: UserId(0),
+        target: MessageTarget {
+            chat_id: ChatId(chat_id),
+            thread_id: None,
+            chat_name: chat_name.clone(),
+        },
+        kind: ImEventKind::BotAdded { chat_name },
     })
 }
