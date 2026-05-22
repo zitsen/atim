@@ -67,17 +67,64 @@ The installer downloads a statically-linked musl binary from the latest GitHub r
 
 ## Quick Start
 
+### 1. Create a Feishu Bot (recommended)
+
+Open the [Feishu Launcher](https://open.feishu.cn/page/launcher) to create a bot in one click:
+
+![Feishu Launcher](assets/feishu-launcher.png)
+
+Enter any name (e.g. "AtimBot"), optionally upload an avatar, and click **Create**. After creation, you'll find your app in the [console](https://open.feishu.cn/app):
+
+![App List](assets/feishu-apps-list.png)
+
+#### Get Credentials
+
+Open your app and navigate to **Credentials & Basics** to find your App ID and App Secret:
+
+![App Credentials](assets/feishu-app-credentials.png)
+
+#### Enable Bot
+
+Go to **Bot** settings and enable the bot feature:
+
+![Bot Settings](assets/feishu-bot-settings.png)
+
+#### Add Permissions
+
+Go to **Permissions & Scopes** and add the following scopes:
+
+| Scope | Purpose |
+|-------|---------|
+| `im:message` | Send and receive messages |
+| `im:chat` | Read chat info |
+| `im:resource` | Download message resources (images, files) |
+
+![Permissions](assets/feishu-permissions.png)
+
+#### Subscribe to Events
+
+Go to **Events & Callbacks**, switch to **Persistent Connection (WebSocket)** mode, and subscribe to these events:
+
+| Event | Purpose |
+|-------|---------|
+| `im.message.receive_v1` | Receive messages |
+| `im.message.reaction.created_v1` | Track reaction added |
+| `im.message.reaction.deleted_v1` | Track reaction removed |
+| `im.message.message_read_v1` | Track message read receipts |
+
+![Events](assets/feishu-events.png)
+
+### 2. Configure and Run
+
 ```bash
-# 1. Set up your IM backend
-#
-# Telegram: create a bot via @BotFather, get your user ID from @userinfobot
-export ATIM_TELEGRAM_TOKEN="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
-export ATIM_ALLOWED_USERS="123456789"
-# Feishu: create a bot in https://open.feishu.cn/page/launcher or by luck-cli
+# Feishu backend (recommended)
 export ATIM_FEISHU_APP_ID=cli_xxxx
 export ATIM_FEISHU_APP_SECRET=xxxx
 
-# 4. Run Atim
+# OR Telegram backend
+# export ATIM_TELEGRAM_TOKEN="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+# export ATIM_ALLOWED_USERS="123456789"
+
 atim
 ```
 
@@ -86,9 +133,9 @@ atim
 | Requirement | Notes |
 |-------------|-------|
 | **tmux** | Atim manages agent windows through tmux |
-| **Telegram Bot Token** | Create via [@BotFather](https://t.me/botfather) |
 | **Rust 1.85+** | Edition 2024 |
-| **Your Telegram User ID** | Get it from [@userinfobot](https://t.me/userinfobot) |
+| **Feishu Bot** | Create at [open.feishu.cn/page/launcher](https://open.feishu.cn/page/launcher) |
+| **or Telegram Bot** | Create via [@BotFather](https://t.me/botfather), get your User ID from [@userinfobot](https://t.me/userinfobot) |
 
 ## Configuration
 
@@ -99,18 +146,18 @@ Atim reads from environment variables (or a `~/.atim/.env` file):
 | `ATIM_DIR` | `~/.atim` | Data directory |
 | `ATIM_TMUX_SESSION` | `atim` | Target tmux session |
 | `ATIM_AGENT_COMMAND` | `claude` | Agent CLI command |
-| `ATIM_FEISHU_APP_ID` | — | Feishu app ID (for Feishu backend) |
-| `ATIM_FEISHU_APP_SECRET` | — | Feishu app secret |
-| `ATIM_OPENAI_API_KEY` | — | For voice message transcription |
+| `ATIM_FEISHU_APP_ID` | — | Feishu App ID |
+| `ATIM_FEISHU_APP_SECRET` | — | Feishu App Secret |
 | `ATIM_TELEGRAM_TOKEN` | — | Telegram Bot API token |
 | `ATIM_ALLOWED_USERS` | — | Comma-separated Telegram user IDs (empty = allow all) |
+| `ATIM_OPENAI_API_KEY` | — | For voice message transcription |
 
 ## Usage
 
-1. **Create a Telegram group** with your bot as admin. Enable **Topics** (Forum mode).
-2. **Send a message** in a topic — Atim creates a tmux window and starts Claude Code.
+1. **Add the bot to a Feishu group chat** (or create a Telegram group with Topics enabled).
+2. **Send a message** in the chat — Atim creates a tmux window and starts the agent.
 3. **Chat with the agent** — every message goes to the agent's terminal.
-4. **Close the topic** when done — the binding is cleaned up.
+4. **Close/archive the group** when done — the binding is cleaned up.
 
 ### Slash Commands
 
