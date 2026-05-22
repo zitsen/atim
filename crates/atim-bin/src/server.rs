@@ -550,6 +550,22 @@ impl Server {
         // Load current state to find thread binding
         let state = self.state_mgr.load_state().await?;
 
+        // ── /atim command (meta-commands, no binding needed) ──
+        if let Some(atim_cmd) = text.trim().strip_prefix("/atim ") {
+            let subcommand = atim_cmd.trim();
+            return self.handle_atim_command(&target, subcommand).await;
+        }
+        if text.trim() == "/atim" {
+            let _ = self
+                .im_adapter
+                .send_message(
+                    &target,
+                    "Available subcommands: `/atim status`, `/atim help`",
+                )
+                .await;
+            return Ok(());
+        }
+
         // Check for screenshot command
         if text.trim() == "/ss" || text.trim() == "/screenshot" || text.trim() == "!ss" {
             if let Some(binding) = state.thread_bindings.iter().find(|b| {
@@ -1462,11 +1478,8 @@ impl Server {
                         .get(&binding.window_id)
                         .map(|ws| ws.agent_type == "copilot")
                         .unwrap_or(false);
-                    if is_copilot {
-                        self.tmux_mgr.send_line_chars(&window_id, text, 10).await?;
-                    } else {
-                        self.tmux_mgr.send_line(&window_id, text).await?;
-                    }
+                    self.send_text_to_agent(&window_id, text, is_copilot)
+                        .await?;
                     if let Some(ref mid) = message_id {
                         let _ = self.im_adapter.add_reaction(&target, mid, "DONE").await;
                     }
@@ -1636,11 +1649,9 @@ impl Server {
                         .get(&binding.window_id)
                         .map(|ws| ws.agent_type == "copilot")
                         .unwrap_or(false);
-                    let result = if is_copilot {
-                        self.tmux_mgr.send_line_chars(&window_id, text, 10).await
-                    } else {
-                        self.tmux_mgr.send_line(&window_id, text).await
-                    };
+                    let result = self
+                        .send_text_to_agent(&window_id, text, is_copilot)
+                        .await;
                     match &result {
                         Ok(()) => {
                             tracing::info!(
@@ -3538,6 +3549,148 @@ impl Server {
             .iter()
             .find(|a| command.contains(a.name()))
             .map(|a| a.name())
+    }
+
+    /// Send text to the agent, optimizing `!` shell commands by sending
+    /// `!` first and the command separately to avoid the agent treating
+    /// the entire input as a conversational message.
+    async fn send_text_to_agent(
+        &self,
+        window_id: &WindowId,
+        text: &str,
+        is_copilot: bool,
+    ) -> Result<()> {
+        if text.starts_with('!') && text.len() > 1 {
+            let cmd = text[1..].trim_start();
+            if is_copilot {
+                self.tmux_mgr.send_line_chars(window_id, "!", 10).await?;
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                self.tmux_mgr.send_line_chars(window_id, cmd, 10).await?;
+            } else {
+                self.tmux_mgr.send_line(window_id, "!").await?;
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                self.tmux_mgr.send_line(window_id, cmd).await?;
+            }
+        } else {
+            if is_copilot {
+                self.tmux_mgr.send_line_chars(window_id, text, 10).await?;
+            } else {
+                self.tmux_mgr.send_line(window_id, text).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Handle `/atim status` and `/atim help` commands.
+    async fn handle_atim_command(&self, target: &MessageTarget, cmd: &str) -> Result<()> {
+        match cmd {
+            "status" | "st" => {
+                let _ = self
+                    .im_adapter
+                    .send_message(target, "Gathering system info...")
+                    .await;
+
+                let mut lines = vec!["**atim Status**".to_string()];
+
+                // CPU cores + load
+                match tokio::process::Command::new("sh")
+                    .args(["-c", "nproc && cat /proc/loadavg | cut -d' ' -f1-3"])
+                    .output()
+                    .await
+                {
+                    Ok(out) => {
+                        let out = String::from_utf8_lossy(&out.stdout);
+                        let parts: Vec<&str> = out.trim().splitn(2, '\n').collect();
+                        let cores = parts.first().unwrap_or(&"?").trim();
+                        let load = parts.get(1).unwrap_or(&"?").trim();
+                        lines.push(format!("**CPU**: {} cores (load: {})", cores, load));
+                    }
+                    Err(_) => lines.push("**CPU**: N/A".into()),
+                }
+
+                // Memory
+                match tokio::process::Command::new("free")
+                    .args(["-h"])
+                    .output()
+                    .await
+                {
+                    Ok(out) => {
+                        let out = String::from_utf8_lossy(&out.stdout);
+                        for line in out.lines().skip(1).take(1) {
+                            let fields: Vec<&str> = line.split_whitespace().collect();
+                            if fields.len() >= 3 {
+                                lines.push(format!(
+                                    "**Memory**: total={} used={} free={}",
+                                    fields[1], fields[2], fields[3]
+                                ));
+                            }
+                        }
+                    }
+                    Err(_) => lines.push("**Memory**: N/A".into()),
+                }
+
+                // Disk
+                match tokio::process::Command::new("df")
+                    .args(["-h", "/"])
+                    .output()
+                    .await
+                {
+                    Ok(out) => {
+                        let out = String::from_utf8_lossy(&out.stdout);
+                        for line in out.lines().skip(1).take(1) {
+                            let fields: Vec<&str> = line.split_whitespace().collect();
+                            if fields.len() >= 4 {
+                                lines.push(format!(
+                                    "**Disk** (/): size={} used={} avail={}",
+                                    fields[1], fields[2], fields[3]
+                                ));
+                            }
+                        }
+                    }
+                    Err(_) => lines.push("**Disk**: N/A".into()),
+                }
+
+                // Uptime
+                match tokio::process::Command::new("uptime")
+                    .args(["-p"])
+                    .output()
+                    .await
+                {
+                    Ok(out) => {
+                        let uptime = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                        lines.push(format!("**Uptime**: {}", uptime));
+                    }
+                    Err(_) => {}
+                }
+
+                let _ = self.im_adapter.send_message(target, &lines.join("\n")).await;
+            }
+            "help" | "h" | "-h" | "--help" => {
+                let help = concat!(
+                    "**Available commands**\n\n",
+                    "`/atim status` — System CPU/mem/disk status\n",
+                    "`/atim help`   — This help\n",
+                    "`/ss` / `/screenshot` — Capture terminal screenshot\n",
+                    "`/usage` — Show Claude Code API usage\n",
+                    "`/switch <agent>` — Switch running agent\n",
+                    "`/esc` / `/dismiss` — Send Escape key\n",
+                    "`/rebind` — Re-detect agent & session\n",
+                    "`/check` — Health check\n\n",
+                    "Send any text to forward it to the agent.",
+                );
+                let _ = self.im_adapter.send_message(target, help).await;
+            }
+            _ => {
+                let _ = self
+                    .im_adapter
+                    .send_message(
+                        target,
+                        &format!("Unknown subcommand: `{}`. Try `/atim help`.", cmd),
+                    )
+                    .await;
+            }
+        }
+        Ok(())
     }
 }
 
