@@ -396,9 +396,9 @@ fn re_resolve_state(
     state.thread_bindings = resolved_bindings;
 
     // 3. Keep all display_names entries — stale ones may be needed for resurrection
-    state.window_display_names.retain(|wid, _| {
-        windows.contains_key(wid) || state.window_states.contains_key(wid)
-    });
+    state
+        .window_display_names
+        .retain(|wid, _| windows.contains_key(wid) || state.window_states.contains_key(wid));
 
     state
 }

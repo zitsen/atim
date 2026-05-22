@@ -84,16 +84,17 @@ impl MessageQueue {
     pub fn enqueue_content(&mut self, target: MessageTarget, text: String) {
         // Merge with existing pending content for the same target
         if let Some(ref mut pc) = self.pending_content
-            && pc.target == target {
-                let merged = Self::merge_content(&pc.text, &text);
-                if merged.len() <= MAX_MSG_LEN {
-                    pc.text = merged;
-                    return;
-                }
-                // Merged result would be too long — flush existing as final,
-                // start a new segment
-                self.flush_pending_content();
+            && pc.target == target
+        {
+            let merged = Self::merge_content(&pc.text, &text);
+            if merged.len() <= MAX_MSG_LEN {
+                pc.text = merged;
+                return;
             }
+            // Merged result would be too long — flush existing as final,
+            // start a new segment
+            self.flush_pending_content();
+        }
 
         self.pending_content = Some(PendingContent { target, text });
     }

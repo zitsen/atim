@@ -9,7 +9,10 @@ pub enum ServiceCommand {
     Status,
 }
 
-pub fn run_service(cmd: ServiceCommand, system_level: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_service(
+    cmd: ServiceCommand,
+    system_level: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     match cmd {
         ServiceCommand::Install => install_service(system_level),
         _ => {
@@ -59,15 +62,18 @@ fn service_dir(system_level: bool) -> PathBuf {
     } else if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         PathBuf::from(xdg).join("systemd").join("user")
     } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".config").join("systemd").join("user")
+        PathBuf::from(home)
+            .join(".config")
+            .join("systemd")
+            .join("user")
     } else {
         panic!("Cannot determine service directory (no HOME)");
     }
 }
 
 fn install_service(system_level: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let binary_path = std::env::current_exe()
-        .map_err(|_| "Could not determine binary path".to_string())?;
+    let binary_path =
+        std::env::current_exe().map_err(|_| "Could not determine binary path".to_string())?;
 
     let wanted_by = if system_level {
         "multi-user.target"

@@ -390,10 +390,10 @@ fn scan_projects_dir(
             .unwrap_or("")
             .to_string();
 
-        if let Some(target) = filter_slug {
-            if slug != target {
-                continue;
-            }
+        if let Some(target) = filter_slug
+            && slug != target
+        {
+            continue;
         }
 
         let entries = match std::fs::read_dir(&proj_path) {

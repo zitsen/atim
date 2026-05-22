@@ -156,7 +156,8 @@ impl SessionMonitor {
         {
             for entry in ws.values() {
                 if let Some(sid) = entry.get("session_id").and_then(|v| v.as_str())
-                    && !sid.is_empty() && !sessions.contains(&sid.to_string())
+                    && !sid.is_empty()
+                    && !sessions.contains(&sid.to_string())
                 {
                     sessions.push(sid.to_string());
                 }
@@ -217,9 +218,7 @@ impl SessionMonitor {
             let mut offsets = self.byte_offsets.lock().await;
             let tracked: Vec<String> = offsets.keys().cloned().collect();
             for id in &tracked {
-                if !current_sessions.contains(id)
-                    && resolve_jsonl(id).await.is_none()
-                {
+                if !current_sessions.contains(id) && resolve_jsonl(id).await.is_none() {
                     offsets.remove(id);
                     tracing::debug!("[monitor] Removed stale session {id}");
                 }
@@ -245,53 +244,73 @@ impl SessionMonitor {
         for sid in &all_known {
             if !session_ids.contains(sid)
                 && let Some(path) = resolve_jsonl(sid).await
-                {
-                    if let Ok(meta) = tokio::fs::metadata(&path).await {
-                        let file_len = meta.len();
-                        let mut offsets = self.byte_offsets.lock().await;
-                        offsets.entry(sid.clone()).or_insert(file_len);
-                        self.jsonl_cache.lock().await.insert(sid.clone(), path);
-                        tracing::info!(
-                            "[monitor] Late-caught session {sid}: jsonl exists, offset set to {file_len}",
-                        );
-                    }
-                    session_ids.push(sid.clone());
+            {
+                if let Ok(meta) = tokio::fs::metadata(&path).await {
+                    let file_len = meta.len();
+                    let mut offsets = self.byte_offsets.lock().await;
+                    offsets.entry(sid.clone()).or_insert(file_len);
+                    self.jsonl_cache.lock().await.insert(sid.clone(), path);
+                    tracing::info!(
+                        "[monitor] Late-caught session {sid}: jsonl exists, offset set to {file_len}",
+                    );
                 }
+                session_ids.push(sid.clone());
+            }
         }
 
         // Phase 3: Scan filesystem for untracked JSONL files.
         // 3a: Claude Code sessions — ~/.claude/projects/<slug>/<session_id>.jsonl.
         if let Ok(home) = std::env::var("HOME") {
             let claude_dir = Path::new(&home).join(".claude").join("projects");
-            if claude_dir.exists() && let Ok(mut dir) = tokio::fs::read_dir(&claude_dir).await {
+            if claude_dir.exists()
+                && let Ok(mut dir) = tokio::fs::read_dir(&claude_dir).await
+            {
                 while let Ok(Some(entry)) = dir.next_entry().await {
-                    let Ok(ft) = entry.file_type().await else { continue; };
-                    if !ft.is_dir() { continue; }
+                    let Ok(ft) = entry.file_type().await else {
+                        continue;
+                    };
+                    if !ft.is_dir() {
+                        continue;
+                    }
                     let slug_dir = entry.path();
-                    let Ok(mut slug_reader) = tokio::fs::read_dir(&slug_dir).await else { continue; };
+                    let Ok(mut slug_reader) = tokio::fs::read_dir(&slug_dir).await else {
+                        continue;
+                    };
                     while let Ok(Some(file_entry)) = slug_reader.next_entry().await {
                         let path = file_entry.path();
                         if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                             continue;
                         }
-                        let Some(session_id) = path.file_stem().and_then(|s| s.to_str()) else { continue; };
+                        let Some(session_id) = path.file_stem().and_then(|s| s.to_str()) else {
+                            continue;
+                        };
                         let sid_str = session_id.to_string();
                         // Skip if already tracked
-                        if session_ids.contains(&sid_str) || all_known.contains(&sid_str) { continue; }
+                        if session_ids.contains(&sid_str) || all_known.contains(&sid_str) {
+                            continue;
+                        }
                         {
                             let offsets = self.byte_offsets.lock().await;
-                            if offsets.contains_key(&sid_str) { continue; }
+                            if offsets.contains_key(&sid_str) {
+                                continue;
+                            }
                         }
                         // Only track files modified within the last hour
                         if let Ok(meta) = tokio::fs::metadata(&path).await {
-                            let is_recent = meta.modified()
+                            let is_recent = meta
+                                .modified()
                                 .map(|m| m.elapsed().map(|e| e.as_secs() < 3600).unwrap_or(true))
                                 .unwrap_or(true);
-                            if !is_recent { continue; }
+                            if !is_recent {
+                                continue;
+                            }
                             let file_len = meta.len();
                             let mut offsets = self.byte_offsets.lock().await;
                             offsets.insert(sid_str.clone(), file_len);
-                            self.jsonl_cache.lock().await.insert(sid_str.clone(), path.clone());
+                            self.jsonl_cache
+                                .lock()
+                                .await
+                                .insert(sid_str.clone(), path.clone());
                             tracing::info!(
                                 "[monitor] Discovered untracked session {sid_str} via fs scan (slug: {:?})",
                                 slug_dir.file_name(),
@@ -306,29 +325,49 @@ impl SessionMonitor {
         // 3b: Copilot CLI sessions — ~/.copilot/session-state/<uuid>/events.jsonl.
         if let Ok(home) = std::env::var("HOME") {
             let copilot_dir = Path::new(&home).join(".copilot").join("session-state");
-            if copilot_dir.is_dir() && let Ok(mut dir) = tokio::fs::read_dir(&copilot_dir).await {
+            if copilot_dir.is_dir()
+                && let Ok(mut dir) = tokio::fs::read_dir(&copilot_dir).await
+            {
                 while let Ok(Some(entry)) = dir.next_entry().await {
-                    let Ok(ft) = entry.file_type().await else { continue; };
-                    if !ft.is_dir() { continue; }
+                    let Ok(ft) = entry.file_type().await else {
+                        continue;
+                    };
+                    if !ft.is_dir() {
+                        continue;
+                    }
                     let fname = entry.file_name();
-                    let Some(sid) = fname.to_str() else { continue; };
+                    let Some(sid) = fname.to_str() else {
+                        continue;
+                    };
                     let sid_str = sid.to_string();
-                    if sid.len() != 36 || !sid.contains('-') { continue; }
+                    if sid.len() != 36 || !sid.contains('-') {
+                        continue;
+                    }
                     let path = entry.path().join("events.jsonl");
-                    if session_ids.contains(&sid_str) || all_known.contains(&sid_str) { continue; }
+                    if session_ids.contains(&sid_str) || all_known.contains(&sid_str) {
+                        continue;
+                    }
                     {
                         let offsets = self.byte_offsets.lock().await;
-                        if offsets.contains_key(&sid_str) { continue; }
+                        if offsets.contains_key(&sid_str) {
+                            continue;
+                        }
                     }
                     if let Ok(meta) = tokio::fs::metadata(&path).await {
-                        let is_recent = meta.modified()
+                        let is_recent = meta
+                            .modified()
                             .map(|m| m.elapsed().map(|e| e.as_secs() < 3600).unwrap_or(true))
                             .unwrap_or(true);
-                        if !is_recent { continue; }
+                        if !is_recent {
+                            continue;
+                        }
                         let file_len = meta.len();
                         let mut offsets = self.byte_offsets.lock().await;
                         offsets.insert(sid_str.clone(), file_len);
-                        self.jsonl_cache.lock().await.insert(sid_str.clone(), path.clone());
+                        self.jsonl_cache
+                            .lock()
+                            .await
+                            .insert(sid_str.clone(), path.clone());
                         tracing::info!(
                             "[monitor] Discovered untracked Copilot session {sid_str} via fs scan"
                         );
@@ -345,9 +384,10 @@ impl SessionMonitor {
         ) -> Option<PathBuf> {
             let cache_lock = cache.lock().await;
             if let Some(path) = cache_lock.get(session_id)
-                && path.exists() {
-                    return Some(path.clone());
-                }
+                && path.exists()
+            {
+                return Some(path.clone());
+            }
             drop(cache_lock);
             // Cache miss — search and cache the result
             if let Some(path) = resolve_jsonl(session_id).await {
@@ -372,8 +412,7 @@ impl SessionMonitor {
                 offsets.get(session_id).copied().unwrap_or(0)
             };
 
-            let (entries, file_size) =
-                atim_parser::read_jsonl(&path, offset).await?;
+            let (entries, file_size) = atim_parser::read_jsonl(&path, offset).await?;
 
             if !entries.is_empty() {
                 let mut offsets = self.byte_offsets.lock().await;
@@ -420,7 +459,9 @@ impl SessionMonitor {
             // Write to temp then rename for atomicity
             let tmp_path = self.monitor_state_path.with_extension("json.tmp");
             if tokio::fs::write(&tmp_path, &data).await.is_ok()
-                && tokio::fs::rename(&tmp_path, &self.monitor_state_path).await.is_ok()
+                && tokio::fs::rename(&tmp_path, &self.monitor_state_path)
+                    .await
+                    .is_ok()
             {
                 tracing::debug!("[monitor] Saved {} byte offsets", offsets.len());
             }

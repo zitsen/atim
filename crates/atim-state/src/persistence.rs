@@ -171,9 +171,10 @@ async fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
 
     // Sync the parent directory to ensure the rename is on disk
     if let Some(parent) = path.parent()
-        && let Ok(parent_file) = tokio::fs::File::open(parent).await {
-            parent_file.sync_all().await.ok();
-        }
+        && let Ok(parent_file) = tokio::fs::File::open(parent).await
+    {
+        parent_file.sync_all().await.ok();
+    }
 
     Ok(())
 }

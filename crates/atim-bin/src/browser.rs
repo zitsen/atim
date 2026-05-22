@@ -130,10 +130,11 @@ impl DirectoryBrowser {
     pub async fn go_up(&self, user_id: i64) {
         let mut map = self.sessions.lock().await;
         if let Some(state) = map.get_mut(&user_id)
-            && let Some(parent) = state.current_path.parent() {
-                state.current_path = parent.to_path_buf();
-                state.page = 0;
-            }
+            && let Some(parent) = state.current_path.parent()
+        {
+            state.current_path = parent.to_path_buf();
+            state.page = 0;
+        }
     }
 
     pub async fn show_session_picker(&self, user_id: i64, sessions: Vec<ClaudeSession>) {

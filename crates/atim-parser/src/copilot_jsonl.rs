@@ -32,7 +32,8 @@ impl CopilotJsonlParser {
     /// Parse Copilot JSONL from a string.
     pub fn parse_str(data: &str) -> Result<Vec<ParsedEntry>> {
         let mut entries = Vec::new();
-        let mut tool_names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut tool_names: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         for (i, line) in data.lines().enumerate() {
             let line = line.trim();
             if line.is_empty() {
@@ -79,8 +80,9 @@ impl CopilotJsonlParser {
         line: &str,
         tool_names: &mut std::collections::HashMap<String, String>,
     ) -> Result<Vec<ParsedEntry>> {
-        let value: serde_json::Value = serde_json::from_str(line)
-            .map_err(|e| atim_core::error::Error::Parse(format!("Copilot JSON parse error: {e}")))?;
+        let value: serde_json::Value = serde_json::from_str(line).map_err(|e| {
+            atim_core::error::Error::Parse(format!("Copilot JSON parse error: {e}"))
+        })?;
 
         let event_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
         let data = value.get("data");
@@ -132,9 +134,13 @@ impl CopilotJsonlParser {
                 }
 
                 // Tool requests embedded in assistant messages
-                if let Some(tool_requests) = data.and_then(|d| d.get("toolRequests")).and_then(|v| v.as_array()) {
+                if let Some(tool_requests) = data
+                    .and_then(|d| d.get("toolRequests"))
+                    .and_then(|v| v.as_array())
+                {
                     for tr in tool_requests {
-                        let tool_call_id = tr.get("toolCallId").and_then(|v| v.as_str()).unwrap_or("");
+                        let tool_call_id =
+                            tr.get("toolCallId").and_then(|v| v.as_str()).unwrap_or("");
                         let tool_name = tr.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
                         let arguments = tr.get("arguments");
 
@@ -232,9 +238,7 @@ fn summarize_tool_result(text: &str, tool_name: Option<&str>) -> String {
             }
             "Write" | "Create" => return format!("📝 Wrote {} chars", text.len()),
             "Edit" | "TextEdit" => return format!("✏️ Edited ({line_count} lines)"),
-            "Glob" | "Grep" | "Search" => {
-                return format!("🔍 Found matches ({line_count} lines)")
-            }
+            "Glob" | "Grep" | "Search" => return format!("🔍 Found matches ({line_count} lines)"),
             _ => {}
         }
     }
@@ -252,9 +256,10 @@ fn extract_exit_code(text: &str) -> Option<i32> {
         let line = line.trim();
         if let Some(cap) = line.strip_prefix("[Exit ")
             && let Some(code_str) = cap.strip_suffix(']')
-                && let Ok(code) = code_str.parse::<i32>() {
-                    return Some(code);
-                }
+            && let Ok(code) = code_str.parse::<i32>()
+        {
+            return Some(code);
+        }
         if line.contains("exit code") || line.contains("exit_code") {
             for word in line.split_whitespace() {
                 if let Ok(n) = word
@@ -276,7 +281,8 @@ mod tests {
     #[test]
     fn test_user_message() {
         let line = r#"{"type":"user.message","data":{"content":"hello world"},"id":"u1","timestamp":"2026-01-01T00:00:00Z","parentId":null}"#;
-        let entries = CopilotJsonlParser::parse_line(line, &mut std::collections::HashMap::new()).unwrap();
+        let entries =
+            CopilotJsonlParser::parse_line(line, &mut std::collections::HashMap::new()).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].role, "user");
         assert_eq!(entries[0].text, "hello world");
@@ -286,7 +292,8 @@ mod tests {
     #[test]
     fn test_assistant_message_text() {
         let line = r#"{"type":"assistant.message","data":{"content":"Hi there!"},"id":"a1","timestamp":"2026-01-01T00:00:01Z","parentId":"u1"}"#;
-        let entries = CopilotJsonlParser::parse_line(line, &mut std::collections::HashMap::new()).unwrap();
+        let entries =
+            CopilotJsonlParser::parse_line(line, &mut std::collections::HashMap::new()).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].role, "assistant");
         assert_eq!(entries[0].text, "Hi there!");
@@ -296,14 +303,16 @@ mod tests {
     #[test]
     fn test_assistant_message_empty_content_skipped() {
         let line = r#"{"type":"assistant.message","data":{"content":""},"id":"a1","timestamp":"2026-01-01T00:00:01Z"}"#;
-        let entries = CopilotJsonlParser::parse_line(line, &mut std::collections::HashMap::new()).unwrap();
+        let entries =
+            CopilotJsonlParser::parse_line(line, &mut std::collections::HashMap::new()).unwrap();
         assert_eq!(entries.len(), 0);
     }
 
     #[test]
     fn test_assistant_message_with_tool_requests() {
         let line = r#"{"type":"assistant.message","data":{"content":"","toolRequests":[{"toolCallId":"call_abc","name":"Read","arguments":{"file_path":"src/main.rs"}}]},"id":"a1","timestamp":"2026-01-01T00:00:01Z"}"#;
-        let entries = CopilotJsonlParser::parse_line(line, &mut std::collections::HashMap::new()).unwrap();
+        let entries =
+            CopilotJsonlParser::parse_line(line, &mut std::collections::HashMap::new()).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].content_type, ContentType::ToolUse);
         assert_eq!(entries[0].tool_use_id.as_deref(), Some("call_abc"));
@@ -314,7 +323,8 @@ mod tests {
     #[test]
     fn test_assistant_message_text_and_tool_requests() {
         let line = r#"{"type":"assistant.message","data":{"content":"Let me check","toolRequests":[{"toolCallId":"call_abc","name":"Read","arguments":{"file_path":"src/main.rs"}}]},"id":"a1","timestamp":"2026-01-01T00:00:01Z"}"#;
-        let entries = CopilotJsonlParser::parse_line(line, &mut std::collections::HashMap::new()).unwrap();
+        let entries =
+            CopilotJsonlParser::parse_line(line, &mut std::collections::HashMap::new()).unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].content_type, ContentType::Text);
         assert_eq!(entries[0].text, "Let me check");
@@ -350,23 +360,37 @@ mod tests {
     #[test]
     fn test_skip_session_start() {
         let line = r#"{"type":"session.start","data":{"sessionId":"abc"},"id":"s1","timestamp":"2026-01-01T00:00:00Z"}"#;
-        let entries = CopilotJsonlParser::parse_line(line, &mut std::collections::HashMap::new()).unwrap();
+        let entries =
+            CopilotJsonlParser::parse_line(line, &mut std::collections::HashMap::new()).unwrap();
         assert_eq!(entries.len(), 0);
     }
 
     #[test]
     fn test_skip_turn_events() {
-        let line_start = r#"{"type":"assistant.turn_start","id":"ts1","timestamp":"2026-01-01T00:00:00Z"}"#;
-        let line_end = r#"{"type":"assistant.turn_end","id":"te1","timestamp":"2026-01-01T00:00:00Z"}"#;
+        let line_start =
+            r#"{"type":"assistant.turn_start","id":"ts1","timestamp":"2026-01-01T00:00:00Z"}"#;
+        let line_end =
+            r#"{"type":"assistant.turn_end","id":"te1","timestamp":"2026-01-01T00:00:00Z"}"#;
         let mut cache = std::collections::HashMap::new();
-        assert_eq!(CopilotJsonlParser::parse_line(line_start, &mut cache).unwrap().len(), 0);
-        assert_eq!(CopilotJsonlParser::parse_line(line_end, &mut cache).unwrap().len(), 0);
+        assert_eq!(
+            CopilotJsonlParser::parse_line(line_start, &mut cache)
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            CopilotJsonlParser::parse_line(line_end, &mut cache)
+                .unwrap()
+                .len(),
+            0
+        );
     }
 
     #[test]
     fn test_skip_tool_execution_start() {
         let line = r#"{"type":"tool.execution_start","data":{"toolCallId":"call_abc","toolName":"Read","arguments":{}},"id":"t1","timestamp":"2026-01-01T00:00:00Z"}"#;
-        let entries = CopilotJsonlParser::parse_line(line, &mut std::collections::HashMap::new()).unwrap();
+        let entries =
+            CopilotJsonlParser::parse_line(line, &mut std::collections::HashMap::new()).unwrap();
         assert_eq!(entries.len(), 0);
     }
 
@@ -397,7 +421,8 @@ mod tests {
     #[test]
     fn test_system_message_skipped() {
         let line = r#"{"type":"system.message","data":{"role":"system","content":"You are an assistant"}}"#;
-        let entries = CopilotJsonlParser::parse_line(line, &mut std::collections::HashMap::new()).unwrap();
+        let entries =
+            CopilotJsonlParser::parse_line(line, &mut std::collections::HashMap::new()).unwrap();
         assert_eq!(entries.len(), 0);
     }
 

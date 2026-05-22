@@ -266,9 +266,8 @@ fn discover_by_pid_lsof(window_id: &str) -> Result<Option<String>> {
                     {
                         // Extract UUID from path: .../session-state/<uuid>/...
                         let parent = std::path::Path::new(path).parent();
-                        if let Some(sid) = parent
-                            .and_then(|p| p.file_name())
-                            .and_then(|n| n.to_str())
+                        if let Some(sid) =
+                            parent.and_then(|p| p.file_name()).and_then(|n| n.to_str())
                             && sid.len() == 36
                             && sid.contains('-')
                         {
@@ -283,25 +282,24 @@ fn discover_by_pid_lsof(window_id: &str) -> Result<Option<String>> {
         }
 
         // Phase 2: Fallback — check inuse.*.lock files in the sessions directory.
-        if let Some(sessions_dir) = copilot_sessions_dir() {
-            if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
-                for entry in entries.flatten() {
-                    let sid = entry.file_name();
-                    let sid = sid.to_string_lossy();
-                    if sid.len() != 36 || !sid.contains('-') {
-                        continue;
-                    }
-                    let lock_file = entry.path().join(format!("inuse.{pid}.lock"));
-                    if lock_file.exists() {
-                        if let Ok(content) = std::fs::read_to_string(&lock_file) {
-                            if content.trim() == *pid {
-                                tracing::info!(
-                                    "Discovered Copilot session {sid} for window {window_id} via inuse lock (PID {pid})"
-                                );
-                                return Ok(Some(sid.to_string()));
-                            }
-                        }
-                    }
+        if let Some(sessions_dir) = copilot_sessions_dir()
+            && let Ok(entries) = std::fs::read_dir(&sessions_dir)
+        {
+            for entry in entries.flatten() {
+                let sid = entry.file_name();
+                let sid = sid.to_string_lossy();
+                if sid.len() != 36 || !sid.contains('-') {
+                    continue;
+                }
+                let lock_file = entry.path().join(format!("inuse.{pid}.lock"));
+                if lock_file.exists()
+                    && let Ok(content) = std::fs::read_to_string(&lock_file)
+                    && content.trim() == *pid
+                {
+                    tracing::info!(
+                        "Discovered Copilot session {sid} for window {window_id} via inuse lock (PID {pid})"
+                    );
+                    return Ok(Some(sid.to_string()));
                 }
             }
         }
@@ -352,19 +350,18 @@ fn discover_by_cwd(
         }
         if let Ok(content) = std::fs::read_to_string(&events_path)
             && let Some(line) = content.lines().next()
-                && let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
-                    let session_cwd = val["data"]["context"]["cwd"]
-                        .as_str()
-                        .unwrap_or("");
-                    if session_cwd == cwd {
-                        let mtime = entry
-                            .metadata()
-                            .ok()
-                            .and_then(|m| m.modified().ok())
-                            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                        candidates.push((mtime, uuid));
-                    }
-                }
+            && let Ok(val) = serde_json::from_str::<serde_json::Value>(line)
+        {
+            let session_cwd = val["data"]["context"]["cwd"].as_str().unwrap_or("");
+            if session_cwd == cwd {
+                let mtime = entry
+                    .metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                candidates.push((mtime, uuid));
+            }
+        }
     }
 
     candidates.sort_by_key(|b| std::cmp::Reverse(b.0));
@@ -382,7 +379,7 @@ fn scan_copilot_session_files() -> Result<Vec<crate::agent::DetectedSession>> {
         None => {
             return Err(crate::error::Error::NotFound(
                 "no copilot session-state dir".into(),
-            ))
+            ));
         }
     };
 
@@ -437,22 +434,23 @@ fn extract_session_summary(content: &str) -> String {
     for line in content.lines() {
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(line)
             && val["type"].as_str() == Some("user.message")
-                && let Some(text) = val["data"]["content"].as_str() {
-                    let t = text.trim();
-                    if !t.is_empty() && t.len() > 3 {
-                        let mut summary = t.to_string();
-                        if summary.len() > 200 {
-                            let end = summary
-                                .char_indices()
-                                .nth(197)
-                                .map(|(i, _)| i)
-                                .unwrap_or(summary.len());
-                            summary.truncate(end);
-                            summary.push('…');
-                        }
-                        return summary;
-                    }
+            && let Some(text) = val["data"]["content"].as_str()
+        {
+            let t = text.trim();
+            if !t.is_empty() && t.len() > 3 {
+                let mut summary = t.to_string();
+                if summary.len() > 200 {
+                    let end = summary
+                        .char_indices()
+                        .nth(197)
+                        .map(|(i, _)| i)
+                        .unwrap_or(summary.len());
+                    summary.truncate(end);
+                    summary.push('…');
                 }
+                return summary;
+            }
+        }
     }
     String::new()
 }
@@ -462,9 +460,10 @@ fn extract_timestamp(content: &str) -> String {
     for line in content.lines() {
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(line)
             && let Some(ts) = val["timestamp"].as_str()
-                && !ts.is_empty() {
-                    return ts.to_string();
-                }
+            && !ts.is_empty()
+        {
+            return ts.to_string();
+        }
     }
     String::new()
 }
@@ -488,9 +487,14 @@ fn extract_cwd_slug(content: &str) -> String {
     for line in content.lines() {
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(line)
             && val["type"].as_str() == Some("session.start")
-                && let Some(cwd) = val["data"]["context"]["cwd"].as_str() {
-                    return cwd.split('/').filter(|s| !s.is_empty()).collect::<Vec<_>>().join("-");
-                }
+            && let Some(cwd) = val["data"]["context"]["cwd"].as_str()
+        {
+            return cwd
+                .split('/')
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join("-");
+        }
     }
     String::new()
 }

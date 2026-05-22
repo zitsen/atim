@@ -56,8 +56,8 @@ struct TokenCache {
 
 /// Bi-directional mapping between Atim i64 IDs and Feishu string IDs.
 struct IdMap {
-    user_ids: HashMap<i64, String>, // hash → open_id
-    chat_ids: HashMap<i64, String>, // hash → chat_id
+    user_ids: HashMap<i64, String>,   // hash → open_id
+    chat_ids: HashMap<i64, String>,   // hash → chat_id
     thread_ids: HashMap<i64, String>, // hash → root_id (for topic-based groups)
 }
 
@@ -345,9 +345,10 @@ impl FeishuAdapter {
     /// Add thread_id to a request body if the target has one.
     async fn add_thread_id(&self, body: &mut serde_json::Value, target: &MessageTarget) {
         if let Some(ref thread_id) = target.thread_id
-            && let Some(root_id) = self.get_thread_root_id(thread_id).await {
-                body["thread_id"] = serde_json::json!(root_id);
-            }
+            && let Some(root_id) = self.get_thread_root_id(thread_id).await
+        {
+            body["thread_id"] = serde_json::json!(root_id);
+        }
     }
 
     /// Persist the current id_map to disk.
@@ -950,19 +951,19 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
     // server can use it as the window/topic name (e.g. "atim" instead of
     // "atim-<user_id>").
     if let Some(ref cn) = chat_name {
-            let topic_target = MessageTarget {
-                chat_id: chat_id_atim,
-                thread_id,
-                chat_name: Some(cn.clone()),
-            };
-            if let Some(tx) = adapter.event_tx.read().await.as_ref() {
-                let _ = tx.send(ImEvent {
-                    user_id,
-                    target: topic_target,
-                    kind: ImEventKind::TopicCreated { name: cn.clone() },
-                });
-            }
+        let topic_target = MessageTarget {
+            chat_id: chat_id_atim,
+            thread_id,
+            chat_name: Some(cn.clone()),
+        };
+        if let Some(tx) = adapter.event_tx.read().await.as_ref() {
+            let _ = tx.send(ImEvent {
+                user_id,
+                target: topic_target,
+                kind: ImEventKind::TopicCreated { name: cn.clone() },
+            });
         }
+    }
 
     let content_str = message["content"].as_str().unwrap_or("{}");
     tracing::debug!(
@@ -971,8 +972,7 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
         content_str,
     );
 
-    let parsed_content: serde_json::Value =
-        serde_json::from_str(content_str).unwrap_or_default();
+    let parsed_content: serde_json::Value = serde_json::from_str(content_str).unwrap_or_default();
 
     let mut text = String::new();
     let mut has_mention = false;
@@ -1254,10 +1254,11 @@ fn extract_post_content_text(content: &serde_json::Value) -> String {
     let mut result = String::new();
 
     if let Some(title) = content["title"].as_str()
-        && !title.is_empty() {
-            result.push_str(title);
-            result.push('\n');
-        }
+        && !title.is_empty()
+    {
+        result.push_str(title);
+        result.push('\n');
+    }
 
     if let Some(paragraphs) = content["content"].as_array() {
         for (i, para) in paragraphs.iter().enumerate() {

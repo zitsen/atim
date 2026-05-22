@@ -3,9 +3,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use atim_core::agent::types::AgentHandle;
 use atim_core::agent::OutputSource;
-use regex::Regex;
+use atim_core::agent::types::AgentHandle;
 use atim_core::config::Config;
 use atim_core::error::Result;
 use atim_core::im::ImAdapter;
@@ -14,10 +13,11 @@ use atim_core::message::{
 };
 use atim_core::message::{InteractiveUi, UiKind};
 use atim_core::session::{ThreadBinding, WindowState};
-use atim_monitor::monitor::{resolve_jsonl, MonitorEvent};
+use atim_monitor::monitor::{MonitorEvent, resolve_jsonl};
 use atim_queue::message_queue::MessageQueue;
 use atim_state::persistence::StateManager;
 use atim_tmux::manager::TmuxManager;
+use regex::Regex;
 use tokio::sync::Mutex;
 
 use crate::browser;
@@ -147,7 +147,12 @@ impl Server {
         );
 
         // Log full text for Text events to debug multi-line message routing
-        if let ImEventKind::Text { ref text, is_mention, is_group } = event.kind {
+        if let ImEventKind::Text {
+            ref text,
+            is_mention,
+            is_group,
+        } = event.kind
+        {
             tracing::debug!(
                 "[Feishu] Text event: user_id={:?} chat_id={} thread_id={:?} is_mention={is_mention} is_group={is_group} text_len={} text_preview={:?}",
                 event.user_id,
@@ -445,12 +450,12 @@ impl Server {
                                 if let Some(tuid) = &msg.tool_use_id
                                     && let Ok(mid) =
                                         self.im_adapter.send_message(&target, &msg.text).await
-                                    {
-                                        self.tool_use_msg_ids
-                                            .lock()
-                                            .await
-                                            .insert((chat_id, thread_id_val, tuid.clone()), mid);
-                                    }
+                                {
+                                    self.tool_use_msg_ids
+                                        .lock()
+                                        .await
+                                        .insert((chat_id, thread_id_val, tuid.clone()), mid);
+                                }
                             }
                             ContentType::ToolResult => {
                                 flush!();
@@ -498,9 +503,10 @@ impl Server {
                         // Only assign session_ids for agents that support
                         // tracked sessions — skip agents with no JSONL logs.
                         if let Some(agent) = self.config.agent_registry.get(&ws.agent_type)
-                            && !agent.supports_sessions() {
-                                continue;
-                            }
+                            && !agent.supports_sessions()
+                        {
+                            continue;
+                        }
                         if ws.session_id.is_empty() {
                             ws.session_id = session_id.clone();
                             synced += 1;
@@ -696,10 +702,11 @@ impl Server {
                 for _ in 0..10 {
                     tokio::time::sleep(Duration::from_millis(500)).await;
                     if let Ok(info) = self.tmux_mgr.find_window(&window_id).await
-                        && is_shell_process(&info.current_command) {
-                            stopped = true;
-                            break;
-                        }
+                        && is_shell_process(&info.current_command)
+                    {
+                        stopped = true;
+                        break;
+                    }
                 }
                 if !stopped {
                     tracing::warn!(
@@ -717,10 +724,11 @@ impl Server {
                 for _ in 0..10 {
                     tokio::time::sleep(Duration::from_millis(500)).await;
                     if let Ok(info) = self.tmux_mgr.find_window(&window_id).await
-                        && !is_shell_process(&info.current_command) {
-                            started = true;
-                            break;
-                        }
+                        && !is_shell_process(&info.current_command)
+                    {
+                        started = true;
+                        break;
+                    }
                 }
                 if !started {
                     tracing::warn!(
@@ -740,9 +748,10 @@ impl Server {
                 // Also remove the old session_id from session_map so that
                 // the next SessionMapChanged event won't re-fill it.
                 if let Ok(mut map) = self.state_mgr.load_session_map().await
-                    && map.remove(&binding.window_id).is_some() {
-                        let _ = self.state_mgr.save_session_map(&map).await;
-                    }
+                    && map.remove(&binding.window_id).is_some()
+                {
+                    let _ = self.state_mgr.save_session_map(&map).await;
+                }
 
                 let _ = self
                     .im_adapter
@@ -832,9 +841,7 @@ impl Server {
                 // 2. Read existing pane output for a UUID (may contain stale text)
                 // 3. Existing session_map entry as last resort
                 let discovered_sid: Option<String> = if agent.supports_sessions() {
-                    if let Ok(Some(sid)) =
-                        agent.discover_session_by_pid(&binding.window_id)
-                    {
+                    if let Ok(Some(sid)) = agent.discover_session_by_pid(&binding.window_id) {
                         Some(sid)
                     } else if let Some(from_pane) = self
                         .tmux_mgr
@@ -872,9 +879,10 @@ impl Server {
                         if other_binding.window_id == binding.window_id {
                             continue;
                         }
-                        if let Some(other_ws) = state.window_states.get(&other_binding.window_id) {
-                            if other_ws.session_id == *sid {
-                                let _ = self
+                        if let Some(other_ws) = state.window_states.get(&other_binding.window_id)
+                            && other_ws.session_id == *sid
+                        {
+                            let _ = self
                                     .im_adapter
                                     .send_message(
                                         &target,
@@ -885,16 +893,15 @@ impl Server {
                                         ),
                                     )
                                     .await;
-                                // Clear the old binding's session so monitor doesn't track it
-                                let mut state = self.state_mgr.load_state().await?;
-                                if let Some(old_ws) =
-                                    state.window_states.get_mut(&other_binding.window_id)
-                                {
-                                    old_ws.session_id = String::new();
-                                }
-                                self.state_mgr.save_state(&state).await?;
-                                break;
+                            // Clear the old binding's session so monitor doesn't track it
+                            let mut state = self.state_mgr.load_state().await?;
+                            if let Some(old_ws) =
+                                state.window_states.get_mut(&other_binding.window_id)
+                            {
+                                old_ws.session_id = String::new();
                             }
+                            self.state_mgr.save_state(&state).await?;
+                            break;
                         }
                     }
                 }
@@ -905,26 +912,30 @@ impl Server {
                     if ws.agent_type != agent_type {
                         ws.agent_type = agent_type.to_string();
                     }
-                    if let Some(ref sid) = discovered_sid {
-                        if ws.session_id != *sid {
-                            changes.push(format!(
-                                "session: {} → {}",
-                                if stored_sid.is_empty() { "none" } else { stored_sid },
-                                sid
-                            ));
-                            ws.session_id = sid.clone();
-                        }
+                    if let Some(ref sid) = discovered_sid
+                        && ws.session_id != *sid
+                    {
+                        changes.push(format!(
+                            "session: {} → {}",
+                            if stored_sid.is_empty() {
+                                "none"
+                            } else {
+                                stored_sid
+                            },
+                            sid
+                        ));
+                        ws.session_id = sid.clone();
                     }
                     self.state_mgr.save_state(&state).await?;
                 }
 
                 // Sync session_map if we found a session_id
                 if let Some(ref sid) = discovered_sid {
-                    if let Ok(mut map) = self.state_mgr.load_session_map().await {
-                        if map.get(&binding.window_id).map(|s| s.as_str()) != Some(sid) {
-                            map.insert(binding.window_id.clone(), sid.clone());
-                            let _ = self.state_mgr.save_session_map(&map).await;
-                        }
+                    if let Ok(mut map) = self.state_mgr.load_session_map().await
+                        && map.get(&binding.window_id).map(|s| s.as_str()) != Some(sid)
+                    {
+                        map.insert(binding.window_id.clone(), sid.clone());
+                        let _ = self.state_mgr.save_session_map(&map).await;
                     }
                     // Reset byte offset so monitor re-reads the full log
                     {
@@ -953,10 +964,7 @@ impl Server {
                 } else {
                     let _ = self
                         .im_adapter
-                        .send_message(
-                            &target,
-                            &format!("🔄 Rebound: {}", changes.join(", ")),
-                        )
+                        .send_message(&target, &format!("🔄 Rebound: {}", changes.join(", ")))
                         .await;
                 }
             } else {
@@ -1033,7 +1041,10 @@ impl Server {
                         .im_adapter
                         .send_message(
                             &target,
-                            &format!("zoxide matched '{}' but it is not a directory.", path.display()),
+                            &format!(
+                                "zoxide matched '{}' but it is not a directory.",
+                                path.display()
+                            ),
                         )
                         .await;
                     return Ok(());
@@ -1084,11 +1095,17 @@ impl Server {
             let agent_type = state
                 .window_states
                 .get(&binding.window_id)
-                .map(|ws| format!(
-                    "agent_type={} session_id={}",
-                    ws.agent_type,
-                    if ws.session_id.is_empty() { "none" } else { &ws.session_id }
-                ))
+                .map(|ws| {
+                    format!(
+                        "agent_type={} session_id={}",
+                        ws.agent_type,
+                        if ws.session_id.is_empty() {
+                            "none"
+                        } else {
+                            &ws.session_id
+                        }
+                    )
+                })
                 .unwrap_or_else(|| "no_window_state".into());
             tracing::debug!(
                 "[handle_text_message] user={user_id} group_chat_id={} chat_name={:?} window={} display_name={} {} text={text:?}",
@@ -1118,10 +1135,16 @@ impl Server {
                     }
                     let mut ctx_lock = self.callback_contexts.lock().await;
                     let recover_token = Self::make_callback_token(
-                        &mut ctx_lock, user_id, target.chat_id.0, thread_id,
+                        &mut ctx_lock,
+                        user_id,
+                        target.chat_id.0,
+                        thread_id,
                     );
                     let cancel_token = Self::make_callback_token(
-                        &mut ctx_lock, user_id, target.chat_id.0, thread_id,
+                        &mut ctx_lock,
+                        user_id,
+                        target.chat_id.0,
+                        thread_id,
                     );
                     let buttons = vec![
                         vec![Button {
@@ -1167,10 +1190,16 @@ impl Server {
                     }
                     let mut ctx_lock = self.callback_contexts.lock().await;
                     let recover_token = Self::make_callback_token(
-                        &mut ctx_lock, user_id, target.chat_id.0, thread_id,
+                        &mut ctx_lock,
+                        user_id,
+                        target.chat_id.0,
+                        thread_id,
                     );
                     let cancel_token = Self::make_callback_token(
-                        &mut ctx_lock, user_id, target.chat_id.0, thread_id,
+                        &mut ctx_lock,
+                        user_id,
+                        target.chat_id.0,
+                        thread_id,
                     );
                     let buttons = vec![
                         vec![Button {
@@ -1223,9 +1252,7 @@ impl Server {
                         binding.window_id,
                     );
                     let launch_cmd = agent_launch_cmd(&agent);
-                    self.tmux_mgr
-                        .send_line(&window_id, &launch_cmd)
-                        .await?;
+                    self.tmux_mgr.send_line(&window_id, &launch_cmd).await?;
                     // Poll until agent starts (up to 5s)
                     let mut started = false;
                     for _ in 0..10 {
@@ -1256,14 +1283,16 @@ impl Server {
                         for _ in 0..10 {
                             tokio::time::sleep(Duration::from_millis(500)).await;
                             if let Ok(map) = self.state_mgr.load_session_map().await
-                                && map.get(&binding.window_id)
-                                    .map(|s| s.as_str())
-                                    != state.window_states.get(&binding.window_id)
+                                && map.get(&binding.window_id).map(|s| s.as_str())
+                                    != state
+                                        .window_states
+                                        .get(&binding.window_id)
                                         .map(|ws| ws.session_id.as_str())
                             {
                                 let mut new_state = self.state_mgr.load_state().await?;
                                 if let Some(sid) = map.get(&binding.window_id)
-                                    && let Some(ws) = new_state.window_states.get_mut(&binding.window_id)
+                                    && let Some(ws) =
+                                        new_state.window_states.get_mut(&binding.window_id)
                                 {
                                     ws.session_id = sid.clone();
                                 }
@@ -1282,9 +1311,7 @@ impl Server {
                         .map(|ws| ws.agent_type == "copilot")
                         .unwrap_or(false);
                     if is_copilot {
-                        self.tmux_mgr
-                            .send_line_chars(&window_id, text, 10)
-                            .await?;
+                        self.tmux_mgr.send_line_chars(&window_id, text, 10).await?;
                     } else {
                         self.tmux_mgr.send_line(&window_id, text).await?;
                     }
@@ -1306,44 +1333,56 @@ impl Server {
 
                     // 3.2 Chat name mismatch — IM chat_name differs from binding display_name
                     let thread_id = target.thread_id.map(|t| t.0).unwrap_or(0);
-                    if let Some(ref chat_name) = target.chat_name {
-                        if chat_name != &binding.display_name {
-                            tracing::info!(
-                                "[handle_text_message] Chat name mismatch: display_name='{}' chat_name='{}', prompting user {}",
-                                binding.display_name, chat_name, user_id,
-                            );
-                            let key = (user_id, target.chat_id.0, thread_id);
-                            {
-                                let mut pending = self.pending_messages.lock().await;
-                                pending.insert(key, text.to_string());
-                            }
-                            // Store the new name so the rename callback can use it
-                            self.pending_rename_names.lock().await.insert(key, chat_name.clone());
-                            let mut ctx_lock = self.callback_contexts.lock().await;
-                            let rename_token = Self::make_callback_token(
-                                &mut ctx_lock, user_id, target.chat_id.0, thread_id,
-                            );
-                            let cancel_token = Self::make_callback_token(
-                                &mut ctx_lock, user_id, target.chat_id.0, thread_id,
-                            );
-                            let buttons = vec![
-                                vec![Button {
-                                    text: "📝 Rename".into(),
-                                    callback_data: format!("cb:{rename_token}:rename"),
-                                }],
-                                vec![
-                                    Button {
-                                        text: "🆕 New Session".into(),
-                                        callback_data: format!("cb:{rename_token}:new"),
-                                    },
-                                    Button {
-                                        text: "❌ Cancel".into(),
-                                        callback_data: format!("cb:{cancel_token}:lifecycle_cancel"),
-                                    },
-                                ],
-                            ];
-                            drop(ctx_lock);
-                            let _ = self
+                    if let Some(ref chat_name) = target.chat_name
+                        && chat_name != &binding.display_name
+                    {
+                        tracing::info!(
+                            "[handle_text_message] Chat name mismatch: display_name='{}' chat_name='{}', prompting user {}",
+                            binding.display_name,
+                            chat_name,
+                            user_id,
+                        );
+                        let key = (user_id, target.chat_id.0, thread_id);
+                        {
+                            let mut pending = self.pending_messages.lock().await;
+                            pending.insert(key, text.to_string());
+                        }
+                        // Store the new name so the rename callback can use it
+                        self.pending_rename_names
+                            .lock()
+                            .await
+                            .insert(key, chat_name.clone());
+                        let mut ctx_lock = self.callback_contexts.lock().await;
+                        let rename_token = Self::make_callback_token(
+                            &mut ctx_lock,
+                            user_id,
+                            target.chat_id.0,
+                            thread_id,
+                        );
+                        let cancel_token = Self::make_callback_token(
+                            &mut ctx_lock,
+                            user_id,
+                            target.chat_id.0,
+                            thread_id,
+                        );
+                        let buttons = vec![
+                            vec![Button {
+                                text: "📝 Rename".into(),
+                                callback_data: format!("cb:{rename_token}:rename"),
+                            }],
+                            vec![
+                                Button {
+                                    text: "🆕 New Session".into(),
+                                    callback_data: format!("cb:{rename_token}:new"),
+                                },
+                                Button {
+                                    text: "❌ Cancel".into(),
+                                    callback_data: format!("cb:{cancel_token}:lifecycle_cancel"),
+                                },
+                            ],
+                        ];
+                        drop(ctx_lock);
+                        let _ = self
                                 .im_adapter
                                 .send_keyboard(
                                     &target,
@@ -1354,8 +1393,7 @@ impl Server {
                                     &buttons,
                                 )
                                 .await;
-                            return Ok(());
-                        }
+                        return Ok(());
                     }
 
                     // 3.3 Agent type mismatch — running process differs from stored agent_type
@@ -1378,10 +1416,16 @@ impl Server {
                         }
                         let mut ctx_lock = self.callback_contexts.lock().await;
                         let rebind_token = Self::make_callback_token(
-                            &mut ctx_lock, user_id, target.chat_id.0, thread_id,
+                            &mut ctx_lock,
+                            user_id,
+                            target.chat_id.0,
+                            thread_id,
                         );
                         let cancel_token = Self::make_callback_token(
-                            &mut ctx_lock, user_id, target.chat_id.0, thread_id,
+                            &mut ctx_lock,
+                            user_id,
+                            target.chat_id.0,
+                            thread_id,
                         );
                         let buttons = vec![
                             vec![Button {
@@ -1418,21 +1462,18 @@ impl Server {
                     if let Some(ws) = state.window_states.get(&binding.window_id)
                         && ws.session_id.is_empty()
                         && ws.agent_type == "copilot"
+                        && let Some(agent) = self.config.agent_registry.get("copilot")
+                        && let Ok(Some(sid)) = agent.discover_session_by_pid(&window_id.0)
+                        && let Ok(mut new_state) = self.state_mgr.load_state().await
                     {
-                        if let Some(agent) = self.config.agent_registry.get("copilot") {
-                            if let Ok(Some(sid)) = agent.discover_session_by_pid(&window_id.0) {
-                                if let Ok(mut new_state) = self.state_mgr.load_state().await {
-                                    if let Some(ws) = new_state.window_states.get_mut(&binding.window_id) {
-                                        ws.session_id = sid.clone();
-                                        tracing::info!(
-                                            "[handle_text_message] Resolved copilot session_id={sid} for window {}",
-                                            binding.window_id,
-                                        );
-                                    }
-                                    let _ = self.state_mgr.save_state(&new_state).await;
-                                }
-                            }
+                        if let Some(ws) = new_state.window_states.get_mut(&binding.window_id) {
+                            ws.session_id = sid.clone();
+                            tracing::info!(
+                                "[handle_text_message] Resolved copilot session_id={sid} for window {}",
+                                binding.window_id,
+                            );
                         }
+                        let _ = self.state_mgr.save_state(&new_state).await;
                     }
 
                     let is_copilot = state
@@ -1441,9 +1482,7 @@ impl Server {
                         .map(|ws| ws.agent_type == "copilot")
                         .unwrap_or(false);
                     let result = if is_copilot {
-                        self.tmux_mgr
-                            .send_line_chars(&window_id, text, 10)
-                            .await
+                        self.tmux_mgr.send_line_chars(&window_id, text, 10).await
                     } else {
                         self.tmux_mgr.send_line(&window_id, text).await
                     };
@@ -1490,12 +1529,8 @@ impl Server {
                 pending.insert(key, text.to_string());
             }
 
-            self.send_agent_picker(
-                &target,
-                user_id,
-                target.thread_id.map(|t| t.0).unwrap_or(0),
-            )
-            .await?;
+            self.send_agent_picker(&target, user_id, target.thread_id.map(|t| t.0).unwrap_or(0))
+                .await?;
         }
 
         Ok(())
@@ -1526,24 +1561,16 @@ impl Server {
         let mut buttons: Vec<Vec<Button>> = Vec::new();
 
         for agent in self.config.agent_registry.iter() {
-            let token = Self::make_callback_token(
-                &mut ctx_lock,
-                user_id,
-                target.chat_id.0,
-                thread_id,
-            );
+            let token =
+                Self::make_callback_token(&mut ctx_lock, user_id, target.chat_id.0, thread_id);
             buttons.push(vec![Button {
                 text: format!("🚀 {}", agent.name()),
                 callback_data: format!("cb:{token}:agent:{}", agent.name()),
             }]);
         }
 
-        let cancel_token = Self::make_callback_token(
-            &mut ctx_lock,
-            user_id,
-            target.chat_id.0,
-            thread_id,
-        );
+        let cancel_token =
+            Self::make_callback_token(&mut ctx_lock, user_id, target.chat_id.0, thread_id);
         buttons.push(vec![Button {
             text: "❌ Cancel".into(),
             callback_data: format!("cb:{cancel_token}:cancel"),
@@ -1956,11 +1983,12 @@ impl Server {
                 let idx: usize = d[4..].parse().unwrap_or(0);
                 let listing = browser::get_dir_listing(&state);
                 if let Some(entry) = listing.entries.get(idx)
-                    && entry.is_dir {
-                        self.browser.navigate_to(user_id, &entry.path).await;
-                        let _ = self.send_browser_keyboard(target, user_id, thread_id).await;
-                        let _ = self.im_adapter.delete_message(target, msg_id).await;
-                    }
+                    && entry.is_dir
+                {
+                    self.browser.navigate_to(user_id, &entry.path).await;
+                    let _ = self.send_browser_keyboard(target, user_id, thread_id).await;
+                    let _ = self.im_adapter.delete_message(target, msg_id).await;
+                }
             }
             s if s.starts_with("sel:") => {
                 // Select a session from the picker by index
@@ -1968,27 +1996,28 @@ impl Server {
                 let state_now = self.browser.get_state(user_id).await;
                 if let Some(BrowserMode::SessionPick { sessions }) =
                     state_now.as_ref().map(|s| &s.mode)
-                    && let Some(session) = sessions.get(idx) {
-                        let topic_name = self
-                            .topic_names
-                            .lock()
-                            .await
-                            .remove(&(target.chat_id.0, thread_id));
-                        self.browser.end_session(user_id).await;
-                        let _ = self
-                            .im_adapter
-                            .edit_message(target, msg_id, "Resuming session...")
-                            .await;
-                        self.create_and_bind_with_resume(
-                            target,
-                            user_id,
-                            text,
-                            &state.current_path,
-                            &session.id,
-                            topic_name.as_deref(),
-                        )
-                        .await?;
-                    }
+                    && let Some(session) = sessions.get(idx)
+                {
+                    let topic_name = self
+                        .topic_names
+                        .lock()
+                        .await
+                        .remove(&(target.chat_id.0, thread_id));
+                    self.browser.end_session(user_id).await;
+                    let _ = self
+                        .im_adapter
+                        .edit_message(target, msg_id, "Resuming session...")
+                        .await;
+                    self.create_and_bind_with_resume(
+                        target,
+                        user_id,
+                        text,
+                        &state.current_path,
+                        &session.id,
+                        topic_name.as_deref(),
+                    )
+                    .await?;
+                }
             }
             "new_win" => {
                 // User chose "New Session" from window picker — go to directory browser
@@ -2002,26 +2031,27 @@ impl Server {
                 let state_now = self.browser.get_state(user_id).await;
                 if let Some(BrowserMode::WindowPick { windows }) =
                     state_now.as_ref().map(|s| &s.mode)
-                    && let Some(entry) = windows.get(idx) {
-                        self.browser.end_session(user_id).await;
-                        let _ = self
-                            .im_adapter
-                            .edit_message(target, msg_id, "Attaching to existing window...")
-                            .await;
-                        let topic_name = self
-                            .topic_names
-                            .lock()
-                            .await
-                            .remove(&(target.chat_id.0, thread_id));
-                        self.bind_window(
-                            target,
-                            user_id,
-                            text,
-                            &entry.window_id,
-                            topic_name.as_deref(),
-                        )
-                        .await?;
-                    }
+                    && let Some(entry) = windows.get(idx)
+                {
+                    self.browser.end_session(user_id).await;
+                    let _ = self
+                        .im_adapter
+                        .edit_message(target, msg_id, "Attaching to existing window...")
+                        .await;
+                    let topic_name = self
+                        .topic_names
+                        .lock()
+                        .await
+                        .remove(&(target.chat_id.0, thread_id));
+                    self.bind_window(
+                        target,
+                        user_id,
+                        text,
+                        &entry.window_id,
+                        topic_name.as_deref(),
+                    )
+                    .await?;
+                }
             }
             _ => {
                 tracing::warn!("Unknown browser action: {action}");
@@ -2069,12 +2099,11 @@ impl Server {
         while start.elapsed() < timeout {
             if let Ok(map) = self.state_mgr.load_session_map().await
                 && let Some(sid) = map.get(window_id)
-                    && !sid.is_empty() {
-                        tracing::info!(
-                            "Found session {sid} for window {window_id} via session_map"
-                        );
-                        return Some(sid.clone());
-                    }
+                && !sid.is_empty()
+            {
+                tracing::info!("Found session {sid} for window {window_id} via session_map");
+                return Some(sid.clone());
+            }
             tokio::time::sleep(Duration::from_millis(300)).await;
         }
 
@@ -2160,9 +2189,10 @@ impl Server {
         // Wait for agent process to actually start (non-shell process appears)
         for _ in 0..10 {
             if let Ok(info) = self.tmux_mgr.find_window(&window_id).await
-                && !is_shell_process(&info.current_command) {
-                    break;
-                }
+                && !is_shell_process(&info.current_command)
+            {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
@@ -2311,25 +2341,27 @@ impl Server {
 
         // If the pane is running a shell (agent hasn't started), launch it now
         if let Ok(info) = self.tmux_mgr.find_window(&wid).await
-            && is_shell_process(&info.current_command) {
-                let agent = self
-                    .resolve_agent(
-                        user_id,
-                        target.chat_id.0,
-                        target.thread_id.map(|t| t.0).unwrap_or(0),
-                    )
-                    .await;
-                let launch_cmd = agent_launch_cmd(&agent);
-                self.tmux_mgr.send_line(&wid, &launch_cmd).await?;
-                // Wait for agent process to start
-                for _ in 0..10 {
-                    if let Ok(info) = self.tmux_mgr.find_window(&wid).await
-                        && !is_shell_process(&info.current_command) {
-                            break;
-                        }
-                    tokio::time::sleep(Duration::from_millis(500)).await;
+            && is_shell_process(&info.current_command)
+        {
+            let agent = self
+                .resolve_agent(
+                    user_id,
+                    target.chat_id.0,
+                    target.thread_id.map(|t| t.0).unwrap_or(0),
+                )
+                .await;
+            let launch_cmd = agent_launch_cmd(&agent);
+            self.tmux_mgr.send_line(&wid, &launch_cmd).await?;
+            // Wait for agent process to start
+            for _ in 0..10 {
+                if let Ok(info) = self.tmux_mgr.find_window(&wid).await
+                    && !is_shell_process(&info.current_command)
+                {
+                    break;
                 }
+                tokio::time::sleep(Duration::from_millis(500)).await;
             }
+        }
 
         // Notify user the session is ready
         let _ = self
@@ -2406,9 +2438,10 @@ impl Server {
         // Wait for agent process to actually start (non-shell process appears)
         for _ in 0..10 {
             if let Ok(info) = self.tmux_mgr.find_window(&window_id).await
-                && !is_shell_process(&info.current_command) {
-                    break;
-                }
+                && !is_shell_process(&info.current_command)
+            {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
@@ -2637,14 +2670,9 @@ impl Server {
                 self.pending_messages.lock().await.insert(key, text);
                 let _ = self
                     .im_adapter
-                    .edit_message(
-                        &target,
-                        &msg_id,
-                        &format!("🤖 Agent: {}", agent_name),
-                    )
+                    .edit_message(&target, &msg_id, &format!("🤖 Agent: {}", agent_name))
                     .await;
-                self.show_setup_flow(&target, user_id, thread_id)
-                    .await?;
+                self.show_setup_flow(&target, user_id, thread_id).await?;
             }
             "recover" => {
                 self.handle_recover_session(&target, user_id, thread_id, &text)
@@ -2668,15 +2696,21 @@ impl Server {
                         .await;
                     return Ok(());
                 }
-                self.handle_rename_window(&new_name, user_id, thread_id).await?;
+                self.handle_rename_window(&new_name, user_id, thread_id)
+                    .await?;
                 let state = self.state_mgr.load_state().await?;
-                if let Some(binding) = state.thread_bindings.iter().find(|b| {
-                    b.user_id == user_id && b.thread_id == thread_id
-                }) {
+                if let Some(binding) = state
+                    .thread_bindings
+                    .iter()
+                    .find(|b| b.user_id == user_id && b.thread_id == thread_id)
+                {
                     let wid = WindowId(binding.window_id.clone());
                     let _ = self.tmux_mgr.send_line(&wid, &text).await;
                     let sc_chat_id = binding.group_chat_id.unwrap_or(binding.chat_id);
-                    self.status_consumed.lock().await.remove(&(sc_chat_id, binding.thread_id));
+                    self.status_consumed
+                        .lock()
+                        .await
+                        .remove(&(sc_chat_id, binding.thread_id));
                 }
                 let _ = self
                     .im_adapter
@@ -2685,9 +2719,11 @@ impl Server {
             }
             "rebind" => {
                 let state = self.state_mgr.load_state().await?;
-                let binding_opt = state.thread_bindings.iter().find(|b| {
-                    b.user_id == user_id && b.thread_id == thread_id
-                }).cloned();
+                let binding_opt = state
+                    .thread_bindings
+                    .iter()
+                    .find(|b| b.user_id == user_id && b.thread_id == thread_id)
+                    .cloned();
                 drop(state);
                 if let Some(binding) = binding_opt {
                     let wid = WindowId(binding.window_id.clone());
@@ -2696,7 +2732,8 @@ impl Server {
                         Err(_) => None,
                     };
                     if let Some(agent_name) = running_agent {
-                        self.handle_rebind_agent(&target, user_id, thread_id, agent_name).await?;
+                        self.handle_rebind_agent(&target, user_id, thread_id, agent_name)
+                            .await?;
                         let is_copilot = agent_name == "copilot";
                         if is_copilot {
                             let _ = self.tmux_mgr.send_line_chars(&wid, &text, 10).await;
@@ -2704,10 +2741,17 @@ impl Server {
                             let _ = self.tmux_mgr.send_line(&wid, &text).await;
                         }
                         let sc_chat_id = binding.group_chat_id.unwrap_or(binding.chat_id);
-                        self.status_consumed.lock().await.remove(&(sc_chat_id, binding.thread_id));
+                        self.status_consumed
+                            .lock()
+                            .await
+                            .remove(&(sc_chat_id, binding.thread_id));
                         let _ = self
                             .im_adapter
-                            .edit_message(&target, &msg_id, &format!("Binding updated to {agent_name}. Message forwarded."))
+                            .edit_message(
+                                &target,
+                                &msg_id,
+                                &format!("Binding updated to {agent_name}. Message forwarded."),
+                            )
                             .await;
                     } else {
                         let _ = self
@@ -3078,25 +3122,27 @@ impl Server {
         if is_copilot {
             // Copilot sessions: match by PID using inuse lock files.
             for (wid, ws) in &state.window_states {
-                if ws.agent_type != "copilot" { continue; }
+                if ws.agent_type != "copilot" {
+                    continue;
+                }
                 let discovered = self
                     .config
                     .agent_registry
                     .get("copilot")
                     .and_then(|a| a.discover_session_by_pid(wid).ok()?);
-                if let Some(sid) = discovered {
-                    if sid == session_id {
-                        if let Ok(mut new_state) = self.state_mgr.load_state().await {
-                            if let Some(ws) = new_state.window_states.get_mut(wid) {
-                                ws.session_id = session_id.to_string();
-                                tracing::info!(
-                                    "[pipe] Updated copilot window {wid} session: {session_id}"
-                                );
-                            }
-                            let _ = self.state_mgr.save_state(&new_state).await;
+                if let Some(sid) = discovered
+                    && sid == session_id
+                {
+                    if let Ok(mut new_state) = self.state_mgr.load_state().await {
+                        if let Some(ws) = new_state.window_states.get_mut(wid) {
+                            ws.session_id = session_id.to_string();
+                            tracing::info!(
+                                "[pipe] Updated copilot window {wid} session: {session_id}"
+                            );
                         }
-                        return Some(wid.clone());
+                        let _ = self.state_mgr.save_state(&new_state).await;
                     }
+                    return Some(wid.clone());
                 }
             }
             return None;
@@ -3143,19 +3189,27 @@ impl Server {
         text: &str,
     ) -> Result<()> {
         let state = self.state_mgr.load_state().await?;
-        let binding = match state.thread_bindings.iter().find(|b| {
-            b.user_id == user_id && b.thread_id == thread_id
-        }) {
+        let binding = match state
+            .thread_bindings
+            .iter()
+            .find(|b| b.user_id == user_id && b.thread_id == thread_id)
+        {
             Some(b) => b.clone(),
             None => {
                 tracing::warn!("[recover] No binding found for user={user_id} thread={thread_id}");
-                let _ = self.im_adapter.send_message(target, "Session not found.").await;
+                let _ = self
+                    .im_adapter
+                    .send_message(target, "Session not found.")
+                    .await;
                 return Ok(());
             }
         };
         let ws = state.window_states.get(&binding.window_id).cloned();
         let cwd = ws.as_ref().map(|w| w.cwd.as_str()).unwrap_or("~");
-        let agent_type_name = ws.as_ref().map(|w| w.agent_type.as_str()).unwrap_or("claude");
+        let agent_type_name = ws
+            .as_ref()
+            .map(|w| w.agent_type.as_str())
+            .unwrap_or("claude");
         let session_id = ws.as_ref().map(|w| w.session_id.as_str()).unwrap_or("");
 
         let agent = self
@@ -3172,10 +3226,7 @@ impl Server {
 
         // Create new tmux window
         let window_name = &binding.display_name;
-        let new_window_id = self
-            .tmux_mgr
-            .new_window(window_name, cwd)
-            .await?;
+        let new_window_id = self.tmux_mgr.new_window(window_name, cwd).await?;
 
         // Launch agent (resume if we have a session_id)
         if !session_id.is_empty() && agent.supports_sessions() {
@@ -3211,9 +3262,11 @@ impl Server {
                 .window_states
                 .insert(new_window_id.0.clone(), old_ws);
         }
-        if let Some(b) = new_state.thread_bindings.iter_mut().find(|b| {
-            b.user_id == user_id && b.thread_id == thread_id
-        }) {
+        if let Some(b) = new_state
+            .thread_bindings
+            .iter_mut()
+            .find(|b| b.user_id == user_id && b.thread_id == thread_id)
+        {
             b.window_id = new_window_id.0.clone();
         }
         // Clean up stale session_map entries for the old window_id
@@ -3254,9 +3307,7 @@ impl Server {
                 .send_line_chars(&new_window_id, text, 10)
                 .await?;
         } else {
-            self.tmux_mgr
-                .send_line(&new_window_id, text)
-                .await?;
+            self.tmux_mgr.send_line(&new_window_id, text).await?;
         }
 
         let sc_chat_id = binding.group_chat_id.unwrap_or(binding.chat_id);
@@ -3312,11 +3363,10 @@ impl Server {
             .thread_bindings
             .iter()
             .find(|b| b.user_id == user_id && b.thread_id == thread_id)
+            && let Some(ws) = state.window_states.get_mut(&binding.window_id)
         {
-            if let Some(ws) = state.window_states.get_mut(&binding.window_id) {
-                ws.agent_type = agent_name.to_string();
-                self.state_mgr.save_state(&state).await?;
-            }
+            ws.agent_type = agent_name.to_string();
+            self.state_mgr.save_state(&state).await?;
         }
         Ok(())
     }
@@ -3567,10 +3617,7 @@ fn parse_usage_output(raw: &str) -> String {
         }
 
         // Clean up any remaining box-drawing chars
-        let cleaned = normalized
-            .replace(['│', '┃'], "")
-            .trim()
-            .to_string();
+        let cleaned = normalized.replace(['│', '┃'], "").trim().to_string();
 
         if !cleaned.is_empty() {
             found_data = true;
