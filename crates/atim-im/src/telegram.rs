@@ -4,9 +4,7 @@ use tokio::sync::mpsc;
 
 use atim_core::error::{Error, Result};
 use atim_core::im::ImAdapter;
-use atim_core::message::{
-    Button, CheckItem, ImEvent, ImEventKind, MessageId, MessageTarget,
-};
+use atim_core::message::{Button, CheckItem, ImEvent, ImEventKind, MessageId, MessageTarget};
 
 /// Convert Markdown text to Telegram-compatible HTML.
 ///
@@ -348,10 +346,7 @@ impl ImAdapter for TelegramAdapter {
         let mut html_parts = vec![format!("🔍 <b>{}</b>", title)];
         for item in items {
             let emoji = item.status.emoji();
-            html_parts.push(format!(
-                "{} <b>{}</b> — {}",
-                emoji, item.label, item.detail
-            ));
+            html_parts.push(format!("{} <b>{}</b> — {}", emoji, item.label, item.detail));
         }
         let html = html_parts.join("\n");
         let mut params = serde_json::json!({
@@ -536,6 +531,21 @@ impl ImAdapter for TelegramAdapter {
         self.api_post("answerCallbackQuery", &params).await?;
         Ok(())
     }
+
+    async fn add_reaction(
+        &self,
+        target: &MessageTarget,
+        message_id: &str,
+        _emoji: &str,
+    ) -> Result<()> {
+        let params = serde_json::json!({
+            "chat_id": target.chat_id.0,
+            "message_id": message_id.parse::<i64>().unwrap_or(0),
+            "reaction": [{"type": "emoji", "emoji": "👍"}],
+        });
+        self.api_post("setMessageReaction", &params).await?;
+        Ok(())
+    }
 }
 
 // ── Parsing helpers ──
@@ -576,6 +586,7 @@ fn parse_message(msg: &serde_json::Value) -> Option<ImEvent> {
             text: text.to_string(),
             is_mention: false,
             is_group,
+            message_id: msg["message_id"].as_i64().map(|id| id.to_string()),
         }
     } else if msg.get("photo").is_some() {
         ImEventKind::Photo {

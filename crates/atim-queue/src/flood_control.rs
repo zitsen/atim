@@ -254,6 +254,16 @@ impl ImAdapter for FloodControlledAdapter {
         // Don't rate-limit callback answers
         self.inner.answer_callback(callback_query_id, text).await
     }
+
+    async fn add_reaction(
+        &self,
+        target: &MessageTarget,
+        message_id: &str,
+        emoji: &str,
+    ) -> Result<()> {
+        // Don't rate-limit reactions
+        self.inner.add_reaction(target, message_id, emoji).await
+    }
 }
 
 #[cfg(test)]
@@ -321,6 +331,14 @@ mod tests {
             Ok(MessageId("mock:1".into()))
         }
         async fn answer_callback(&self, _callback_query_id: &str, _text: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn add_reaction(
+            &self,
+            _target: &MessageTarget,
+            _message_id: &str,
+            _emoji: &str,
+        ) -> Result<()> {
             Ok(())
         }
     }

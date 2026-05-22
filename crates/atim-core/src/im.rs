@@ -79,4 +79,12 @@ pub trait ImAdapter: Send + Sync {
     /// inline keyboard button. The `callback_query_id` comes from the original
     /// `CallbackQuery` event.
     async fn answer_callback(&self, callback_query_id: &str, text: &str) -> Result<()>;
+
+    /// Add an emoji reaction to a message.
+    async fn add_reaction(
+        &self,
+        target: &MessageTarget,
+        message_id: &str,
+        emoji: &str,
+    ) -> Result<()>;
 }

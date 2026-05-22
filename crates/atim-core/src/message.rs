@@ -90,6 +90,8 @@ pub enum ImEventKind {
         is_mention: bool,
         /// True if the message was sent in a group chat (vs P2P).
         is_group: bool,
+        /// The IM platform's message ID, for reacting to the original message.
+        message_id: Option<String>,
     },
     /// Photo with optional caption.
     Photo {

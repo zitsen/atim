@@ -152,6 +152,7 @@ impl Server {
             ref text,
             is_mention,
             is_group,
+            message_id: _,
         } = event.kind
         {
             tracing::debug!(
@@ -175,6 +176,7 @@ impl Server {
                 text,
                 is_mention,
                 is_group,
+                message_id,
             } => {
                 self.handle_text_message(
                     event.target,
@@ -182,6 +184,7 @@ impl Server {
                     &text,
                     is_mention,
                     is_group,
+                    message_id,
                 )
                 .await?;
             }
@@ -542,6 +545,7 @@ impl Server {
         text: &str,
         is_mention: bool,
         is_group: bool,
+        message_id: Option<String>,
     ) -> Result<()> {
         // Load current state to find thread binding
         let state = self.state_mgr.load_state().await?;
@@ -1001,10 +1005,7 @@ impl Server {
                 }
 
                 // 2. Chat binding
-                let chat_name = target
-                    .chat_name
-                    .as_deref()
-                    .unwrap_or(&binding.display_name);
+                let chat_name = target.chat_name.as_deref().unwrap_or(&binding.display_name);
                 items.push(CheckItem {
                     label: "Chat Binding".into(),
                     status: CheckStatus::Info,
@@ -1466,6 +1467,9 @@ impl Server {
                     } else {
                         self.tmux_mgr.send_line(&window_id, text).await?;
                     }
+                    if let Some(ref mid) = message_id {
+                        let _ = self.im_adapter.add_reaction(&target, mid, "DONE").await;
+                    }
                     let sc_chat_id = binding.group_chat_id.unwrap_or(binding.chat_id);
                     self.status_consumed
                         .lock()
@@ -1638,10 +1642,15 @@ impl Server {
                         self.tmux_mgr.send_line(&window_id, text).await
                     };
                     match &result {
-                        Ok(()) => tracing::info!(
-                            "[handle_text_message] window={} send_line OK",
-                            binding.window_id,
-                        ),
+                        Ok(()) => {
+                            tracing::info!(
+                                "[handle_text_message] window={} send_line OK",
+                                binding.window_id,
+                            );
+                            if let Some(ref mid) = message_id {
+                                let _ = self.im_adapter.add_reaction(&target, mid, "DONE").await;
+                            }
+                        }
                         Err(e) => tracing::error!(
                             "[handle_text_message] window={} send_line failed: {e}",
                             binding.window_id,

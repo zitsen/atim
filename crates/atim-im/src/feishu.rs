@@ -18,8 +18,7 @@ use tokio::sync::mpsc;
 use atim_core::error::{Error, Result};
 use atim_core::im::ImAdapter;
 use atim_core::message::{
-    Button, ChatId, CheckItem, ImEvent, ImEventKind, MessageId, MessageTarget,
-    ThreadId, UserId,
+    Button, ChatId, CheckItem, ImEvent, ImEventKind, MessageId, MessageTarget, ThreadId, UserId,
 };
 
 use open_lark::Config;
@@ -857,6 +856,20 @@ impl ImAdapter for FeishuAdapter {
         Ok(())
     }
 
+    async fn add_reaction(
+        &self,
+        _target: &MessageTarget,
+        message_id: &str,
+        emoji: &str,
+    ) -> Result<()> {
+        let body = serde_json::json!({
+            "reaction_type": { "emoji_type": emoji }
+        });
+        self.api_post(&format!("/im/v1/messages/{message_id}/reactions"), &body)
+            .await?;
+        Ok(())
+    }
+
     async fn send_chat_action(&self, target: &MessageTarget) -> Result<()> {
         let chat_id = self
             .resolve_chat(&target.chat_id)
@@ -969,7 +982,7 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
         .as_str()
         .or_else(|| message["msg_type"].as_str())
         .unwrap_or("");
-    let _message_id = message["message_id"].as_str().unwrap_or("");
+    let message_id_str = message["message_id"].as_str().unwrap_or("");
     let chat_type = message["chat_type"].as_str().unwrap_or("p2p");
     let root_id = message["root_id"].as_str(); // thread root (if any)
 
@@ -1086,6 +1099,7 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
                 text: text.clone(),
                 is_mention: has_mention,
                 is_group: chat_type == "group",
+                message_id: Some(message_id_str.to_string()),
             }
         }
         "post" => {
@@ -1119,6 +1133,7 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
                 text: text.clone(),
                 is_mention: has_mention,
                 is_group: chat_type == "group",
+                message_id: Some(message_id_str.to_string()),
             }
         }
         "image" => {
