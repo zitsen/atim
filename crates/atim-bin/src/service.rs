@@ -114,14 +114,24 @@ WantedBy={}
     let unit_path = dir.join(unit_name());
     std::fs::write(&unit_path, &unit_content)?;
 
+    // Reload systemd so the new/updated unit is picked up
+    let mut daemon_reload_args = systemctl_base(system_level);
+    daemon_reload_args.push("daemon-reload".to_string());
+    let daemon_reload = Command::new(&daemon_reload_args[0])
+        .args(&daemon_reload_args[1..])
+        .status()?;
+    if !daemon_reload.success() {
+        eprintln!("Warning: systemctl daemon-reload failed");
+    }
+
     println!("Service unit installed at {:?}", unit_path);
     println!(
         "Run `atim service --{}start` to start the service",
-        if system_level { "system --" } else { "" }
+        if system_level { "system --" } else { "" },
     );
     println!(
         "Run `systemctl {}enable atim.service` to enable on boot",
-        if system_level { "" } else { "--user " }
+        if system_level { "" } else { "--user " },
     );
 
     Ok(())
