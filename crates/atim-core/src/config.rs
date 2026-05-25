@@ -3,11 +3,93 @@ use std::path::PathBuf;
 use crate::agent::AgentRegistry;
 use crate::error::{Error, Result};
 
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ConfigToml {
+    #[serde(default)]
+    im: ImToml,
+    #[serde(default)]
+    agent: AgentToml,
+    #[serde(default)]
+    tmux: TmuxToml,
+    #[serde(default)]
+    monitor: MonitorToml,
+    #[serde(default)]
+    display: DisplayToml,
+    #[serde(default)]
+    openai: OpenaiToml,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(default)]
+#[derive(Default)]
+struct ImToml {
+    backend: Option<String>,
+    #[serde(default)]
+    feishu: FeishuImToml,
+    #[serde(default)]
+    telegram: TelegramImToml,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(default)]
+#[derive(Default)]
+struct FeishuImToml {
+    app_id: Option<String>,
+    app_secret: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(default)]
+#[derive(Default)]
+struct TelegramImToml {
+    token: Option<String>,
+    allowed_users: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(default)]
+#[derive(Default)]
+struct AgentToml {
+    command: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(default)]
+#[derive(Default)]
+struct TmuxToml {
+    session: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(default)]
+#[derive(Default)]
+struct MonitorToml {
+    poll_interval: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(default)]
+#[derive(Default)]
+struct DisplayToml {
+    show_user_messages: Option<String>,
+    show_tool_calls: Option<String>,
+    show_hidden_dirs: Option<bool>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(default)]
+#[derive(Default)]
+struct OpenaiToml {
+    api_key: Option<String>,
+    base_url: Option<String>,
+}
+
 /// Application configuration loaded from environment variables.
 #[derive(Debug, Clone)]
 pub struct Config {
     // ── General ──
     pub atim_dir: PathBuf,
+    pub im_backend: String,
 
     // ── IM (Telegram) ──
     pub telegram_bot_token: String,
@@ -50,13 +132,22 @@ impl Config {
     /// Load configuration from environment variables.
     pub fn from_env() -> Result<Self> {
         let atim_dir = resolve_atim_dir();
+        let toml_cfg = load_config_toml(&atim_dir);
 
         let telegram_bot_token = std::env::var("ATIM_TELEGRAM_TOKEN")
             .or_else(|_| std::env::var("TELEGRAM_BOT_TOKEN"))
+            .ok()
+            .or_else(|| toml_cfg.as_ref().and_then(|c| c.im.telegram.token.clone()))
             .unwrap_or_default();
 
         let allowed_users_str = std::env::var("ATIM_ALLOWED_USERS")
             .or_else(|_| std::env::var("ALLOWED_USERS"))
+            .ok()
+            .or_else(|| {
+                toml_cfg
+                    .as_ref()
+                    .and_then(|c| c.im.telegram.allowed_users.clone())
+            })
             .unwrap_or_default();
 
         let allowed_users: std::result::Result<Vec<i64>, _> = allowed_users_str
@@ -71,10 +162,24 @@ impl Config {
         let allowed_users = allowed_users?;
 
         let telegram_configured = !telegram_bot_token.is_empty();
+        let im_backend = std::env::var("ATIM_IM_BACKEND")
+            .ok()
+            .or_else(|| toml_cfg.as_ref().and_then(|c| c.im.backend.clone()))
+            .unwrap_or_else(|| "telegram".into());
 
         // ── Feishu ──
-        let feishu_app_id = std::env::var("ATIM_FEISHU_APP_ID").unwrap_or_default();
-        let feishu_app_secret = std::env::var("ATIM_FEISHU_APP_SECRET").unwrap_or_default();
+        let feishu_app_id = std::env::var("ATIM_FEISHU_APP_ID")
+            .ok()
+            .or_else(|| toml_cfg.as_ref().and_then(|c| c.im.feishu.app_id.clone()))
+            .unwrap_or_default();
+        let feishu_app_secret = std::env::var("ATIM_FEISHU_APP_SECRET")
+            .ok()
+            .or_else(|| {
+                toml_cfg
+                    .as_ref()
+                    .and_then(|c| c.im.feishu.app_secret.clone())
+            })
+            .unwrap_or_default();
         let feishu_webhook_port = std::env::var("ATIM_FEISHU_WEBHOOK_PORT")
             .unwrap_or_else(|_| "9090".into())
             .parse::<u16>()
@@ -92,49 +197,78 @@ impl Config {
             ));
         }
 
-        let tmux_session_name =
-            std::env::var("ATIM_TMUX_SESSION").unwrap_or_else(|_| "atim".into());
+        let tmux_session_name = std::env::var("ATIM_TMUX_SESSION")
+            .ok()
+            .or_else(|| toml_cfg.as_ref().and_then(|c| c.tmux.session.clone()))
+            .unwrap_or_else(|| "atim".into());
 
-        let agent_command = std::env::var("ATIM_AGENT_COMMAND").unwrap_or_else(|_| "claude".into());
+        let agent_command = std::env::var("ATIM_AGENT_COMMAND")
+            .ok()
+            .or_else(|| toml_cfg.as_ref().and_then(|c| c.agent.command.clone()))
+            .unwrap_or_else(|| "claude".into());
         let agent_registry = AgentRegistry::from_env();
 
-        let state_file = atim_dir.join("state.json");
-        let session_map_file = atim_dir.join("session_map.json");
-        let monitor_state_file = atim_dir.join("monitor_state.json");
+        // Backward-compat fields now point to the new canonical files.
+        let state_file = atim_dir.join("store.db");
+        let session_map_file = atim_dir.join("store.db");
+        let monitor_state_file = atim_dir.join("store.db");
 
         let monitor_poll_interval = std::env::var("ATIM_MONITOR_POLL_INTERVAL")
             .or_else(|_| std::env::var("MONITOR_POLL_INTERVAL"))
-            .unwrap_or_else(|_| "2.0".into())
+            .ok()
+            .or_else(|| {
+                toml_cfg
+                    .as_ref()
+                    .and_then(|c| c.monitor.poll_interval.clone())
+            })
+            .unwrap_or_else(|| "2.0".into())
             .parse::<f64>()
             .unwrap_or(2.0);
 
         let show_user_messages = std::env::var("ATIM_SHOW_USER_MESSAGES")
             .or_else(|_| std::env::var("CCBOT_SHOW_USER_MESSAGES"))
-            .unwrap_or_else(|_| "true".into())
+            .ok()
+            .or_else(|| {
+                toml_cfg
+                    .as_ref()
+                    .and_then(|c| c.display.show_user_messages.clone())
+            })
+            .unwrap_or_else(|| "true".into())
             .to_lowercase()
             != "false";
 
         let show_tool_calls = std::env::var("ATIM_SHOW_TOOL_CALLS")
             .or_else(|_| std::env::var("CCBOT_SHOW_TOOL_CALLS"))
-            .unwrap_or_else(|_| "true".into())
+            .ok()
+            .or_else(|| {
+                toml_cfg
+                    .as_ref()
+                    .and_then(|c| c.display.show_tool_calls.clone())
+            })
+            .unwrap_or_else(|| "true".into())
             .to_lowercase()
             != "false";
-
         let show_hidden_dirs = std::env::var("ATIM_SHOW_HIDDEN_DIRS")
-            .unwrap_or_else(|_| "false".into())
-            .to_lowercase()
-            == "true";
+            .ok()
+            .map(|v| v.to_lowercase() == "true")
+            .or_else(|| toml_cfg.as_ref().and_then(|c| c.display.show_hidden_dirs))
+            .unwrap_or(false);
 
         let openai_api_key = std::env::var("ATIM_OPENAI_API_KEY")
             .or_else(|_| std::env::var("OPENAI_API_KEY"))
+            .ok()
+            .or_else(|| toml_cfg.as_ref().and_then(|c| c.openai.api_key.clone()))
             .unwrap_or_default();
 
         let openai_base_url = std::env::var("ATIM_OPENAI_BASE_URL")
             .or_else(|_| std::env::var("OPENAI_BASE_URL"))
-            .unwrap_or_else(|_| "https://api.openai.com/v1".into());
+            .ok()
+            .or_else(|| toml_cfg.as_ref().and_then(|c| c.openai.base_url.clone()))
+            .unwrap_or_else(|| "https://api.openai.com/v1".into());
 
         Ok(Self {
             atim_dir,
+            im_backend,
             telegram_bot_token,
             allowed_users,
             feishu_app_id,
@@ -171,6 +305,15 @@ impl Config {
             "claude"
         }
     }
+}
+
+fn load_config_toml(atim_dir: &std::path::Path) -> Option<ConfigToml> {
+    let path = atim_dir.join("config.toml");
+    if !path.exists() {
+        return None;
+    }
+    let data = std::fs::read_to_string(path).ok()?;
+    toml::from_str::<ConfigToml>(&data).ok()
 }
 
 fn resolve_atim_dir() -> PathBuf {

@@ -35,4 +35,4 @@ pulldown-cmark = "0.12"
 libc = "0.2"
 futures-util = "0.3"
 moka = "0.12"
-aiofiles = "0.1"  # not needed, we use tokio::fs
+rusqlite = { version = "0.32", features = ["bundled"] }

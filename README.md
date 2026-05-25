@@ -120,7 +120,46 @@ Then run `atim`.
 
 ## Configuration
 
-Atim reads from environment variables (or a `~/.atim/.env` file):
+Atim reads configuration from `~/.atim/config.toml` (with environment variables as overrides).
+On first run, a legacy `~/.atim/.env` file is automatically migrated to `config.toml`.
+
+### config.toml
+
+```toml
+[im]
+backend = "feishu"   # "feishu" or "telegram"
+
+[im.feishu]
+app_id = "cli_xxxxxxxxxxxxxx"
+app_secret = "xxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+[im.telegram]
+token = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+allowed_users = "123456789"   # comma-separated, empty = allow all
+
+[agent]
+command = "claude"
+
+[tmux]
+session = "atim"
+
+[monitor]
+poll_interval = "2.0"
+
+[display]
+show_user_messages = "true"
+show_tool_calls = "true"
+show_hidden_dirs = false
+
+[openai]
+api_key = "..."
+base_url = "https://api.openai.com/v1"
+```
+
+### Environment variable overrides
+
+Any setting in `config.toml` can be overridden by the corresponding environment variable.
+See the table below for the variable names:
 
 | Variable                 | Default   | Description                                           |
 | ------------------------ | --------- | ----------------------------------------------------- |

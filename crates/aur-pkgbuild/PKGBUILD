@@ -1,0 +1,15 @@
+# Maintainer: Atim maintainers
+pkgname=atim
+pkgver=0.2.0
+pkgrel=1
+pkgdesc="AI Agent Through IM"
+arch=('x86_64')
+url="https://github.com/zitsen/atim"
+license=('MIT')
+depends=('tmux')
+source_x86_64=("${url}/releases/download/v${pkgver}/atim-x86_64-unknown-linux-musl.tar.gz")
+sha256sums_x86_64=('2f01903ab10a31f23f0f7f0be699de650d0d472538612c4bba86d4542d673acf')
+
+package() {
+  install -Dm755 atim "${pkgdir}/usr/bin/atim"
+}

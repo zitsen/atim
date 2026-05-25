@@ -101,17 +101,18 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // 0. Load environment from ~/.atim/.env if it exists
+    // 0. Load legacy .env (if present) for backward compatibility.
     if let Ok(home) = std::env::var("HOME") {
         let env_path = PathBuf::from(home).join(".atim").join(".env");
         if env_path.exists() {
             dotenvy::from_filename(&env_path).ok();
-            tracing::info!("Loaded environment from {:?}", env_path);
         }
     }
 
-    // 1. Load config
+    // 1. Load config (now supports config.toml + env fallback)
     let config = Config::from_env()?;
+    // Ensure config.toml exists (migrate from legacy .env if needed).
+    let _ = atim_state::persistence::StateManager::ensure_config_toml(&config.atim_dir)?;
 
     // 2. Setup logging
     tracing_subscriber::fmt()
@@ -128,11 +129,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // 3. Load persisted state
-    let state_mgr = atim_state::persistence::StateManager::new(
-        config.state_file.clone(),
-        config.session_map_file.clone(),
-        config.monitor_state_file.clone(),
-    );
+    let state_mgr = atim_state::persistence::StateManager::open(&config.atim_dir).await?;
 
     let server_state = state_mgr.load_state().await?;
     let byte_offsets = state_mgr.load_monitor_offsets().await?;
@@ -220,7 +217,7 @@ async fn main() -> anyhow::Result<()> {
     let (im_tx, im_rx) = mpsc::unbounded_channel();
 
     let raw_adapter: Arc<dyn ImAdapter> = {
-        let backend = std::env::var("ATIM_IM_BACKEND").unwrap_or_else(|_| "telegram".into());
+        let backend = config.im_backend.clone();
         match backend.as_str() {
             "feishu" => {
                 let adapter = atim_im::feishu::FeishuAdapter::new(
