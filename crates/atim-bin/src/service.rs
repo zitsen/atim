@@ -81,6 +81,31 @@ fn install_service(system_level: bool) -> Result<(), Box<dyn std::error::Error>>
         "default.target"
     };
 
+    // Detect claude binary path for PATH injection
+    let claude_path = Command::new("sh")
+        .args(["-c", "command -v claude"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                let path = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if !path.is_empty() { Some(path) } else { None }
+            } else {
+                None
+            }
+        });
+
+    // Include claude's parent directory in PATH so the service can find it
+    let path_extra = claude_path
+        .as_ref()
+        .and_then(|p| std::path::Path::new(p).parent())
+        .and_then(|p| p.to_str())
+        .map(|p| format!("\\${{PATH}}:{}", p))
+        .unwrap_or_else(|| "\\${{PATH}}".to_string());
+
+    let mut extra_env = String::new();
+    extra_env.push_str(&format!("Environment=PATH={path_extra}\n"));
+
     let unit_content = format!(
         r#"[Unit]
 Description=Atim - AI Agent Through IM
@@ -92,11 +117,13 @@ Type=simple
 ExecStart={}
 Restart=on-failure
 RestartSec=5
-
+KillMode=process
+{}
 [Install]
 WantedBy={}
 "#,
         binary_path.display(),
+        extra_env,
         wanted_by,
     );
 
