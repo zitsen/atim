@@ -17,4 +17,4 @@ libc = { workspace = true }
 rusqlite = { workspace = true }
 chrono = { workspace = true }
 toml = { workspace = true }
-atim-core = { path = "../atim-core", version = "0.2.0" }
+atim-core = { path = "../atim-core" }

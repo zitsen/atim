@@ -17,13 +17,13 @@ anyhow = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 libc = { workspace = true }
 regex = { workspace = true }
-atim-core = { path = "../atim-core", version = "0.2.0" }
-atim-tmux = { path = "../atim-tmux", version = "0.2.0" }
-atim-parser = { path = "../atim-parser", version = "0.2.0" }
-atim-state = { path = "../atim-state", version = "0.2.0" }
-atim-im = { path = "../atim-im", version = "0.2.0" }
-atim-queue = { path = "../atim-queue", version = "0.2.0" }
-atim-monitor = { path = "../atim-monitor", version = "0.2.0" }
+atim-core = { path = "../atim-core" }
+atim-tmux = { path = "../atim-tmux" }
+atim-parser = { path = "../atim-parser" }
+atim-state = { path = "../atim-state" }
+atim-im = { path = "../atim-im" }
+atim-queue = { path = "../atim-queue" }
+atim-monitor = { path = "../atim-monitor" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 rustls = { version = "0.23", features = ["ring"] }
 dotenvy = "0.15"
