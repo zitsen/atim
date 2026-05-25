@@ -42,6 +42,8 @@ pub struct SessionMonitor {
     last_known_sessions: Vec<String>,
     /// Cycle counter for periodic offset saving.
     save_counter: u32,
+    /// Path to sessions.json (V2 mirror, replaces state.json window_states).
+    sessions_path: PathBuf,
 }
 
 /// Resolve the path to a session's JSONL file.
@@ -82,7 +84,7 @@ pub async fn resolve_jsonl(session_id: &str) -> Option<PathBuf> {
 impl SessionMonitor {
     /// Create a new session monitor.
     ///
-    /// * `atim_dir` — the `~/.atim` directory (contains session_map.json, state.json)
+    /// * `atim_dir` — the `~/.atim` directory (contains session_map.json, state.json, sessions.json)
     /// * `byte_offsets` — shared offset map, usually loaded from monitor_state.json
     /// * `poll_interval_secs` — how often to poll (default 2.0)
     pub fn new(
@@ -94,6 +96,7 @@ impl SessionMonitor {
             session_map_path: atim_dir.join("session_map.json"),
             state_path: atim_dir.join("state.json"),
             monitor_state_path: atim_dir.join("monitor_state.json"),
+            sessions_path: atim_dir.join("sessions.json"),
             jsonl_cache: Arc::new(Mutex::new(HashMap::new())),
             byte_offsets,
             poll_interval: if poll_interval_secs > 0.0 {
@@ -131,11 +134,14 @@ impl SessionMonitor {
         }
     }
 
-    /// Collect all known session_ids from session_map.json and state.json window_states.
+    /// Collect all known session_ids from session_map.json (transient hook output)
+    /// and sessions.json (V2 store mirror).
     async fn collect_known_sessions(&self) -> Vec<String> {
         let mut sessions = Vec::new();
 
         // Primary source: session_map.json (SessionStart hook writes here).
+        // This is a transient pipe — server deletes it after reading, but
+        // the monitor may catch it before the server does.
         if self.session_map_path.exists()
             && let Ok(data) = tokio::fs::read_to_string(&self.session_map_path).await
             && let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&data)
@@ -147,8 +153,22 @@ impl SessionMonitor {
             }
         }
 
-        // Secondary source: state.json window_states — catches sessions that
-        // predated the session_map or were created outside the hook.
+        // Secondary source: sessions.json (V2 mirror written by save_runtime).
+        // Contains all known sessions keyed by session_id.
+        if self.sessions_path.exists()
+            && let Ok(data) = tokio::fs::read_to_string(&self.sessions_path).await
+            && let Ok(parsed) = serde_json::from_str::<
+                std::collections::HashMap<String, atim_core::session::SessionInfo>,
+            >(&data)
+        {
+            for sid in parsed.keys() {
+                if !sessions.contains(sid) {
+                    sessions.push(sid.clone());
+                }
+            }
+        }
+
+        // Tertiary source: state.json window_states (V1 legacy, for backward compat).
         if self.state_path.exists()
             && let Ok(data) = tokio::fs::read_to_string(&self.state_path).await
             && let Ok(state) = serde_json::from_str::<serde_json::Value>(&data)

@@ -5,18 +5,22 @@ use chrono::Utc;
 use rusqlite::{Connection, params};
 use tokio::sync::Mutex;
 
+use atim_core::config::ConfigToml;
 use atim_core::error::{Error, Result};
-use atim_core::session::{ServerState, ThreadBinding, WindowState};
+use atim_core::session::{
+    ChatBinding, RuntimeState, ServerState, SessionInfo, ThreadBinding, WindowBinding, WindowState,
+};
 
 // ── Schema (self-describing — SQLite stores its own version) ──
 
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 
 const CREATE_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER NOT NULL
 );
 
+-- V1 tables (kept for migration)
 CREATE TABLE IF NOT EXISTS window_states (
     window_id   TEXT PRIMARY KEY NOT NULL,
     session_id  TEXT NOT NULL DEFAULT '',
@@ -24,7 +28,6 @@ CREATE TABLE IF NOT EXISTS window_states (
     window_name TEXT NOT NULL DEFAULT '',
     agent_type  TEXT NOT NULL DEFAULT 'claude'
 );
-
 CREATE TABLE IF NOT EXISTS thread_bindings (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id        INTEGER NOT NULL,
@@ -36,13 +39,39 @@ CREATE TABLE IF NOT EXISTS thread_bindings (
     topic_name     TEXT,
     UNIQUE(user_id, thread_id, chat_id)
 );
-
 CREATE INDEX IF NOT EXISTS idx_thread_bindings_window
     ON thread_bindings(window_id);
-
 CREATE TABLE IF NOT EXISTS session_map (
     window_id  TEXT PRIMARY KEY NOT NULL,
     session_id TEXT NOT NULL
+);
+
+-- V2 tables (session-driven design)
+CREATE TABLE IF NOT EXISTS sessions (
+    session_id   TEXT PRIMARY KEY NOT NULL,
+    cwd          TEXT NOT NULL DEFAULT '',
+    agent_type   TEXT NOT NULL DEFAULT 'claude',
+    created_at   TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS chat_bindings (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id        INTEGER NOT NULL,
+    thread_id      INTEGER NOT NULL,
+    chat_id        INTEGER NOT NULL,
+    display_name   TEXT NOT NULL DEFAULT '',
+    group_chat_id  INTEGER,
+    topic_name     TEXT,
+    session_id     TEXT NOT NULL,
+    UNIQUE(user_id, thread_id, chat_id)
+);
+CREATE INDEX IF NOT EXISTS idx_chat_bindings_session
+    ON chat_bindings(session_id);
+CREATE TABLE IF NOT EXISTS window_bindings (
+    window_id   TEXT PRIMARY KEY NOT NULL,
+    session_id  TEXT NOT NULL,
+    cwd         TEXT NOT NULL DEFAULT '',
+    agent_type  TEXT NOT NULL DEFAULT 'claude',
+    window_name TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS monitor_offsets (
@@ -71,7 +100,6 @@ CREATE TABLE IF NOT EXISTS feishu_id_map (
 /// not yet exist but JSON files are present.
 pub struct Store {
     db: Mutex<Connection>,
-    db_path: PathBuf,
     atim_dir: PathBuf,
 }
 
@@ -120,12 +148,15 @@ impl Store {
 
         let store = Self {
             db: Mutex::new(connection),
-            db_path,
             atim_dir: atim_dir.to_path_buf(),
         };
+        drop(db_path); // path is only needed during open
 
         // Auto-migrate from old JSON files
         store.migrate_from_json(atim_dir).await?;
+
+        // V1 → V2 migration: populate sessions, chat_bindings, window_bindings
+        store.migrate_v1_to_v2().await?;
 
         Ok(store)
     }
@@ -420,10 +451,6 @@ impl Store {
             Ok(()) => {
                 db.execute_batch("COMMIT")
                     .map_err(|e| Error::State(format!("commit: {e}")))?;
-                let path = self.atim_dir.join("state.json");
-                let data = serde_json::to_string_pretty(state)
-                    .map_err(|e| Error::State(format!("serialize state mirror: {e}")))?;
-                tokio::fs::write(path, data).await?;
                 Ok(())
             }
             Err(e) => {
@@ -454,18 +481,6 @@ impl Store {
             .map_err(|e| Error::State(format!("query session_map: {e}")))?
             .filter_map(|r| r.ok())
             .collect();
-        if map.is_empty() {
-            let path = self.atim_dir.join("session_map.json");
-            if path.exists()
-                && let Ok(data) = tokio::fs::read_to_string(&path).await
-                && let Ok(from_json) = serde_json::from_str::<HashMap<String, String>>(&data)
-            {
-                drop(stmt);
-                drop(db);
-                self.save_session_map(&from_json).await?;
-                return Ok(from_json);
-            }
-        }
         Ok(map)
     }
 
@@ -489,10 +504,6 @@ impl Store {
             Ok(()) => {
                 db.execute_batch("COMMIT")
                     .map_err(|e| Error::State(format!("commit: {e}")))?;
-                let path = self.atim_dir.join("session_map.json");
-                let data = serde_json::to_string_pretty(map)
-                    .map_err(|e| Error::State(format!("serialize session_map mirror: {e}")))?;
-                tokio::fs::write(path, data).await?;
                 Ok(())
             }
             Err(e) => {
@@ -530,18 +541,6 @@ impl Store {
             .map_err(|e| Error::State(format!("query offsets: {e}")))?
             .filter_map(|r| r.ok())
             .collect();
-        if map.is_empty() {
-            let path = self.atim_dir.join("monitor_state.json");
-            if path.exists()
-                && let Ok(data) = tokio::fs::read_to_string(&path).await
-                && let Ok(from_json) = serde_json::from_str::<HashMap<String, u64>>(&data)
-            {
-                drop(stmt);
-                drop(db);
-                self.save_monitor_offsets(&from_json).await?;
-                return Ok(from_json);
-            }
-        }
         Ok(map)
     }
 
@@ -567,10 +566,6 @@ impl Store {
             Ok(()) => {
                 db.execute_batch("COMMIT")
                     .map_err(|e| Error::State(format!("commit: {e}")))?;
-                let path = self.atim_dir.join("monitor_state.json");
-                let data = serde_json::to_string_pretty(offsets)
-                    .map_err(|e| Error::State(format!("serialize monitor_state mirror: {e}")))?;
-                tokio::fs::write(path, data).await?;
                 Ok(())
             }
             Err(e) => {
@@ -685,17 +680,391 @@ impl Store {
         }
     }
 
+    // ── V1 → V2 migration ──
+
+    /// Migrate from V1 (window_states + thread_bindings + session_map) to
+    /// V2 (sessions + chat_bindings + window_bindings) schema.
+    async fn migrate_v1_to_v2(&self) -> Result<()> {
+        let db = self.db.lock().await;
+
+        // Check if already migrated
+        let v2_count: i64 = db
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+            .unwrap_or(0);
+        if v2_count > 0 {
+            return Ok(());
+        }
+
+        let v1_count: i64 = db
+            .query_row("SELECT COUNT(*) FROM window_states", [], |row| row.get(0))
+            .unwrap_or(0);
+        if v1_count == 0 {
+            return Ok(());
+        }
+
+        tracing::info!("Migrating V1 → V2 schema...");
+
+        // 1. sessions table: dedup by session_id, take first cwd+agent_type
+        db.execute_batch(
+            "INSERT OR IGNORE INTO sessions (session_id, cwd, agent_type, created_at)
+             SELECT DISTINCT session_id, cwd, agent_type, datetime('now')
+             FROM window_states
+             WHERE session_id != ''",
+        )
+        .map_err(|e| Error::State(format!("migrate sessions: {e}")))?;
+
+        // 2. window_bindings table: all V1 window_states
+        db.execute_batch(
+            "INSERT OR IGNORE INTO window_bindings
+                (window_id, session_id, cwd, agent_type, window_name)
+             SELECT window_id, session_id, cwd, agent_type, window_name
+             FROM window_states",
+        )
+        .map_err(|e| Error::State(format!("migrate window_bindings: {e}")))?;
+
+        // 3. chat_bindings table: join thread_bindings with window_states to get session_id
+        //    For bindings whose window has no matching window_states entry, session_id is ''
+        //    (the runtime will discover it later).
+        db.execute_batch(
+            "INSERT OR IGNORE INTO chat_bindings
+                (user_id, thread_id, chat_id, display_name, group_chat_id, topic_name, session_id)
+             SELECT tb.user_id, tb.thread_id, tb.chat_id, tb.display_name, tb.group_chat_id, tb.topic_name,
+                    COALESCE(ws.session_id, '')
+             FROM thread_bindings tb
+             LEFT JOIN window_states ws ON tb.window_id = ws.window_id",
+        )
+        .map_err(|e| Error::State(format!("migrate chat_bindings: {e}")))?;
+
+        // 4. Import session_map.json entries into sessions table if not already there
+        let sm_path = self.atim_dir.join("session_map.json");
+        if sm_path.exists()
+            && let Ok(data) = std::fs::read_to_string(&sm_path)
+            && let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&data)
+        {
+            let now = Utc::now().to_rfc3339();
+            let mut stmt = db
+                .prepare_cached(
+                    "INSERT OR IGNORE INTO sessions (session_id, cwd, agent_type, created_at)
+                     VALUES (?1, '', 'claude', ?2)",
+                )
+                .map_err(|e| Error::State(format!("prepare session_map import: {e}")))?;
+            for sid in map.values() {
+                stmt.execute(params![sid, now]).ok();
+            }
+        }
+
+        tracing::info!("V1 → V2 migration complete.");
+        Ok(())
+    }
+
+    // ── V2 API: RuntimeState ──
+
+    /// Load the V2 runtime state (sessions + window_bindings + chat_bindings).
+    pub async fn load_runtime(&self) -> Result<RuntimeState> {
+        let db = self.db.lock().await;
+
+        // Sessions
+        let mut stmt = db
+            .prepare_cached("SELECT session_id, cwd, agent_type FROM sessions")
+            .map_err(|e| Error::State(format!("prepare load sessions: {e}")))?;
+        let sessions: HashMap<String, SessionInfo> = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    SessionInfo {
+                        session_id: row.get(0)?,
+                        cwd: row.get(1)?,
+                        agent_type: row.get(2)?,
+                    },
+                ))
+            })
+            .map_err(|e| Error::State(format!("query sessions: {e}")))?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt);
+
+        // Window bindings
+        let mut stmt = db
+            .prepare_cached(
+                "SELECT window_id, session_id, cwd, agent_type, window_name FROM window_bindings",
+            )
+            .map_err(|e| Error::State(format!("prepare load window_bindings: {e}")))?;
+        let window_bindings: HashMap<String, WindowBinding> = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    WindowBinding {
+                        window_id: row.get(0)?,
+                        session_id: row.get(1)?,
+                        cwd: row.get(2)?,
+                        agent_type: row.get(3)?,
+                        window_name: row.get(4)?,
+                    },
+                ))
+            })
+            .map_err(|e| Error::State(format!("query window_bindings: {e}")))?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt);
+
+        // Chat bindings
+        let mut stmt = db
+            .prepare_cached(
+                "SELECT user_id, thread_id, chat_id, display_name, group_chat_id, topic_name, session_id
+                 FROM chat_bindings ORDER BY id",
+            )
+            .map_err(|e| Error::State(format!("prepare load chat_bindings: {e}")))?;
+        let chat_bindings: Vec<ChatBinding> = stmt
+            .query_map([], |row| {
+                Ok(ChatBinding {
+                    user_id: row.get(0)?,
+                    thread_id: row.get(1)?,
+                    chat_id: row.get(2)?,
+                    display_name: row.get(3)?,
+                    group_chat_id: row.get(4)?,
+                    topic_name: row.get(5)?,
+                    session_id: row.get(6)?,
+                })
+            })
+            .map_err(|e| Error::State(format!("query chat_bindings: {e}")))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(RuntimeState {
+            sessions,
+            window_bindings,
+            chat_bindings,
+        })
+    }
+
+    /// Save V2 runtime state (sessions + window_bindings + chat_bindings).
+    pub async fn save_runtime(&self, rt: &RuntimeState) -> Result<()> {
+        let db = self.db.lock().await;
+        db.execute_batch("BEGIN")
+            .map_err(|e| Error::State(format!("begin: {e}")))?;
+
+        let r = (|| -> std::result::Result<(), rusqlite::Error> {
+            // Sessions
+            db.execute("DELETE FROM sessions", [])?;
+            {
+                let mut stmt = db.prepare_cached(
+                    "INSERT INTO sessions (session_id, cwd, agent_type, created_at)
+                     VALUES (?1, ?2, ?3, ?4)",
+                )?;
+                for si in rt.sessions.values() {
+                    stmt.execute(params![&si.session_id, &si.cwd, &si.agent_type, ""])?;
+                }
+            }
+
+            // Window bindings
+            db.execute("DELETE FROM window_bindings", [])?;
+            {
+                let mut stmt = db.prepare_cached(
+                    "INSERT INTO window_bindings
+                        (window_id, session_id, cwd, agent_type, window_name)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                )?;
+                for wb in rt.window_bindings.values() {
+                    stmt.execute(params![
+                        &wb.window_id,
+                        &wb.session_id,
+                        &wb.cwd,
+                        &wb.agent_type,
+                        &wb.window_name,
+                    ])?;
+                }
+            }
+
+            // Chat bindings
+            db.execute("DELETE FROM chat_bindings", [])?;
+            {
+                let mut stmt = db.prepare_cached(
+                    "INSERT INTO chat_bindings
+                        (user_id, thread_id, chat_id, display_name, group_chat_id, topic_name, session_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                )?;
+                for cb in &rt.chat_bindings {
+                    stmt.execute(params![
+                        cb.user_id,
+                        cb.thread_id,
+                        cb.chat_id,
+                        &cb.display_name,
+                        cb.group_chat_id,
+                        cb.topic_name,
+                        &cb.session_id,
+                    ])?;
+                }
+            }
+            Ok(())
+        })();
+
+        match r {
+            Ok(()) => {
+                db.execute_batch("COMMIT")
+                    .map_err(|e| Error::State(format!("commit: {e}")))?;
+                // Write sessions.json mirror for the monitor to read.
+                let sessions_path = self.atim_dir.join("sessions.json");
+                if let Ok(data) = serde_json::to_string(&rt.sessions) {
+                    let tmp = sessions_path.with_extension("json.tmp");
+                    if tokio::fs::write(&tmp, &data).await.is_ok() {
+                        let _ = tokio::fs::rename(&tmp, &sessions_path).await;
+                    }
+                }
+                Ok(())
+            }
+            Err(e) => {
+                db.execute_batch("ROLLBACK").ok();
+                Err(Error::State(format!("save_runtime failed: {e}")))
+            }
+        }
+    }
+
+    // ── V2 helpers: incremental mutations ──
+
+    /// Upsert a session into the sessions table.
+    pub async fn upsert_session(&self, session: &SessionInfo) -> Result<()> {
+        let db = self.db.lock().await;
+        db.execute(
+            "INSERT INTO sessions (session_id, cwd, agent_type, created_at)
+             VALUES (?1, ?2, ?3, datetime('now'))
+             ON CONFLICT(session_id) DO UPDATE
+                 SET cwd=excluded.cwd, agent_type=excluded.agent_type",
+            params![&session.session_id, &session.cwd, &session.agent_type],
+        )
+        .map_err(|e| Error::State(format!("upsert_session: {e}")))?;
+        Ok(())
+    }
+
+    /// Upsert a window binding.
+    pub async fn upsert_window_binding(&self, wb: &WindowBinding) -> Result<()> {
+        let db = self.db.lock().await;
+        db.execute(
+            "INSERT INTO window_bindings (window_id, session_id, cwd, agent_type, window_name)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(window_id) DO UPDATE
+                 SET session_id=excluded.session_id, cwd=excluded.cwd,
+                     agent_type=excluded.agent_type, window_name=excluded.window_name",
+            params![
+                &wb.window_id,
+                &wb.session_id,
+                &wb.cwd,
+                &wb.agent_type,
+                &wb.window_name
+            ],
+        )
+        .map_err(|e| Error::State(format!("upsert_window_binding: {e}")))?;
+        Ok(())
+    }
+
+    /// Upsert a chat binding.
+    ///
+    /// Enforces the **one session → one chat** invariant: when the binding
+    /// is assigned a non-empty `session_id`, that session_id is cleared from
+    /// all other chat_bindings (so no two chats share the same session).
+    pub async fn upsert_chat_binding(&self, cb: &ChatBinding) -> Result<()> {
+        let db = self.db.lock().await;
+        db.execute_batch("BEGIN")
+            .map_err(|e| Error::State(format!("begin: {e}")))?;
+
+        let r = (|| -> std::result::Result<(), rusqlite::Error> {
+            // Upsert the target binding
+            db.execute(
+                "INSERT INTO chat_bindings
+                    (user_id, thread_id, chat_id, display_name, group_chat_id, topic_name, session_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(user_id, thread_id, chat_id) DO UPDATE
+                     SET display_name=excluded.display_name,
+                         group_chat_id=excluded.group_chat_id,
+                         topic_name=excluded.topic_name,
+                         session_id=excluded.session_id",
+                params![
+                    cb.user_id, cb.thread_id, cb.chat_id,
+                    &cb.display_name, cb.group_chat_id, cb.topic_name,
+                    &cb.session_id,
+                ],
+            )?;
+
+            // Enforce one-session-per-chat: clear this session_id from all
+            // *other* chat_bindings (different user_id OR thread_id OR chat_id).
+            if !cb.session_id.is_empty() {
+                let affected = db.execute(
+                    "UPDATE chat_bindings SET session_id = ''
+                     WHERE session_id = ?1
+                       AND NOT (user_id = ?2 AND thread_id = ?3 AND chat_id = ?4)",
+                    params![&cb.session_id, cb.user_id, cb.thread_id, cb.chat_id],
+                )?;
+                if affected > 0 {
+                    tracing::info!(
+                        "Cleared session_id '{}' from {affected} other chat_binding(s) to enforce one-session-per-chat",
+                        &cb.session_id,
+                    );
+                }
+            }
+            Ok(())
+        })();
+
+        match r {
+            Ok(()) => {
+                db.execute_batch("COMMIT")
+                    .map_err(|e| Error::State(format!("commit: {e}")))?;
+                Ok(())
+            }
+            Err(e) => {
+                db.execute_batch("ROLLBACK").ok();
+                Err(Error::State(format!("upsert_chat_binding: {e}")))
+            }
+        }
+    }
+
+    /// Remove a window binding by window_id.
+    pub async fn remove_window_binding(&self, window_id: &str) -> Result<()> {
+        let db = self.db.lock().await;
+        db.execute(
+            "DELETE FROM window_bindings WHERE window_id = ?1",
+            params![window_id],
+        )
+        .map_err(|e| Error::State(format!("remove_window_binding: {e}")))?;
+        Ok(())
+    }
+
+    /// Clear a session_id from all window bindings (session stolen by another window).
+    pub async fn clear_session_from_windows(&self, session_id: &str) -> Result<()> {
+        let db = self.db.lock().await;
+        db.execute(
+            "UPDATE window_bindings SET session_id = '' WHERE session_id = ?1",
+            params![session_id],
+        )
+        .map_err(|e| Error::State(format!("clear_session_from_windows: {e}")))?;
+        Ok(())
+    }
+
+    /// Load session_map.json (hook output) and then delete the file.
+    /// Returns the map or empty if no file/parse error.
+    pub async fn consume_hook_session_map(&self) -> Result<HashMap<String, String>> {
+        let path = self.atim_dir.join("session_map.json");
+        let map = if path.exists() {
+            match tokio::fs::read_to_string(&path)
+                .await
+                .map(|data| serde_json::from_str::<HashMap<String, String>>(&data).ok())
+            {
+                Ok(Some(m)) => m,
+                _ => HashMap::new(),
+            }
+        } else {
+            HashMap::new()
+        };
+        // Delete the file after reading (it's a transient pipe)
+        let _ = tokio::fs::remove_file(&path).await;
+        Ok(map)
+    }
+
     // ── Config TOML persistence ──
 
     /// Save config values to `config.toml`.
     pub async fn save_config(&self, config: &ConfigToml) -> Result<()> {
-        let atim_dir = self
-            .db_path
-            .parent()
-            .ok_or_else(|| Error::State("no parent".into()))?;
         let bytes = toml::to_string_pretty(config)
             .map_err(|e| Error::State(format!("toml serialize: {e}")))?;
-        tokio::fs::write(atim_dir.join("config.toml"), bytes.as_bytes()).await?;
+        tokio::fs::write(self.atim_dir.join("config.toml"), bytes.as_bytes()).await?;
         Ok(())
     }
 
@@ -764,186 +1133,6 @@ impl Store {
     }
 }
 
-// ── Config TOML types ──
-
-/// Config values persisted in `~/.atim/config.toml`.
-///
-/// Structured with TOML table sections:
-/// ```toml
-/// [im]
-/// backend = "feishu"
-///
-/// [im.feishu]
-/// app_id = "..."
-/// app_secret = "..."
-///
-/// [im.telegram]
-/// token = "..."
-/// allowed_users = "..."
-///
-/// [agent]
-/// command = "claude"
-///
-/// [tmux]
-/// session = "atim"
-///
-/// [monitor]
-/// poll_interval = "2.0"
-///
-/// [display]
-/// show_user_messages = "true"
-/// show_tool_calls = "true"
-/// show_hidden_dirs = false
-///
-/// [openai]
-/// api_key = "..."
-/// base_url = "https://api.openai.com/v1"
-/// ```
-///
-/// Note: `atim_dir` is NOT stored here — it is set via env var `ATIM_DIR` only.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct ConfigToml {
-    #[serde(default)]
-    pub im: ImSection,
-    #[serde(default)]
-    pub agent: AgentSection,
-    #[serde(default)]
-    pub tmux: TmuxSection,
-    #[serde(default)]
-    pub monitor: MonitorSection,
-    #[serde(default)]
-    pub display: DisplaySection,
-    #[serde(default)]
-    pub openai: OpenaiSection,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ImSection {
-    #[serde(default = "default_im_backend")]
-    pub backend: String,
-    #[serde(default)]
-    pub feishu: FeishuImSection,
-    #[serde(default)]
-    pub telegram: TelegramImSection,
-}
-fn default_im_backend() -> String {
-    "telegram".into()
-}
-impl Default for ImSection {
-    fn default() -> Self {
-        Self {
-            backend: "telegram".into(),
-            feishu: FeishuImSection::default(),
-            telegram: TelegramImSection::default(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct FeishuImSection {
-    #[serde(default)]
-    pub app_id: String,
-    #[serde(default)]
-    pub app_secret: String,
-}
-
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct TelegramImSection {
-    #[serde(default)]
-    pub token: String,
-    #[serde(default)]
-    pub allowed_users: String,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct AgentSection {
-    #[serde(default = "default_agent_command")]
-    pub command: String,
-}
-fn default_agent_command() -> String {
-    "claude".into()
-}
-impl Default for AgentSection {
-    fn default() -> Self {
-        Self {
-            command: "claude".into(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct TmuxSection {
-    #[serde(default = "default_tmux_session")]
-    pub session: String,
-}
-fn default_tmux_session() -> String {
-    "atim".into()
-}
-impl Default for TmuxSection {
-    fn default() -> Self {
-        Self {
-            session: "atim".into(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct MonitorSection {
-    #[serde(default = "default_poll_interval")]
-    pub poll_interval: String,
-}
-fn default_poll_interval() -> String {
-    "2.0".into()
-}
-impl Default for MonitorSection {
-    fn default() -> Self {
-        Self {
-            poll_interval: "2.0".into(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct DisplaySection {
-    #[serde(default = "default_true")]
-    pub show_user_messages: String,
-    #[serde(default = "default_true")]
-    pub show_tool_calls: String,
-    #[serde(default)]
-    pub show_hidden_dirs: bool,
-}
-fn default_true() -> String {
-    "true".into()
-}
-impl Default for DisplaySection {
-    fn default() -> Self {
-        Self {
-            show_user_messages: "true".into(),
-            show_tool_calls: "true".into(),
-            show_hidden_dirs: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct OpenaiSection {
-    #[serde(default)]
-    pub api_key: String,
-    #[serde(default = "default_openai_base_url")]
-    pub base_url: String,
-}
-fn default_openai_base_url() -> String {
-    "https://api.openai.com/v1".into()
-}
-impl Default for OpenaiSection {
-    fn default() -> Self {
-        Self {
-            api_key: String::new(),
-            base_url: "https://api.openai.com/v1".into(),
-        }
-    }
-}
-
 /// Feishu ID map file format (for migration).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FeishuIdMapFile {
@@ -954,3 +1143,198 @@ pub struct FeishuIdMapFile {
 
 /// Backward compat alias.
 pub type StateManager = Store;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atim_core::session::{ChatBinding, RuntimeState, SessionInfo, WindowBinding};
+
+    /// Open a fresh in-memory-ish store in a unique temp directory.
+    async fn test_store(suffix: &str) -> Store {
+        let dir = std::env::temp_dir().join(format!("atim-persist-test-{suffix}"));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        Store::open(&dir).await.expect("open store")
+    }
+
+    #[tokio::test]
+    async fn test_session_map_empty_by_default() {
+        let store = test_store("sm-empty").await;
+        let map = store.load_session_map().await.unwrap();
+        assert!(map.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_session_map_roundtrip() {
+        let store = test_store("sm-rt").await;
+        let mut map = HashMap::new();
+        map.insert("@0".into(), "sess-aaa-111".into());
+        map.insert("@1".into(), "sess-bbb-222".into());
+        store.save_session_map(&map).await.unwrap();
+        let loaded = store.load_session_map().await.unwrap();
+        assert_eq!(loaded, map);
+    }
+
+    #[tokio::test]
+    async fn test_session_map_overwrite() {
+        let store = test_store("sm-ow").await;
+        let mut map = HashMap::new();
+        map.insert("@0".into(), "sess-old".into());
+        store.save_session_map(&map).await.unwrap();
+
+        let mut map2 = HashMap::new();
+        map2.insert("@0".into(), "sess-new".into());
+        store.save_session_map(&map2).await.unwrap();
+
+        let loaded = store.load_session_map().await.unwrap();
+        assert_eq!(loaded.get("@0").map(String::as_str), Some("sess-new"));
+        assert_eq!(loaded.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_monitor_offsets_roundtrip() {
+        let store = test_store("mo-rt").await;
+        let mut offsets = HashMap::new();
+        offsets.insert("sess-abc".into(), 1024_u64);
+        offsets.insert("sess-def".into(), 4096_u64);
+        store.save_monitor_offsets(&offsets).await.unwrap();
+        let loaded = store.load_monitor_offsets().await.unwrap();
+        assert_eq!(loaded, offsets);
+    }
+
+    #[tokio::test]
+    async fn test_upsert_offset_insert_and_update() {
+        let store = test_store("uo-iu").await;
+        store.upsert_offset("my-session", 512).await.unwrap();
+        assert_eq!(
+            store
+                .load_monitor_offsets()
+                .await
+                .unwrap()
+                .get("my-session")
+                .copied(),
+            Some(512)
+        );
+
+        // Update
+        store.upsert_offset("my-session", 1024).await.unwrap();
+        assert_eq!(
+            store
+                .load_monitor_offsets()
+                .await
+                .unwrap()
+                .get("my-session")
+                .copied(),
+            Some(1024)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_remove_offset() {
+        let store = test_store("ro").await;
+        store.upsert_offset("sess-x", 100).await.unwrap();
+        store.remove_offset("sess-x").await.unwrap();
+        assert!(
+            !store
+                .load_monitor_offsets()
+                .await
+                .unwrap()
+                .contains_key("sess-x")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_state_roundtrip() {
+        let store = test_store("rt-rt").await;
+
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            "sess-1".into(),
+            SessionInfo {
+                session_id: "sess-1".into(),
+                cwd: "/home/user/proj".into(),
+                agent_type: "claude".into(),
+            },
+        );
+        let mut window_bindings = HashMap::new();
+        window_bindings.insert(
+            "@0".into(),
+            WindowBinding {
+                window_id: "@0".into(),
+                session_id: "sess-1".into(),
+                cwd: "/home/user/proj".into(),
+                agent_type: "claude".into(),
+                window_name: "my-project".into(),
+            },
+        );
+        let chat_bindings = vec![ChatBinding {
+            user_id: 12345,
+            thread_id: 0,
+            chat_id: 67890,
+            display_name: "my-project".into(),
+            group_chat_id: None,
+            topic_name: None,
+            session_id: "sess-1".into(),
+        }];
+
+        let rt = RuntimeState {
+            sessions,
+            window_bindings,
+            chat_bindings,
+        };
+        store.save_runtime(&rt).await.unwrap();
+
+        let loaded = store.load_runtime().await.unwrap();
+        assert_eq!(loaded.sessions.len(), 1);
+        assert_eq!(loaded.window_bindings.len(), 1);
+        assert_eq!(loaded.chat_bindings.len(), 1);
+        assert_eq!(loaded.chat_bindings[0].session_id, "sess-1");
+        assert_eq!(loaded.window_bindings["@0"].window_name, "my-project");
+        assert_eq!(loaded.sessions["sess-1"].cwd, "/home/user/proj");
+    }
+
+    #[tokio::test]
+    async fn test_runtime_save_is_transactional() {
+        // Saving with multiple entries should be all-or-nothing.
+        let store = test_store("rt-tx").await;
+
+        let mut sessions = HashMap::new();
+        for i in 0..5 {
+            sessions.insert(
+                format!("sess-{i}"),
+                SessionInfo {
+                    session_id: format!("sess-{i}"),
+                    cwd: "/".into(),
+                    agent_type: "claude".into(),
+                },
+            );
+        }
+        let rt = RuntimeState {
+            sessions,
+            window_bindings: HashMap::new(),
+            chat_bindings: vec![],
+        };
+        store.save_runtime(&rt).await.unwrap();
+
+        // Overwrite with fewer entries
+        let rt2 = RuntimeState {
+            sessions: HashMap::from([(
+                "sess-0".into(),
+                SessionInfo {
+                    session_id: "sess-0".into(),
+                    cwd: "/".into(),
+                    agent_type: "claude".into(),
+                },
+            )]),
+            window_bindings: HashMap::new(),
+            chat_bindings: vec![],
+        };
+        store.save_runtime(&rt2).await.unwrap();
+
+        let loaded = store.load_runtime().await.unwrap();
+        assert_eq!(
+            loaded.sessions.len(),
+            1,
+            "old sessions should be gone after overwrite"
+        );
+    }
+}

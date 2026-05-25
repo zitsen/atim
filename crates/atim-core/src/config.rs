@@ -3,85 +3,152 @@ use std::path::PathBuf;
 use crate::agent::AgentRegistry;
 use crate::error::{Error, Result};
 
-#[derive(Debug, Clone, serde::Deserialize)]
-struct ConfigToml {
+// ── Config TOML types ──
+// Canonical config.toml representation shared with atim-state for persistence.
+
+/// Config values stored in `~/.atim/config.toml`.
+/// Fields default to empty string / false when absent; env vars take precedence.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ConfigToml {
     #[serde(default)]
-    im: ImToml,
+    pub im: ImSection,
     #[serde(default)]
-    agent: AgentToml,
+    pub agent: AgentSection,
     #[serde(default)]
-    tmux: TmuxToml,
+    pub tmux: TmuxSection,
     #[serde(default)]
-    monitor: MonitorToml,
+    pub monitor: MonitorSection,
     #[serde(default)]
-    display: DisplayToml,
+    pub display: DisplaySection,
     #[serde(default)]
-    openai: OpenaiToml,
+    pub openai: OpenaiSection,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(default)]
-#[derive(Default)]
-struct ImToml {
-    backend: Option<String>,
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ImSection {
+    #[serde(default = "_default_im_backend")]
+    pub backend: String,
     #[serde(default)]
-    feishu: FeishuImToml,
+    pub feishu: FeishuImSection,
     #[serde(default)]
-    telegram: TelegramImToml,
+    pub telegram: TelegramImSection,
+}
+fn _default_im_backend() -> String {
+    "telegram".into()
+}
+impl Default for ImSection {
+    fn default() -> Self {
+        Self {
+            backend: "telegram".into(),
+            feishu: Default::default(),
+            telegram: Default::default(),
+        }
+    }
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(default)]
-#[derive(Default)]
-struct FeishuImToml {
-    app_id: Option<String>,
-    app_secret: Option<String>,
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct FeishuImSection {
+    #[serde(default)]
+    pub app_id: String,
+    #[serde(default)]
+    pub app_secret: String,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(default)]
-#[derive(Default)]
-struct TelegramImToml {
-    token: Option<String>,
-    allowed_users: Option<String>,
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct TelegramImSection {
+    #[serde(default)]
+    pub token: String,
+    #[serde(default)]
+    pub allowed_users: String,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(default)]
-#[derive(Default)]
-struct AgentToml {
-    command: Option<String>,
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AgentSection {
+    #[serde(default = "_default_agent_command")]
+    pub command: String,
+}
+fn _default_agent_command() -> String {
+    "claude".into()
+}
+impl Default for AgentSection {
+    fn default() -> Self {
+        Self {
+            command: "claude".into(),
+        }
+    }
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(default)]
-#[derive(Default)]
-struct TmuxToml {
-    session: Option<String>,
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TmuxSection {
+    #[serde(default = "_default_tmux_session")]
+    pub session: String,
+}
+fn _default_tmux_session() -> String {
+    "atim".into()
+}
+impl Default for TmuxSection {
+    fn default() -> Self {
+        Self {
+            session: "atim".into(),
+        }
+    }
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(default)]
-#[derive(Default)]
-struct MonitorToml {
-    poll_interval: Option<String>,
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MonitorSection {
+    #[serde(default = "_default_poll_interval")]
+    pub poll_interval: String,
+}
+fn _default_poll_interval() -> String {
+    "2.0".into()
+}
+impl Default for MonitorSection {
+    fn default() -> Self {
+        Self {
+            poll_interval: "2.0".into(),
+        }
+    }
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(default)]
-#[derive(Default)]
-struct DisplayToml {
-    show_user_messages: Option<String>,
-    show_tool_calls: Option<String>,
-    show_hidden_dirs: Option<bool>,
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DisplaySection {
+    #[serde(default = "_default_true_str")]
+    pub show_user_messages: String,
+    #[serde(default = "_default_true_str")]
+    pub show_tool_calls: String,
+    #[serde(default)]
+    pub show_hidden_dirs: bool,
+}
+fn _default_true_str() -> String {
+    "true".into()
+}
+impl Default for DisplaySection {
+    fn default() -> Self {
+        Self {
+            show_user_messages: "true".into(),
+            show_tool_calls: "true".into(),
+            show_hidden_dirs: false,
+        }
+    }
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(default)]
-#[derive(Default)]
-struct OpenaiToml {
-    api_key: Option<String>,
-    base_url: Option<String>,
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OpenaiSection {
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default = "_default_openai_base_url")]
+    pub base_url: String,
+}
+fn _default_openai_base_url() -> String {
+    "https://api.openai.com/v1".into()
+}
+impl Default for OpenaiSection {
+    fn default() -> Self {
+        Self {
+            api_key: String::new(),
+            base_url: "https://api.openai.com/v1".into(),
+        }
+    }
 }
 
 /// Application configuration loaded from environment variables.
@@ -137,7 +204,12 @@ impl Config {
         let telegram_bot_token = std::env::var("ATIM_TELEGRAM_TOKEN")
             .or_else(|_| std::env::var("TELEGRAM_BOT_TOKEN"))
             .ok()
-            .or_else(|| toml_cfg.as_ref().and_then(|c| c.im.telegram.token.clone()))
+            .or_else(|| {
+                toml_cfg
+                    .as_ref()
+                    .map(|c| c.im.telegram.token.clone())
+                    .filter(|s| !s.is_empty())
+            })
             .unwrap_or_default();
 
         let allowed_users_str = std::env::var("ATIM_ALLOWED_USERS")
@@ -146,7 +218,8 @@ impl Config {
             .or_else(|| {
                 toml_cfg
                     .as_ref()
-                    .and_then(|c| c.im.telegram.allowed_users.clone())
+                    .map(|c| c.im.telegram.allowed_users.clone())
+                    .filter(|s| !s.is_empty())
             })
             .unwrap_or_default();
 
@@ -164,20 +237,31 @@ impl Config {
         let telegram_configured = !telegram_bot_token.is_empty();
         let im_backend = std::env::var("ATIM_IM_BACKEND")
             .ok()
-            .or_else(|| toml_cfg.as_ref().and_then(|c| c.im.backend.clone()))
+            .or_else(|| {
+                toml_cfg
+                    .as_ref()
+                    .map(|c| c.im.backend.clone())
+                    .filter(|s| !s.is_empty())
+            })
             .unwrap_or_else(|| "telegram".into());
 
         // ── Feishu ──
         let feishu_app_id = std::env::var("ATIM_FEISHU_APP_ID")
             .ok()
-            .or_else(|| toml_cfg.as_ref().and_then(|c| c.im.feishu.app_id.clone()))
+            .or_else(|| {
+                toml_cfg
+                    .as_ref()
+                    .map(|c| c.im.feishu.app_id.clone())
+                    .filter(|s| !s.is_empty())
+            })
             .unwrap_or_default();
         let feishu_app_secret = std::env::var("ATIM_FEISHU_APP_SECRET")
             .ok()
             .or_else(|| {
                 toml_cfg
                     .as_ref()
-                    .and_then(|c| c.im.feishu.app_secret.clone())
+                    .map(|c| c.im.feishu.app_secret.clone())
+                    .filter(|s| !s.is_empty())
             })
             .unwrap_or_default();
         let feishu_webhook_port = std::env::var("ATIM_FEISHU_WEBHOOK_PORT")
@@ -199,12 +283,22 @@ impl Config {
 
         let tmux_session_name = std::env::var("ATIM_TMUX_SESSION")
             .ok()
-            .or_else(|| toml_cfg.as_ref().and_then(|c| c.tmux.session.clone()))
+            .or_else(|| {
+                toml_cfg
+                    .as_ref()
+                    .map(|c| c.tmux.session.clone())
+                    .filter(|s| !s.is_empty())
+            })
             .unwrap_or_else(|| "atim".into());
 
         let agent_command = std::env::var("ATIM_AGENT_COMMAND")
             .ok()
-            .or_else(|| toml_cfg.as_ref().and_then(|c| c.agent.command.clone()))
+            .or_else(|| {
+                toml_cfg
+                    .as_ref()
+                    .map(|c| c.agent.command.clone())
+                    .filter(|s| !s.is_empty())
+            })
             .unwrap_or_else(|| "claude".into());
         let agent_registry = AgentRegistry::from_env();
 
@@ -219,7 +313,8 @@ impl Config {
             .or_else(|| {
                 toml_cfg
                     .as_ref()
-                    .and_then(|c| c.monitor.poll_interval.clone())
+                    .map(|c| c.monitor.poll_interval.clone())
+                    .filter(|s| !s.is_empty())
             })
             .unwrap_or_else(|| "2.0".into())
             .parse::<f64>()
@@ -231,7 +326,8 @@ impl Config {
             .or_else(|| {
                 toml_cfg
                     .as_ref()
-                    .and_then(|c| c.display.show_user_messages.clone())
+                    .map(|c| c.display.show_user_messages.clone())
+                    .filter(|s| !s.is_empty())
             })
             .unwrap_or_else(|| "true".into())
             .to_lowercase()
@@ -243,7 +339,8 @@ impl Config {
             .or_else(|| {
                 toml_cfg
                     .as_ref()
-                    .and_then(|c| c.display.show_tool_calls.clone())
+                    .map(|c| c.display.show_tool_calls.clone())
+                    .filter(|s| !s.is_empty())
             })
             .unwrap_or_else(|| "true".into())
             .to_lowercase()
@@ -251,19 +348,33 @@ impl Config {
         let show_hidden_dirs = std::env::var("ATIM_SHOW_HIDDEN_DIRS")
             .ok()
             .map(|v| v.to_lowercase() == "true")
-            .or_else(|| toml_cfg.as_ref().and_then(|c| c.display.show_hidden_dirs))
-            .unwrap_or(false);
+            .unwrap_or_else(|| {
+                toml_cfg
+                    .as_ref()
+                    .map(|c| c.display.show_hidden_dirs)
+                    .unwrap_or(false)
+            });
 
         let openai_api_key = std::env::var("ATIM_OPENAI_API_KEY")
             .or_else(|_| std::env::var("OPENAI_API_KEY"))
             .ok()
-            .or_else(|| toml_cfg.as_ref().and_then(|c| c.openai.api_key.clone()))
+            .or_else(|| {
+                toml_cfg
+                    .as_ref()
+                    .map(|c| c.openai.api_key.clone())
+                    .filter(|s| !s.is_empty())
+            })
             .unwrap_or_default();
 
         let openai_base_url = std::env::var("ATIM_OPENAI_BASE_URL")
             .or_else(|_| std::env::var("OPENAI_BASE_URL"))
             .ok()
-            .or_else(|| toml_cfg.as_ref().and_then(|c| c.openai.base_url.clone()))
+            .or_else(|| {
+                toml_cfg
+                    .as_ref()
+                    .map(|c| c.openai.base_url.clone())
+                    .filter(|s| !s.is_empty())
+            })
             .unwrap_or_else(|| "https://api.openai.com/v1".into());
 
         Ok(Self {
@@ -312,8 +423,14 @@ fn load_config_toml(atim_dir: &std::path::Path) -> Option<ConfigToml> {
     if !path.exists() {
         return None;
     }
-    let data = std::fs::read_to_string(path).ok()?;
-    toml::from_str::<ConfigToml>(&data).ok()
+    let data = std::fs::read_to_string(&path).ok()?;
+    match toml::from_str::<ConfigToml>(&data) {
+        Ok(cfg) => Some(cfg),
+        Err(e) => {
+            tracing::warn!("Failed to parse {}: {e}", path.display());
+            None
+        }
+    }
 }
 
 fn resolve_atim_dir() -> PathBuf {
