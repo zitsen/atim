@@ -1195,13 +1195,16 @@ async fn handle_card_action(adapter: &FeishuAdapter, payload: &serde_json::Value
         .or_else(|| event["message_id"].as_str())
         .unwrap_or("");
 
-    // Determine chat_type from explicit field or infer from chat_id prefix
+    // Determine chat_type from explicit field (Feishu card actions don't send
+    // chat_type, so this will default to p2p unless Feishu adds the field).
+    // Do NOT use the chat_id prefix ("oc_" / "on_") since Feishu uses "oc_" for
+    // both p2p and group chats — that would misclassify p2p as group.
     let explicit_chat_type = event["chat_type"].as_str().unwrap_or("p2p");
-    let is_group = explicit_chat_type == "group" || chat_id.starts_with("oc_");
+    let is_group = explicit_chat_type == "group";
     let chat_type = if is_group { "group" } else { "p2p" };
 
-    tracing::debug!(
-        "Card action event: open_id={open_id} chat_id={chat_id} chat_type={chat_type} msg_id={message_id}"
+    tracing::warn!(
+        "Card action event: open_id={open_id} chat_id={chat_id} chat_type={chat_type} msg_id={message_id}",
     );
 
     // Feishu card action values are JSON objects — extract the "action" field
@@ -1220,6 +1223,13 @@ async fn handle_card_action(adapter: &FeishuAdapter, payload: &serde_json::Value
     // for messages sent to topic threads), or root_id in the event envelope.
     let root_id = event["root_id"].as_str().filter(|s| !s.is_empty());
     let ctx_thread_id = context["thread_id"].as_str().filter(|s| !s.is_empty());
+
+    tracing::warn!(
+        "Card action thread resolution: root_id={:?} ctx_thread_id={:?} is_group={is_group} chat_id={chat_id} raw_event={}",
+        root_id,
+        ctx_thread_id,
+        serde_json::to_string(event).unwrap_or_default(),
+    );
 
     let thread_id = if let Some(tid) = ctx_thread_id.or(root_id) {
         Some(adapter.register_thread(tid).await)

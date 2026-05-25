@@ -2937,6 +2937,10 @@ impl Server {
         }
 
         // Non-browse callbacks: validate callback context
+        tracing::debug!(
+            "Validating callback token: action={action} contexts_count={}",
+            self.callback_contexts.lock().await.len(),
+        );
         let mut ctx_lock = self.callback_contexts.lock().await;
         let ctx = Self::validate_callback_token(&mut ctx_lock, token);
         drop(ctx_lock);
@@ -2944,7 +2948,10 @@ impl Server {
         let ctx = match ctx {
             Some(c) => c,
             None => {
-                tracing::warn!("Stale or invalid callback token: {data}");
+                tracing::warn!(
+                    "Stale or invalid callback token: {data} contexts_count_before={}",
+                    self.callback_contexts.lock().await.len()
+                );
                 if let Some(qid) = callback_query_id {
                     let _ = self
                         .im_adapter
@@ -3048,6 +3055,11 @@ impl Server {
             }
             "agent" => {
                 let agent_name = arg.unwrap_or("").to_string();
+                tracing::debug!(
+                    "Agent callback: user={user_id} chat={} thread={thread_id} agent={agent_name} pending_count={}",
+                    target.chat_id.0,
+                    self.pending_messages.lock().await.len(),
+                );
                 if !agent_name.is_empty() {
                     self.pending_agents
                         .lock()
