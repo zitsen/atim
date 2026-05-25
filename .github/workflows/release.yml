@@ -68,20 +68,73 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      changelog: ${{ steps.changelog.outputs.changelog }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Get version from tag
         id: version
         run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
 
+      - name: Generate changelog from conventional commits
+        id: changelog
+        run: |
+          PREV_TAG=$(git tag --sort=-version:refname | grep -E '^v[0-9]' | sed -n '2p' || true)
+          if [ -z "$PREV_TAG" ]; then
+            RANGE=""
+          else
+            RANGE="${PREV_TAG}.."
+          fi
+
+          # Build changelog sections from conventional commits
+          CHANGELOG=""
+          add_section() {
+            local label="$1"
+            local emoji="$2"
+            local commits="$3"
+            if [ -n "$commits" ]; then
+              CHANGELOG+="## ${emoji} ${label}\n"
+              while IFS= read -r line; do
+                [ -z "$line" ] && continue
+                # Strip the type prefix and format as list item
+                msg=$(echo "$line" | sed -E 's/^(feat|fix|docs|refactor|test|chore|perf|style)\(?[^)]*\)?:\s*//')
+                CHANGELOG+="- ${msg}\n"
+              done <<< "$commits"
+              CHANGELOG+="\n"
+            fi
+          }
+
+          FEATS=$(git log ${RANGE}--pretty=format:'%s' --grep='^feat' || true)
+          FIXES=$(git log ${RANGE}--pretty=format:'%s' --grep='^fix' || true)
+          DOCS=$(git log ${RANGE}--pretty=format:'%s' --grep='^docs' || true)
+          REFACTOR=$(git log ${RANGE}--pretty=format:'%s' --grep='^refactor' || true)
+          PERF=$(git log ${RANGE}--pretty=format:'%s' --grep='^perf' || true)
+          CHORES=$(git log ${RANGE}--pretty=format:'%s' --grep='^chore' || true)
+          TESTS=$(git log ${RANGE}--pretty=format:'%s' --grep='^test' || true)
+
+          add_section "Features" "✨" "$FEATS"
+          add_section "Bug Fixes" "🐛" "$FIXES"
+          add_section "Documentation" "📝" "$DOCS"
+          add_section "Refactoring" "♻️" "$REFACTOR"
+          add_section "Performance" "⚡️" "$PERF"
+          add_section "Chores" "🔧" "$CHORES"
+          add_section "Tests" "✅" "$TESTS"
+
+          # Escape for JSON
+          CHANGELOG="${CHANGELOG//'%'/'%25'}"
+          CHANGELOG="${CHANGELOG//$'\n'/'%0A'}"
+          CHANGELOG="${CHANGELOG//$'\r'/'%0D'}"
+          echo "changelog=${CHANGELOG}" >> $GITHUB_OUTPUT
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           name: v${{ steps.version.outputs.version }}
-          draft: true
+          body: ${{ steps.changelog.outputs.changelog }}
+          draft: false
           prerelease: false
-          generate_release_notes: true
 
   upload:
     name: Upload assets
