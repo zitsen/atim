@@ -39,6 +39,8 @@ ATIM_CONFIG_FILE="${ATIM_HOME}/config.toml"
 WORK_DIR=""
 ATIM_RESOLVED_VERSION=""
 ZOXIDE_RESOLVED_VERSION=""
+ATIM_DOWNLOAD_URL=""
+ZOXIDE_DOWNLOAD_URL=""
 IM_BACKEND=""
 TELEGRAM_TOKEN=""
 ALLOWED_USERS=""
@@ -113,7 +115,7 @@ fetch_latest_version() {
   local repo="$1"
   local tag
   tag="$(curl -fsSL "https://api.github.com/repos/${repo}/releases/latest" \
-    | grep -m1 '"tag_name"' | cut -d'"' -f4)"
+    | grep '"tag_name"' | cut -d'"' -f4)"
   [[ -n "$tag" ]] || {
     err "failed to fetch latest release from ${repo}"
     exit 1
@@ -134,7 +136,7 @@ resolve_atim_url() {
   fi
 
   ATIM_RESOLVED_VERSION="$version"
-  echo "https://github.com/${ATIM_REPO}/releases/download/v${version}/atim-${target}.tar.gz"
+  ATIM_DOWNLOAD_URL="https://github.com/${ATIM_REPO}/releases/download/v${version}/atim-${target}.tar.gz"
 }
 
 resolve_zoxide_url() {
@@ -148,7 +150,7 @@ resolve_zoxide_url() {
   fi
 
   ZOXIDE_RESOLVED_VERSION="$version"
-  echo "https://github.com/${ZOXIDE_REPO}/releases/download/v${version}/zoxide-${version}-${target}.tar.gz"
+  ZOXIDE_DOWNLOAD_URL="https://github.com/${ZOXIDE_REPO}/releases/download/v${version}/zoxide-${version}-${target}.tar.gz"
 }
 
 # ── Install binaries ──
@@ -159,7 +161,8 @@ install_atim_binary() {
   ensure_work_dir
   mkdir -p "$INSTALL_DIR"
 
-  url="$(resolve_atim_url)"
+  resolve_atim_url
+  url="$ATIM_DOWNLOAD_URL"
   archive_name="$(basename "$url")"
   archive_path="${WORK_DIR}/${archive_name}"
   sha256_path="${archive_path}.sha256"
@@ -194,7 +197,8 @@ install_zoxide_binary() {
   ensure_work_dir
   mkdir -p "$INSTALL_DIR"
 
-  url="$(resolve_zoxide_url)"
+  resolve_zoxide_url
+  url="$ZOXIDE_DOWNLOAD_URL"
   archive_name="$(basename "$url")"
   archive_path="${WORK_DIR}/${archive_name}"
   extract_dir="${WORK_DIR}/zoxide-extract"

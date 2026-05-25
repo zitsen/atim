@@ -1018,7 +1018,14 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
     // For group chats, fetch the chat name and emit TopicCreated so the
     // server can use it as the window/topic name (e.g. "atim" instead of
     // "atim-<user_id>").
-    if let Some(ref cn) = chat_name {
+    // For p2p (direct) chats, use the bot's own name so the window is
+    // labeled after the bot (e.g. "Atim") rather than "atim-<user_id>".
+    let topic_name = if chat_type == "group" {
+        chat_name.clone()
+    } else {
+        adapter.bot_name.read().await.clone()
+    };
+    if let Some(ref cn) = topic_name {
         let topic_target = MessageTarget {
             chat_id: chat_id_atim,
             thread_id,
