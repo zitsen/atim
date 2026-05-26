@@ -871,6 +871,70 @@ impl Server {
             return Ok(());
         }
 
+        // Handle /unbind — send /quit to agent, kill tmux window, remove bindings
+        if text.trim() == "/unbind" {
+            if let Some((binding, wb)) = find_cb() {
+                let sid = if wb.map(|w| w.session_id.as_str()).unwrap_or("").is_empty() {
+                    // If window binding has no session_id, try the chat binding
+                    if binding.session_id.is_empty() {
+                        None
+                    } else {
+                        Some(binding.session_id.clone())
+                    }
+                } else {
+                    Some(wb.unwrap().session_id.clone())
+                };
+
+                let wid_str = wb.map(|w| &w.window_id).map(|s| s.as_str()).unwrap_or("");
+
+                // 1. Send /quit to the agent (best-effort)
+                if !wid_str.is_empty() {
+                    let window_id = atim_core::message::WindowId(wid_str.to_string());
+                    if self.tmux_mgr.window_exists(&window_id).await {
+                        self.tmux_mgr.send_line(&window_id, "/quit").await.ok();
+                        // Brief wait for Claude to exit gracefully
+                        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                        // 2. Kill the tmux window
+                        self.tmux_mgr.kill_window(&window_id).await.ok();
+                    }
+                }
+
+                // 3. Load mutable runtime and remove bindings
+                let mut rt = self.state_mgr.load_runtime().await?;
+
+                // Remove chat binding by (user_id, thread_id)
+                rt.chat_bindings
+                    .retain(|cb| !(cb.user_id == user_id && cb.thread_id == thread_id_val));
+                // Remove window binding
+                if !wid_str.is_empty() {
+                    rt.window_bindings.remove(wid_str);
+                }
+
+                // Remove session from sessions map
+                if let Some(ref session_id) = sid {
+                    rt.sessions.remove(session_id);
+                    // 4. Remove monitor offset
+                    self.state_mgr.remove_offset(session_id).await.ok();
+                }
+
+                self.state_mgr.save_runtime(&rt).await?;
+
+                let _ = self
+                    .im_adapter
+                    .send_message(
+                        &target,
+                        "✅ Session unbound. You can now start a new session.",
+                    )
+                    .await;
+            } else {
+                let _ = self
+                    .im_adapter
+                    .send_message(&target, "No active session to unbind.")
+                    .await;
+            }
+            return Ok(());
+        }
+
         // Handle /rebind — detect running agent and session, then (re)bind exclusively
         if text.trim() == "/rebind" {
             if let Some((binding, _wb_opt)) = find_cb() {
