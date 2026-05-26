@@ -1954,22 +1954,25 @@ impl Server {
         &self,
         target: &MessageTarget,
         user_id: i64,
-        thread_id: i64,
+        _thread_id: i64,
     ) -> Result<()> {
         let mut ctx_lock = self.callback_contexts.lock().await;
         let mut buttons: Vec<Vec<Button>> = Vec::new();
 
         for agent in self.config.agent_registry.iter() {
-            let token =
-                Self::make_callback_token(&mut ctx_lock, user_id, target.chat_id.0, thread_id);
+            // Use 0 as thread_id for callback tokens because Feishu card action
+            // callbacks don't include chat_type, so handle_card_action always
+            // resolves thread_id to None (→ 0) for non-threaded group chats.
+            // Without this, the token validation context mismatch causes the
+            // callback to be silently rejected.
+            let token = Self::make_callback_token(&mut ctx_lock, user_id, target.chat_id.0, 0);
             buttons.push(vec![Button {
                 text: format!("🚀 {}", agent.name()),
                 callback_data: format!("cb:{token}:agent:{}", agent.name()),
             }]);
         }
 
-        let cancel_token =
-            Self::make_callback_token(&mut ctx_lock, user_id, target.chat_id.0, thread_id);
+        let cancel_token = Self::make_callback_token(&mut ctx_lock, user_id, target.chat_id.0, 0);
         buttons.push(vec![Button {
             text: "❌ Cancel".into(),
             callback_data: format!("cb:{cancel_token}:cancel"),
