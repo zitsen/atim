@@ -871,6 +871,43 @@ impl Server {
             return Ok(());
         }
 
+        // Check for /enter (send Enter key to confirm modals/selections)
+        if text.trim() == "/enter" {
+            if let Some((_binding, wb_opt)) = find_cb() {
+                let wid_str = wb_opt
+                    .map(|w| &w.window_id)
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
+                if wid_str.is_empty() {
+                    let _ = self
+                        .im_adapter
+                        .send_message(&target, "No active session.")
+                        .await;
+                    return Ok(());
+                }
+                let window_id = atim_core::message::WindowId(wid_str.to_string());
+                if !self.tmux_mgr.window_exists(&window_id).await {
+                    let _ = self
+                        .im_adapter
+                        .send_message(&target, "Window no longer exists.")
+                        .await;
+                    return Ok(());
+                }
+                let _ = self.im_adapter.send_chat_action(&target).await;
+                self.tmux_mgr.send_key(&window_id, "Enter").await?;
+                let _ = self
+                    .im_adapter
+                    .send_message(&target, "Sent Enter key.")
+                    .await;
+            } else {
+                let _ = self
+                    .im_adapter
+                    .send_message(&target, "No active session.")
+                    .await;
+            }
+            return Ok(());
+        }
+
         // Handle /unbind — send /quit to agent, kill tmux window, remove bindings
         if text.trim() == "/unbind" {
             if let Some((binding, wb)) = find_cb() {

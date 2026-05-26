@@ -190,6 +190,7 @@ Send these in the IM chat to control the agent session:
 | `/usage`               | Show Claude Code usage/quota info                                |
 | `/switch <agent>`      | Switch to a different agent (`claude`, `copilot`, `codex`)       |
 | `/esc` or `/dismiss`   | Send Escape key to dismiss modals/help screens                   |
+| `/enter`               | Send Enter key to confirm modals/selections                      |
 | `!<command>`           | Run a shell command in the agent's tmux window and stream output |
 
 During directory browsing, text input acts as a `zoxide` query to jump to matching directories.
