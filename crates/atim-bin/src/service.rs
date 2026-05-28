@@ -3,6 +3,7 @@ use std::process::Command;
 
 pub enum ServiceCommand {
     Install,
+    Enable,
     Start,
     Stop,
     Restart,
@@ -10,38 +11,69 @@ pub enum ServiceCommand {
 }
 
 pub fn run_service(
-    cmd: ServiceCommand,
+    cmds: &[ServiceCommand],
     system_level: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    match cmd {
-        ServiceCommand::Install => install_service(system_level),
-        _ => {
-            let mut base = systemctl_base(system_level);
-            let action = match cmd {
-                ServiceCommand::Start => "start",
-                ServiceCommand::Stop => "stop",
-                ServiceCommand::Restart => "restart",
-                ServiceCommand::Status => "status",
-                _ => unreachable!(),
-            };
-            base.push(action.to_string());
-            base.push(unit_name().to_string());
+    for cmd in cmds {
+        match cmd {
+            ServiceCommand::Install => install_service(system_level)?,
+            ServiceCommand::Enable => enable_service(system_level)?,
+            _ => {
+                let mut base = systemctl_base(system_level);
+                let action = match cmd {
+                    ServiceCommand::Start => "start",
+                    ServiceCommand::Stop => "stop",
+                    ServiceCommand::Restart => "restart",
+                    ServiceCommand::Status => "status",
+                    _ => unreachable!(),
+                };
+                base.push(action.to_string());
+                base.push(unit_name().to_string());
 
-            let status = Command::new(&base[0])
-                .args(&base[1..])
-                .stdin(std::process::Stdio::inherit())
-                .stdout(std::process::Stdio::inherit())
-                .stderr(std::process::Stdio::inherit())
-                .status()?;
+                let status = Command::new(&base[0])
+                    .args(&base[1..])
+                    .stdin(std::process::Stdio::inherit())
+                    .stdout(std::process::Stdio::inherit())
+                    .stderr(std::process::Stdio::inherit())
+                    .status()?;
 
-            if !status.success()
-                && let Some(code) = status.code()
-            {
-                std::process::exit(code);
+                if !status.success()
+                    && let Some(code) = status.code()
+                {
+                    std::process::exit(code);
+                }
             }
-            Ok(())
         }
     }
+    Ok(())
+}
+
+fn enable_service(system_level: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let mut daemon_reload_args = systemctl_base(system_level);
+    daemon_reload_args.push("daemon-reload".to_string());
+    let reload = Command::new(&daemon_reload_args[0])
+        .args(&daemon_reload_args[1..])
+        .status()?;
+    if !reload.success() {
+        eprintln!("Warning: systemctl daemon-reload failed");
+    }
+
+    let mut enable_args = systemctl_base(system_level);
+    enable_args.push("enable".to_string());
+    enable_args.push(unit_name().to_string());
+    let status = Command::new(&enable_args[0])
+        .args(&enable_args[1..])
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()?;
+
+    if !status.success()
+        && let Some(code) = status.code()
+    {
+        std::process::exit(code);
+    }
+    Ok(())
 }
 
 fn unit_name() -> &'static str {

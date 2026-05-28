@@ -1,6 +1,6 @@
 # Atim
 
-**AI Agent through IM** — Talk to Claude Code (and soon other AI coding agents) through Telegram or Feishu.
+**AI Agent through IM** (Atim, pronounced like "Atom") — Talk to Claude Code (and soon other AI coding agents) through Telegram or Feishu.
 
 ```
 Telegram / Feishu  ↔  tmux  ↔  Claude Code

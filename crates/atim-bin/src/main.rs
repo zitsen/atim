@@ -33,6 +33,9 @@ enum Command {
         /// Install the systemd service unit
         #[arg(long)]
         install: bool,
+        /// Enable the service (daemon-reload + enable)
+        #[arg(long)]
+        enable: bool,
         /// Start the service
         #[arg(long)]
         start: bool,
@@ -73,24 +76,33 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Command::Service {
             install,
+            enable,
             start,
             stop,
             restart,
-            status: _,
+            status,
             system,
         }) => {
-            let cmd = if install {
-                service::ServiceCommand::Install
-            } else if start {
-                service::ServiceCommand::Start
-            } else if stop {
-                service::ServiceCommand::Stop
-            } else if restart {
-                service::ServiceCommand::Restart
-            } else {
-                service::ServiceCommand::Status
-            };
-            if let Err(e) = service::run_service(cmd, system) {
+            let mut cmds = Vec::new();
+            if install {
+                cmds.push(service::ServiceCommand::Install);
+            }
+            if enable {
+                cmds.push(service::ServiceCommand::Enable);
+            }
+            if start {
+                cmds.push(service::ServiceCommand::Start);
+            }
+            if stop {
+                cmds.push(service::ServiceCommand::Stop);
+            }
+            if restart {
+                cmds.push(service::ServiceCommand::Restart);
+            }
+            if status || cmds.is_empty() {
+                cmds.push(service::ServiceCommand::Status);
+            }
+            if let Err(e) = service::run_service(&cmds, system) {
                 eprintln!("atim service error: {e}");
                 std::process::exit(1);
             }
