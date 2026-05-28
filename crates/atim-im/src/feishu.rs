@@ -1226,7 +1226,7 @@ async fn handle_card_action(adapter: &FeishuAdapter, payload: &serde_json::Value
     // logic. For Feishu, thread_id should always be the same as chat_id,
     // except when there's an actual topic thread (root_id/ctx_thread_id), in
     // which case the thread_id comes from root_id to distinguish between topics.
-    let thread_id = if let Some(tid) = ctx_thread_id {
+    let thread_id = if let Some(tid) = ctx_thread_id.or(root_id) {
         Some(adapter.register_thread(tid).await)
     } else {
         Some(ThreadId(chat_id_atim.0))
