@@ -283,21 +283,6 @@ impl FeishuAdapter {
         ThreadId(tid)
     }
 
-    /// Register a Feishu group chat as a thread-like entity, producing a
-    /// thread_id that is distinct from the chat_id.
-    async fn register_chat_thread(&self, chat_id: &str) -> ThreadId {
-        let threaded_id = format!("\0thread\0{chat_id}");
-        let tid = Self::hash_id(&threaded_id);
-        {
-            let mut map = self.id_map.write().await;
-            map.thread_ids
-                .entry(tid)
-                .or_insert_with(|| chat_id.to_string());
-        }
-        self.save_id_map().await;
-        ThreadId(tid)
-    }
-
     /// Look up the original Feishu root_id for a ThreadId.
     async fn get_thread_root_id(&self, tid: &ThreadId) -> Option<String> {
         let map = self.id_map.read().await;
@@ -992,16 +977,14 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
     let user_id = adapter.register_user(open_id).await;
     let chat_id_atim = adapter.register_chat(chat_id).await;
 
-    // For topic/thread messages, use root_id as thread_id (consistent per-topic routing).
-    // For non-topic group chats, use a thread_id derived from chat_id but
-    // distinct from it, so the binding model has a unique (chat_id, thread_id)
-    // pair per group without conflating the two dimensions.
+    // thread_id serves as the sole chat identifier for the server's routing
+    // logic. For Feishu, thread_id should always be the same as chat_id,
+    // except when there's an actual topic thread (root_id), in which case
+    // the thread_id comes from the root_id to distinguish between topics.
     let thread_id = if let Some(root_id) = root_id {
         Some(adapter.register_thread(root_id).await)
-    } else if chat_type == "group" {
-        Some(adapter.register_chat_thread(chat_id).await)
     } else {
-        None
+        Some(ThreadId(chat_id_atim.0))
     };
 
     let chat_name = if chat_type == "group" {
@@ -1225,6 +1208,7 @@ async fn handle_card_action(adapter: &FeishuAdapter, payload: &serde_json::Value
     tracing::debug!("Card action: data={data} chat_type={chat_type}");
 
     let user_id = adapter.register_user(open_id).await;
+    let chat_id_atim = adapter.register_chat(chat_id).await;
 
     // Check for thread_id in the card action context (Feishu may include it
     // for messages sent to topic threads), or root_id in the event envelope.
@@ -1238,19 +1222,18 @@ async fn handle_card_action(adapter: &FeishuAdapter, payload: &serde_json::Value
         serde_json::to_string(event).unwrap_or_default(),
     );
 
-    let thread_id = if let Some(tid) = ctx_thread_id.or(root_id) {
+    // thread_id serves as the sole chat identifier for the server's routing
+    // logic. For Feishu, thread_id should always be the same as chat_id,
+    // except when there's an actual topic thread (root_id/ctx_thread_id), in
+    // which case the thread_id comes from root_id to distinguish between topics.
+    let thread_id = if let Some(tid) = ctx_thread_id {
         Some(adapter.register_thread(tid).await)
-    } else if is_group {
-        // Fallback: derive a thread_id from chat_id that is distinct from
-        // the chat_id itself, so the binding model has a unique (chat_id,
-        // thread_id) pair per group without conflating the two dimensions.
-        Some(adapter.register_chat_thread(chat_id).await)
     } else {
-        None
+        Some(ThreadId(chat_id_atim.0))
     };
 
     let target = MessageTarget {
-        chat_id: adapter.register_chat(chat_id).await,
+        chat_id: chat_id_atim,
         thread_id,
         chat_name: None,
     };
