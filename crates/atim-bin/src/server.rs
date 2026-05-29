@@ -58,6 +58,11 @@ pub struct Server {
     pub last_ui_states: Arc<Mutex<HashMap<String, String>>>,
     /// Last pane output per window (for non-Claude agents without JSONL logs).
     pub last_pane_output: Arc<Mutex<HashMap<String, String>>>,
+    /// Pending chat names: (user_id, thread_id) -> IM chat/group name.
+    /// Set from the first text message's target.chat_name before any callback
+    /// resolves. Used as the window name / binding display_name so the window
+    /// reflects the actual chat name instead of a generic "atim-{user_id}".
+    pub pending_chat_names: Arc<Mutex<HashMap<UserTriple, String>>>,
     /// Pending rename names: (user_id, thread_id) -> new chat_name.
     /// Set when the rename prompt is shown; consumed by the rename callback.
     pub pending_rename_names: Arc<Mutex<HashMap<UserTriple, String>>>,
@@ -1932,12 +1937,17 @@ impl Server {
                 }
             }
 
-            // No binding — save pending text, then show agent picker
+            // No binding — save pending text + chat name, then show agent picker
             let thread_id = target.thread_id.map(|t| t.0).unwrap_or(0);
             let key = (user_id, thread_id);
             {
                 let mut pending = self.pending_messages.lock().await;
                 pending.insert(key, text.to_string());
+            }
+            // Preserve the chat/group name so the window gets a meaningful
+            // name (e.g. "Copilot Chat") instead of the generic "atim-{user_id}".
+            if let Some(ref cn) = target.chat_name {
+                self.pending_chat_names.lock().await.insert(key, cn.clone());
             }
 
             self.send_agent_picker(&target, user_id, target.thread_id.map(|t| t.0).unwrap_or(0))
@@ -2438,9 +2448,77 @@ impl Server {
         Ok(())
     }
 
+    /// Actively discover the session_id by sending `/status` to the agent
+    /// in the given window and parsing the Session ID from the response.
+    ///
+    /// This is more reliable than polling session_map.json (SessionStart hook),
+    /// because it queries the running agent directly on demand.
+    async fn discover_session_via_status(&self, window_id: &str) -> Option<String> {
+        let wid = WindowId(window_id.to_string());
+
+        // Capture baseline pane content before sending /status.
+        let baseline_raw = self
+            .tmux_mgr
+            .capture_pane(&wid)
+            .await
+            .ok()
+            .unwrap_or_default();
+        let baseline = strip_ansi(&baseline_raw);
+        let baseline_len = baseline.lines().count();
+
+        // Send /status to the agent
+        self.tmux_mgr.send_line(&wid, "/status").await.ok();
+        tokio::time::sleep(Duration::from_millis(2000)).await;
+
+        // Capture updated pane content and extract Session ID from new lines.
+        let captured_raw = self
+            .tmux_mgr
+            .capture_pane(&wid)
+            .await
+            .ok()
+            .unwrap_or_default();
+        let captured = strip_ansi(&captured_raw);
+        let lines: Vec<&str> = captured.lines().collect();
+        let new_text = lines
+            .iter()
+            .copied()
+            .skip(baseline_len)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let mut sid = SESSION_ID_RE
+            .captures(&new_text)
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str().to_string());
+
+        if sid.is_none() {
+            // Full pane fallback — /status modal may replace rather than append
+            sid = SESSION_ID_RE
+                .captures(&captured)
+                .and_then(|c| c.get(1))
+                .map(|m| m.as_str().to_string());
+        }
+
+        // Dismiss /status modal
+        self.tmux_mgr.send_key(&wid, "Escape").await.ok();
+
+        if sid.is_some() {
+            tracing::info!("Found session {:?} for window {window_id} via /status", sid);
+        } else {
+            tracing::debug!("/status session discovery returned no match for window {window_id}");
+        }
+
+        sid
+    }
+
     /// After starting an agent in a new window, wait for the session_id to be
-    /// registered — first by polling session_map.json (the SessionStart hook),
-    /// then falling back to Agent::discover_session_by_pid / discover_session.
+    /// registered by actively polling all available discovery methods until
+    /// timeout — /status for Claude, PID/lsof for Copilot/Codex, and
+    /// session_map.json for the SessionStart hook.
+    ///
+    /// Unlike the old approach (fixed sleep then one-shot discovery), this
+    /// continuously retries so the caller can send the user's message first
+    /// and let the agent initialize on its own schedule.
     ///
     /// `cwd_hint` is the working directory of the pane — used for the
     /// project-slug fallback when lsof fails (Claude only).
@@ -2471,34 +2549,51 @@ impl Server {
             return None;
         }
 
-        let start = std::time::Instant::now();
+        let deadline = std::time::Instant::now() + timeout;
+        let mut status_retries = 0u32;
 
-        // Phase 1: Poll session_map.json for the hook's entry (every 300ms)
-        while start.elapsed() < timeout {
-            if let Ok(map) = self.state_mgr.load_session_map().await
+        // Phase 1: Active retry loop — tries all discovery methods until
+        // we find the session_id or run out of time.
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+
+            // a) PID-based discovery (non-intrusive, works for Copilot/Codex)
+            if let Ok(Some(sid)) = agent.discover_session_by_pid(window_id) {
+                tracing::info!("Found session {sid} for window {window_id} via PID discovery");
+                return Some(sid);
+            }
+
+            // b) session_map.json (SessionStart hook, Claude only)
+            if agent.has_session_start_hook()
+                && let Ok(map) = self.state_mgr.load_session_map().await
                 && let Some(sid) = map.get(window_id)
                 && !sid.is_empty()
             {
                 tracing::info!("Found session {sid} for window {window_id} via session_map");
                 return Some(sid.clone());
             }
-            tokio::time::sleep(Duration::from_millis(300)).await;
+
+            // c) /status command (Claude only — sends command, needs 2s
+            //    wait for response). Do this every other iteration to
+            //    avoid spamming the agent.
+            status_retries += 1;
+            if status_retries.is_multiple_of(2) {
+                if let Some(sid) = self.discover_session_via_status(window_id).await {
+                    return Some(sid);
+                }
+                continue; // discover_session_via_status already waited ~2s
+            }
+
+            tokio::time::sleep(Duration::from_millis(1000)).await;
         }
 
-        // Phase 2: Fallback — agent session discovery (lsof → project-slug)
-        tracing::warn!(
-            "SessionStart hook didn't register session_id for window {window_id} within {timeout:?}, trying agent discovery"
-        );
-
-        // Phase 2a: PID tracing
-        if let Ok(Some(sid)) = agent.discover_session_by_pid(window_id) {
-            return Some(sid);
-        }
-
-        // Phase 2b: working-directory based discovery
+        // Phase 2: Fallback — working-directory based discovery (one-shot)
         if let Some(cwd) = cwd_hint {
             tracing::warn!(
-                "PID discovery failed for window {window_id}, trying path-based discovery with cwd={cwd}"
+                "Active discovery timed out for window {window_id}, trying path-based discovery with cwd={cwd}"
             );
             let state = self.state_mgr.load_runtime().await.ok()?;
             let mut known_ids: std::collections::HashSet<String> = state
@@ -2547,11 +2642,20 @@ impl Server {
         cwd: &Path,
         topic_name: Option<&str>,
     ) -> Result<()> {
+        let thread_id = target.thread_id.map(|t| t.0).unwrap_or(0);
         let name = format!("atim-{user_id}");
-        let window_name = topic_name.unwrap_or(&name);
+        let window_name = match topic_name {
+            Some(tn) => tn.to_string(),
+            None => self
+                .pending_chat_names
+                .lock()
+                .await
+                .remove(&(user_id, thread_id))
+                .unwrap_or(name),
+        };
         let window_id = self
             .tmux_mgr
-            .new_window(window_name, &cwd.to_string_lossy())
+            .new_window(&window_name, &cwd.to_string_lossy())
             .await?;
 
         let agent = self
@@ -2612,7 +2716,17 @@ impl Server {
             })
             .await?;
 
-        // Try to resolve session_id so the monitor can track responses.
+        // Forward the user's pending message to the agent FIRST.
+        // Some agents (Copilot) need the message to create a session.
+        if !_initial_text.is_empty() {
+            let is_copilot = agent.name() == "copilot";
+            self.send_text_to_agent(&window_id, _initial_text, is_copilot)
+                .await?;
+        }
+
+        // Then resolve session_id so the monitor can track responses.
+        // resolve_session_id actively polls /status + PID discovery until
+        // the agent creates its session, so no fixed sleep is needed.
         if let Some(sid) = self
             .resolve_session_id(
                 &wid,
@@ -2641,13 +2755,6 @@ impl Server {
                     topic_name: topic_name.map(String::from),
                     session_id: sid,
                 })
-                .await?;
-        }
-
-        // Forward the user's pending message to the agent
-        if !_initial_text.is_empty() {
-            let is_copilot = agent.name() == "copilot";
-            self.send_text_to_agent(&window_id, _initial_text, is_copilot)
                 .await?;
         }
 
@@ -2816,7 +2923,14 @@ impl Server {
             })
             .await?;
 
-        // Try to resolve session_id so the monitor can track responses and
+        // Forward the user's pending message to the agent FIRST.
+        // Some agents need the message to create a session file.
+        if !_text.is_empty() {
+            let is_copilot = agent.name() == "copilot";
+            self.send_text_to_agent(&wid, _text, is_copilot).await?;
+        }
+
+        // Then resolve session_id so the monitor can track responses and
         // so commands like /ss, /usage, /esc can find the window binding.
         if let Some(sid) = self
             .resolve_session_id(window_id, Duration::from_secs(15), Some(&cwd))
@@ -2842,12 +2956,6 @@ impl Server {
                     session_id: sid,
                 })
                 .await?;
-        }
-
-        // Forward the user's pending message to the agent
-        if !_text.is_empty() {
-            let is_copilot = agent.name() == "copilot";
-            self.send_text_to_agent(&wid, _text, is_copilot).await?;
         }
 
         Ok(())
@@ -3016,7 +3124,22 @@ impl Server {
         // browser already maintains per-user state for safety.
         let thread_id = target.thread_id.map(|t| t.0).unwrap_or(0);
         if action == "browse" {
-            let key = (user_id, thread_id);
+            // Feishu group card actions always carry thread_id=0. To look up
+            // the correct pending message and thread context, peek at the
+            // callback token context (without consuming — browse is multi-step).
+            let browse_thread_id = if thread_id == 0 {
+                self.callback_contexts
+                    .lock()
+                    .await
+                    .get(token)
+                    .filter(|(uid, _)| *uid == user_id)
+                    .map(|(_, tid)| *tid)
+                    .unwrap_or(0)
+            } else {
+                thread_id
+            };
+
+            let key = (user_id, browse_thread_id);
             let pending = self.pending_messages.lock().await.get(&key).cloned();
             let text = match pending {
                 Some(t) => t,
@@ -3029,8 +3152,22 @@ impl Server {
                 }
             };
             let browse_action = arg.unwrap_or("");
-            self.handle_browser_action(&target, user_id, thread_id, &msg_id, browse_action, &text)
-                .await?;
+            // Use fixed target so downstream (create_and_bind_in_dir etc.)
+            // receives the correct thread_id instead of 0.
+            let fixed_target = MessageTarget {
+                chat_id: target.chat_id,
+                thread_id: Some(ThreadId(browse_thread_id)),
+                chat_name: target.chat_name.clone(),
+            };
+            self.handle_browser_action(
+                &fixed_target,
+                user_id,
+                browse_thread_id,
+                &msg_id,
+                browse_action,
+                &text,
+            )
+            .await?;
             return Ok(());
         }
 
@@ -3060,8 +3197,11 @@ impl Server {
             }
         };
 
-        // Verify the context matches — the callback was created for this user+thread
-        if ctx.0 != user_id || ctx.1 != thread_id {
+        // Verify the context matches — the callback was created for this user+thread.
+        // Special case: if the received thread_id is 0 (Feishu card actions from groups
+        // don't include chat_type, so thread_id defaults to 0), accept if the user has
+        // a chat binding matching the token's expected thread_id.
+        if ctx.0 != user_id {
             tracing::warn!(
                 "Callback context mismatch: expected ({},{}) got ({},{})",
                 ctx.0,
@@ -3074,13 +3214,65 @@ impl Server {
                     .im_adapter
                     .answer_callback(qid, "This selection is from a different chat.")
                     .await;
-            } else {
-                // TODO
             }
             return Ok(());
         }
+        let effective_thread_id = if ctx.1 != thread_id && thread_id == 0 && ctx.1 != 0 {
+            // Card action from a group — Feishu can't provide thread context.
+            // Accept if the user has a binding OR a pending message for the
+            // token's thread_id (new session flow before binding exists).
+            let rt = self.state_mgr.load_runtime().await?;
+            let has_binding = rt
+                .chat_bindings
+                .iter()
+                .any(|b| b.user_id == user_id && b.thread_id == ctx.1);
+            let has_pending = self
+                .pending_messages
+                .lock()
+                .await
+                .contains_key(&(user_id, ctx.1));
+            if has_binding || has_pending {
+                ctx.1
+            } else {
+                tracing::warn!(
+                    "Callback context mismatch (no group binding or pending msg): expected ({},{}) got ({},{})",
+                    ctx.0,
+                    ctx.1,
+                    user_id,
+                    thread_id,
+                );
+                if let Some(qid) = callback_query_id {
+                    let _ = self
+                        .im_adapter
+                        .answer_callback(qid, "This selection is from a different chat.")
+                        .await;
+                }
+                return Ok(());
+            }
+        } else if ctx.1 != thread_id {
+            tracing::warn!(
+                "Callback context mismatch: expected ({},{}) got ({},{})",
+                ctx.0,
+                ctx.1,
+                user_id,
+                thread_id,
+            );
+            if let Some(qid) = callback_query_id {
+                let _ = self
+                    .im_adapter
+                    .answer_callback(qid, "This selection is from a different chat.")
+                    .await;
+            }
+            return Ok(());
+        } else {
+            thread_id
+        };
 
-        let key = (user_id, thread_id);
+        let key = (user_id, effective_thread_id);
+        // Shadow with effective_thread_id for the rest of the handler, so
+        // group card actions (with thread_id=0 in the callback event) use
+        // the correct thread context.
+        let thread_id = effective_thread_id;
 
         let pending = self.pending_messages.lock().await.remove(&key);
         let text = match pending {
@@ -3788,32 +3980,12 @@ impl Server {
             let _ = self.state_mgr.save_session_map(&map).await;
             self.state_mgr.remove_offset(&session_id).await.ok();
             self.byte_offsets.lock().await.remove(&session_id);
-        } else if agent.supports_sessions() {
-            // Resolve session_id for new session-based agents
-            let wid = new_window_id.0.clone();
-            if let Some(sid) = self
-                .resolve_session_id(&wid, Duration::from_secs(15), Some(&cwd))
-                .await
-            {
-                if let Some(wb) = rt.window_bindings.get_mut(&wid) {
-                    wb.session_id = sid.clone();
-                }
-                if let Some(cb) = rt
-                    .chat_bindings
-                    .iter_mut()
-                    .find(|cb| cb.user_id == user_id && cb.thread_id == thread_id)
-                {
-                    cb.session_id = sid.clone();
-                }
-                let mut map = self.state_mgr.load_session_map().await.unwrap_or_default();
-                map.insert(wid, sid);
-                let _ = self.state_mgr.save_session_map(&map).await;
-            }
         }
 
         self.state_mgr.save_runtime(&rt).await?;
 
-        // Forward the user's original text to the new window
+        // Forward the user's original text to the new window FIRST.
+        // Some agents (Copilot) need the message to create a session file.
         let is_copilot = agent.name() == "copilot";
         if is_copilot {
             self.tmux_mgr
@@ -3821,6 +3993,41 @@ impl Server {
                 .await?;
         } else {
             self.tmux_mgr.send_line(&new_window_id, text).await?;
+        }
+
+        // THEN resolve session_id for fresh sessions so the monitor can route.
+        // resolve_session_id actively polls until the session is found, so
+        // no fixed sleep is needed.
+        if new_session_id.is_empty() && agent.supports_sessions() {
+            let wid = new_window_id.0.clone();
+            if let Some(sid) = self
+                .resolve_session_id(&wid, Duration::from_secs(15), Some(&cwd))
+                .await
+            {
+                self.state_mgr
+                    .upsert_window_binding(&WindowBinding {
+                        window_id: wid.clone(),
+                        session_id: sid.clone(),
+                        cwd: cwd.clone(),
+                        agent_type: agent.name().to_string(),
+                        window_name: window_name.clone(),
+                    })
+                    .await?;
+                self.state_mgr
+                    .upsert_chat_binding(&ChatBinding {
+                        user_id,
+                        thread_id,
+                        chat_id: cb.chat_id,
+                        display_name: cb.display_name.clone(),
+                        group_chat_id: cb.group_chat_id,
+                        topic_name: cb.topic_name.clone(),
+                        session_id: sid.clone(),
+                    })
+                    .await?;
+                let mut map = self.state_mgr.load_session_map().await.unwrap_or_default();
+                map.insert(wid, sid);
+                let _ = self.state_mgr.save_session_map(&map).await;
+            }
         }
 
         let sc_chat_id = cb.group_chat_id.unwrap_or(cb.chat_id);
