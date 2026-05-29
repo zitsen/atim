@@ -13,7 +13,7 @@ use atim_core::message::{
     ThreadId, WindowId,
 };
 use atim_core::message::{InteractiveUi, UiKind};
-use atim_core::session::{ChatBinding, SessionInfo, ThreadBinding, WindowBinding};
+use atim_core::session::{ChatBinding, RuntimeState, SessionInfo, WindowBinding};
 use atim_monitor::monitor::{MonitorEvent, resolve_jsonl};
 use atim_queue::message_queue::MessageQueue;
 use atim_state::persistence::StateManager;
@@ -586,13 +586,7 @@ impl Server {
                 .iter()
                 .find(|b| b.user_id == user_id && b.thread_id == thread_id_val)?
                 .clone();
-            let wb = if cb.session_id.is_empty() {
-                None
-            } else {
-                rt.window_bindings
-                    .values()
-                    .find(|wb| wb.session_id == cb.session_id)
-            };
+            let wb = rt.resolve_window_binding(user_id, thread_id_val);
             Some((cb, wb))
         };
 
@@ -2021,8 +2015,8 @@ impl Server {
         user_id: i64,
         thread_id: i64,
     ) -> Result<()> {
-        let state = self.state_mgr.load_state().await?;
-        let unbound = self.unbound_windows(&state).await;
+        let rt = self.state_mgr.load_runtime().await?;
+        let unbound = self.unbound_windows(&rt).await;
         if !unbound.is_empty() {
             self.show_window_picker(target, user_id, &unbound, thread_id)
                 .await?;
@@ -2036,13 +2030,10 @@ impl Server {
     }
 
     /// Compute unbound tmux windows (exist in tmux but not in any binding).
-    async fn unbound_windows(
-        &self,
-        state: &atim_core::session::ServerState,
-    ) -> Vec<browser::WindowEntry> {
-        let bound_ids: HashSet<String> = state
-            .thread_bindings
-            .iter()
+    async fn unbound_windows(&self, rt: &RuntimeState) -> Vec<browser::WindowEntry> {
+        let bound_ids: HashSet<String> = rt
+            .window_bindings
+            .values()
             .map(|b| b.window_id.clone())
             .collect();
 
@@ -2051,10 +2042,10 @@ impl Server {
                 .into_iter()
                 .filter(|w| !bound_ids.contains(&w.window_id.0))
                 .map(|w| {
-                    let agent_type = state
-                        .window_states
+                    let agent_type = rt
+                        .window_bindings
                         .get(&w.window_id.0)
-                        .map(|ws| ws.agent_type.as_str())
+                        .map(|wb| wb.agent_type.as_str())
                         .unwrap_or("");
                     browser::WindowEntry {
                         window_id: w.window_id.0,
@@ -2462,15 +2453,15 @@ impl Server {
         // Determine the agent for this window to dispatch session discovery.
         let agent = self
             .state_mgr
-            .load_state()
+            .load_runtime()
             .await
             .ok()
-            .and_then(|s| s.window_states.get(window_id).cloned())
-            .and_then(|ws| {
-                if ws.agent_type == "claude" {
+            .and_then(|rt| rt.window_bindings.get(window_id).cloned())
+            .and_then(|wb| {
+                if wb.agent_type == "claude" {
                     Some(self.config.agent_registry.default().clone())
                 } else {
-                    self.config.agent_registry.get(&ws.agent_type).cloned()
+                    self.config.agent_registry.get(&wb.agent_type).cloned()
                 }
             })
             .unwrap_or_else(|| self.config.agent_registry.default().clone());
@@ -2509,11 +2500,11 @@ impl Server {
             tracing::warn!(
                 "PID discovery failed for window {window_id}, trying path-based discovery with cwd={cwd}"
             );
-            let state = self.state_mgr.load_state().await.ok()?;
+            let state = self.state_mgr.load_runtime().await.ok()?;
             let mut known_ids: std::collections::HashSet<String> = state
-                .window_states
+                .window_bindings
                 .values()
-                .map(|ws| ws.session_id.clone())
+                .map(|wb| wb.session_id.clone())
                 .filter(|sid| !sid.is_empty())
                 .collect();
             if let Ok(map) = self.state_mgr.load_session_map().await {
@@ -2653,6 +2644,13 @@ impl Server {
                 .await?;
         }
 
+        // Forward the user's pending message to the agent
+        if !_initial_text.is_empty() {
+            let is_copilot = agent.name() == "copilot";
+            self.send_text_to_agent(&window_id, _initial_text, is_copilot)
+                .await?;
+        }
+
         Ok(())
     }
 
@@ -2731,6 +2729,14 @@ impl Server {
                 session_id: session_id.to_string(),
             })
             .await?;
+
+        // Forward the user's pending message to the resumed session
+        if !_initial_text.is_empty() {
+            let is_copilot = agent.name() == "copilot";
+            self.send_text_to_agent(&window_id, _initial_text, is_copilot)
+                .await?;
+        }
+
         Ok(())
     }
 
@@ -2836,6 +2842,12 @@ impl Server {
                     session_id: sid,
                 })
                 .await?;
+        }
+
+        // Forward the user's pending message to the agent
+        if !_text.is_empty() {
+            let is_copilot = agent.name() == "copilot";
+            self.send_text_to_agent(&wid, _text, is_copilot).await?;
         }
 
         Ok(())
@@ -2954,11 +2966,26 @@ impl Server {
 
         // Handle UI navigation callbacks (no token validation needed)
         if data.starts_with("ui:") {
-            let state = self.state_mgr.load_state().await?;
-            if let Some(binding) = state.thread_bindings.iter().find(|b| {
-                b.user_id == user_id && b.thread_id == target.thread_id.map(|t| t.0).unwrap_or(0)
-            }) {
-                let _ = handle_ui_callback(&self.tmux_mgr, &binding.window_id, data).await;
+            let rt = self.state_mgr.load_runtime().await?;
+            let window_id = rt
+                .chat_bindings
+                .iter()
+                .find(|b| {
+                    b.user_id == user_id
+                        && b.thread_id == target.thread_id.map(|t| t.0).unwrap_or(0)
+                })
+                .and_then(|cb| {
+                    if cb.session_id.is_empty() {
+                        None
+                    } else {
+                        rt.window_bindings
+                            .values()
+                            .find(|wb| wb.session_id == cb.session_id)
+                    }
+                })
+                .map(|wb| &wb.window_id);
+            if let Some(wid) = window_id {
+                let _ = handle_ui_callback(&self.tmux_mgr, wid, data).await;
                 if let Some(qid) = callback_query_id {
                     let _ = self.im_adapter.answer_callback(qid, "").await;
                 }
@@ -3169,19 +3196,18 @@ impl Server {
                 }
                 self.handle_rename_window(&new_name, user_id, thread_id)
                     .await?;
-                let state = self.state_mgr.load_state().await?;
-                if let Some(binding) = state
-                    .thread_bindings
-                    .iter()
-                    .find(|b| b.user_id == user_id && b.thread_id == thread_id)
+                let rt = self.state_mgr.load_runtime().await.ok();
+                if let Some((cb, wid)) = rt
+                    .as_ref()
+                    .and_then(|rt| rt.chat_binding_with_window(user_id, thread_id))
                 {
-                    let wid = WindowId(binding.window_id.clone());
+                    let wid = WindowId(wid.to_string());
                     let _ = self.tmux_mgr.send_line(&wid, &text).await;
-                    let sc_chat_id = binding.group_chat_id.unwrap_or(binding.chat_id);
+                    let sc_chat_id = cb.group_chat_id.unwrap_or(cb.chat_id);
                     self.status_consumed
                         .lock()
                         .await
-                        .remove(&(sc_chat_id, binding.thread_id));
+                        .remove(&(sc_chat_id, cb.thread_id));
                 }
                 let _ = self
                     .im_adapter
@@ -3189,15 +3215,12 @@ impl Server {
                     .await;
             }
             "rebind" => {
-                let state = self.state_mgr.load_state().await?;
-                let binding_opt = state
-                    .thread_bindings
-                    .iter()
-                    .find(|b| b.user_id == user_id && b.thread_id == thread_id)
-                    .cloned();
-                drop(state);
-                if let Some(binding) = binding_opt {
-                    let wid = WindowId(binding.window_id.clone());
+                let rt = self.state_mgr.load_runtime().await.ok();
+                let info = rt
+                    .as_ref()
+                    .and_then(|rt| rt.chat_binding_with_window(user_id, thread_id));
+                if let Some((binding, wid_str)) = info {
+                    let wid = WindowId(wid_str.to_string());
                     let running_agent = match self.tmux_mgr.find_window(&wid).await {
                         Ok(info) => self.detect_running_agent(&info.current_command),
                         Err(_) => None,
@@ -3267,23 +3290,36 @@ impl Server {
         drop(pending);
 
         // Find and kill the associated tmux window, then remove binding
-        let mut state = self.state_mgr.load_state().await?;
-        if let Some(binding) = state
-            .thread_bindings
+        let mut rt = self.state_mgr.load_runtime().await?;
+        // Collect window_ids matching this (chat_id, thread_id) across all users
+        let window_ids: Vec<String> = rt
+            .chat_bindings
             .iter()
-            .find(|b| b.chat_id == chat_id && b.thread_id == thread_id)
-        {
-            let wid = WindowId(binding.window_id.clone());
+            .filter(|b| b.chat_id == chat_id && b.thread_id == thread_id)
+            .filter_map(|cb| {
+                rt.resolve_window_id(cb.user_id, cb.thread_id)
+                    .map(|w| w.to_string())
+            })
+            .collect();
+        for wid_str in &window_ids {
+            let wid = WindowId(wid_str.clone());
             tracing::info!("Killing tmux window {} for closed topic", wid.0);
             if let Err(e) = self.tmux_mgr.kill_window(&wid).await {
-                // Window may already be gone — that's fine
                 tracing::debug!("Error killing window {} (may already be gone): {e}", wid.0);
             }
         }
-        state
-            .thread_bindings
+        rt.chat_bindings
             .retain(|b| b.chat_id != chat_id || b.thread_id != thread_id);
-        self.state_mgr.save_state(&state).await?;
+        // Also clean up window_bindings that no longer have a chat_binding
+        let active_sessions: std::collections::HashSet<String> = rt
+            .chat_bindings
+            .iter()
+            .map(|b| b.session_id.clone())
+            .filter(|s| !s.is_empty())
+            .collect();
+        rt.window_bindings
+            .retain(|_, wb| active_sessions.contains(&wb.session_id));
+        self.state_mgr.save_runtime(&rt).await?;
         Ok(())
     }
 
@@ -3300,19 +3336,35 @@ impl Server {
         drop(names);
 
         // Update in persisted binding and rename tmux window
-        let mut state = self.state_mgr.load_state().await?;
-        if let Some(binding) = state
-            .thread_bindings
+        let mut rt = self.state_mgr.load_runtime().await?;
+
+        // Collect session_ids before mutating to avoid borrow conflict
+        let session_ids: Vec<String> = rt
+            .chat_bindings
+            .iter()
+            .filter(|b| b.chat_id == target.chat_id.0 && b.thread_id == thread_id)
+            .map(|b| b.session_id.clone())
+            .collect();
+
+        for binding in rt
+            .chat_bindings
             .iter_mut()
-            .find(|b| b.chat_id == target.chat_id.0 && b.thread_id == thread_id)
+            .filter(|b| b.chat_id == target.chat_id.0 && b.thread_id == thread_id)
         {
             binding.topic_name = Some(new_name.to_string());
-            let wid = WindowId(binding.window_id.clone());
-            if let Err(e) = self.tmux_mgr.rename_window(&wid, new_name).await {
-                tracing::warn!("Failed to rename tmux window {}: {e}", wid.0);
-            }
-            self.state_mgr.save_state(&state).await?;
         }
+
+        for sid in &session_ids {
+            if !sid.is_empty()
+                && let Some(wb) = rt.window_bindings.values().find(|wb| wb.session_id == *sid)
+            {
+                let wid = WindowId(wb.window_id.clone());
+                if let Err(e) = self.tmux_mgr.rename_window(&wid, new_name).await {
+                    tracing::warn!("Failed to rename tmux window {}: {e}", wid.0);
+                }
+            }
+        }
+        self.state_mgr.save_runtime(&rt).await?;
         Ok(())
     }
 
@@ -3321,10 +3373,10 @@ impl Server {
     /// Uses `send_chat_action` as a lightweight probe. If the topic was
     /// deleted, Telegram returns an error and we treat it as a topic close.
     async fn probe_topic_deletions(&self) -> Result<()> {
-        let state = self.state_mgr.load_state().await?;
-        let mut deleted = Vec::new();
+        let rt = self.state_mgr.load_runtime().await?;
+        let mut deleted: Vec<(i64, i64, String)> = Vec::new();
 
-        for binding in &state.thread_bindings {
+        for binding in &rt.chat_bindings {
             if binding.thread_id == 0 {
                 continue; // not a forum topic
             }
@@ -3349,7 +3401,7 @@ impl Server {
                     deleted.push((
                         binding.chat_id,
                         binding.thread_id,
-                        binding.window_id.clone(),
+                        binding.session_id.clone(),
                     ));
                 }
             }
@@ -3357,18 +3409,37 @@ impl Server {
 
         // Clean up deleted topics
         if !deleted.is_empty() {
-            let mut state = self.state_mgr.load_state().await?;
-            for (chat_id, thread_id, window_id) in &deleted {
-                let wid = WindowId(window_id.clone());
-                if let Err(e) = self.tmux_mgr.kill_window(&wid).await {
-                    tracing::debug!("Error killing stale window {}: {e}", wid.0);
+            let mut rt = self.state_mgr.load_runtime().await?;
+            for (chat_id, thread_id, session_id) in &deleted {
+                // Kill the window if we can find it
+                if !session_id.is_empty() {
+                    let dead_windows: Vec<String> = rt
+                        .window_bindings
+                        .values()
+                        .filter(|wb| &wb.session_id == session_id)
+                        .map(|wb| wb.window_id.clone())
+                        .collect();
+                    for wid_str in &dead_windows {
+                        let wid = WindowId(wid_str.clone());
+                        if let Err(e) = self.tmux_mgr.kill_window(&wid).await {
+                            tracing::debug!("Error killing stale window {}: {e}", wid.0);
+                        }
+                    }
                 }
-                state
-                    .thread_bindings
-                    .retain(|b| b.chat_id != *chat_id || b.thread_id != *thread_id);
+                rt.chat_bindings
+                    .retain(|b| !(b.chat_id == *chat_id && b.thread_id == *thread_id));
                 tracing::info!("Cleaned up deleted topic: chat={chat_id} thread={thread_id}");
             }
-            self.state_mgr.save_state(&state).await?;
+            // Clean up orphaned window_bindings
+            let active_sessions: std::collections::HashSet<String> = rt
+                .chat_bindings
+                .iter()
+                .map(|b| b.session_id.clone())
+                .filter(|s| !s.is_empty())
+                .collect();
+            rt.window_bindings
+                .retain(|_, wb| active_sessions.contains(&wb.session_id));
+            self.state_mgr.save_runtime(&rt).await?;
         }
 
         Ok(())
@@ -3383,12 +3454,12 @@ impl Server {
     /// output and forwards new lines back to the IM since they don't
     /// write JSONL session logs.
     async fn probe_interactive_uis(&self) -> Result<()> {
-        let state = self.state_mgr.load_state().await?;
+        let rt = self.state_mgr.load_runtime().await?;
         let mut ui_states = self.last_ui_states.lock().await;
         let mut pane_outputs = self.last_pane_output.lock().await;
 
-        for binding in &state.thread_bindings {
-            let wid = WindowId(binding.window_id.clone());
+        for (cb, wb) in rt.resolved_bindings() {
+            let wid = WindowId(wb.window_id.clone());
             let pane_text = match self.tmux_mgr.capture_pane(&wid).await {
                 Ok(t) => t,
                 Err(_) => continue, // window gone
@@ -3397,12 +3468,8 @@ impl Server {
             // Strip ANSI
             let clean = atim_parser::terminal::TerminalParser::strip_ansi(&pane_text);
 
-            // Look up the per-window agent from WindowState
-            let agent_type = state
-                .window_states
-                .get(&binding.window_id)
-                .map(|ws| ws.agent_type.as_str())
-                .unwrap_or("");
+            // Agent type comes directly from the window binding
+            let agent_type = wb.agent_type.as_str();
             let agent = self
                 .config
                 .agent_registry
@@ -3419,16 +3486,16 @@ impl Server {
                 .map(|u| format!("{:?}:{}", u.kind, u.content.len()))
                 .unwrap_or_default();
 
-            let prev = ui_states.get(&binding.window_id);
+            let prev = ui_states.get(&wb.window_id);
             if prev == Some(&content_hash) {
                 // UI unchanged — still forward pane output if agent uses PaneCapture
                 if agent.output_source() == OutputSource::PaneCapture {
-                    self.forward_new_pane_output(binding, &clean, &mut pane_outputs)
+                    self.forward_new_pane_output(wb, cb, &clean, &mut pane_outputs)
                         .await;
                 }
                 continue;
             }
-            ui_states.insert(binding.window_id.clone(), content_hash);
+            ui_states.insert(wb.window_id.clone(), content_hash);
 
             // New or changed UI — send keyboard
             if let Some(interactive) = ui {
@@ -3437,8 +3504,8 @@ impl Server {
                 let should_send_card = interactive.kind != UiKind::AskUserQuestion;
                 if should_send_card {
                     let target = MessageTarget {
-                        chat_id: ChatId(binding.group_chat_id.unwrap_or(binding.chat_id)),
-                        thread_id: Some(ThreadId(binding.thread_id)),
+                        chat_id: ChatId(cb.group_chat_id.unwrap_or(cb.chat_id)),
+                        thread_id: Some(ThreadId(cb.thread_id)),
                         chat_name: None,
                     };
                     let buttons = ui_to_buttons(&interactive);
@@ -3456,7 +3523,7 @@ impl Server {
 
             // Forward terminal output for PaneCapture agents
             if agent.output_source() == OutputSource::PaneCapture {
-                self.forward_new_pane_output(binding, &clean, &mut pane_outputs)
+                self.forward_new_pane_output(wb, cb, &clean, &mut pane_outputs)
                     .await;
             }
         }
@@ -3472,15 +3539,16 @@ impl Server {
     /// newly-appeared lines that aren't TUI chrome (borders, prompts, etc.).
     async fn forward_new_pane_output(
         &self,
-        binding: &ThreadBinding,
+        wb: &WindowBinding,
+        cb: &ChatBinding,
         clean: &str,
         pane_outputs: &mut HashMap<String, String>,
     ) {
-        let last = pane_outputs.get(&binding.window_id);
+        let last = pane_outputs.get(&wb.window_id);
 
         // First call: establish baseline
         let Some(prev) = last else {
-            pane_outputs.insert(binding.window_id.clone(), clean.to_string());
+            pane_outputs.insert(wb.window_id.clone(), clean.to_string());
             return;
         };
 
@@ -3503,7 +3571,7 @@ impl Server {
             .collect();
 
         // Update baseline even if we don't forward (so future diffs are accurate)
-        pane_outputs.insert(binding.window_id.clone(), clean.to_string());
+        pane_outputs.insert(wb.window_id.clone(), clean.to_string());
 
         if added.is_empty() {
             return;
@@ -3554,8 +3622,8 @@ impl Server {
 
         let joined = significant.join("\n");
         let target = MessageTarget {
-            chat_id: ChatId(binding.group_chat_id.unwrap_or(binding.chat_id)),
-            thread_id: Some(ThreadId(binding.thread_id)),
+            chat_id: ChatId(cb.group_chat_id.unwrap_or(cb.chat_id)),
+            thread_id: Some(ThreadId(cb.thread_id)),
             chat_name: None,
         };
         let display = if joined.len() > MAX_MSG_LEN {
@@ -3582,15 +3650,17 @@ impl Server {
         thread_id: i64,
         text: &str,
     ) -> Result<()> {
-        let state = self.state_mgr.load_state().await?;
-        let binding = match state
-            .thread_bindings
+        let mut rt = self.state_mgr.load_runtime().await?;
+
+        // Find ChatBinding for this user+thread
+        let cb = match rt
+            .chat_bindings
             .iter()
             .find(|b| b.user_id == user_id && b.thread_id == thread_id)
         {
-            Some(b) => b.clone(),
+            Some(cb) => cb.clone(),
             None => {
-                tracing::warn!("[recover] No binding found for user={user_id} thread={thread_id}");
+                tracing::warn!("[recover] No chat binding for user={user_id} thread={thread_id}");
                 let _ = self
                     .im_adapter
                     .send_message(target, "Session not found.")
@@ -3598,75 +3668,40 @@ impl Server {
                 return Ok(());
             }
         };
-        let old_window_id = binding.window_id.clone();
 
-        // Try V1 window_states first (keyed by stale window_id, may be missing
-        // after name-based resolution moved the V2 runtime to a different key).
-        // Fall back to V2 runtime: find the chat binding by (user_id, thread_id)
-        // and resolve session info from there.
-        let (cwd, session_id, agent_type_name) = match state.window_states.get(&old_window_id) {
-            Some(ws) => (ws.cwd.clone(), ws.session_id.clone(), ws.agent_type.clone()),
-            None => {
-                // Fall back to V2 runtime data
-                let rt = self.state_mgr.load_runtime().await?;
-                let cb = rt
-                    .chat_bindings
-                    .iter()
-                    .find(|cb| cb.user_id == user_id && cb.thread_id == thread_id);
-                let sid = cb.and_then(|cb| {
-                    if cb.session_id.is_empty() {
-                        None
-                    } else {
-                        Some(cb.session_id.clone())
-                    }
-                });
-                // session_id in the chat_binding may have been assigned by SessionStart hook
-                // without a corresponding entry in rt.sessions — construct fallback values
-                // from the window_binding, session_map.json, or defaults.
-                let session_info = sid.as_ref().and_then(|s| rt.sessions.get(s));
-                let (fb_cwd, fb_agent) = if let Some(si) = session_info {
-                    (si.cwd.clone(), si.agent_type.clone())
-                } else if let Ok(map) = self.state_mgr.load_session_map().await {
-                    // Try to find which window this session was bound to
-                    let wid = map.iter().find_map(|(wid, sid_val)| {
-                        if sid.as_deref() == Some(sid_val.as_str()) {
-                            Some(wid.clone())
-                        } else {
-                            None
-                        }
-                    });
-                    if let Some(wid) = wid.and_then(|w| rt.window_bindings.get(&w)) {
-                        (wid.cwd.clone(), wid.agent_type.clone())
-                    } else if let Some(cb) = cb {
-                        // No window binding — use cwd from chat_binding's display_name
-                        // by trying to find the original session in the V1 state
-                        let v1_cwd = self.state_mgr.load_state().await.ok().and_then(|s| {
-                            s.window_states
-                                .values()
-                                .find(|ws| ws.window_name == cb.display_name)
-                                .map(|ws| ws.cwd.clone())
-                        });
-                        (
-                            v1_cwd.unwrap_or_else(|| "~".to_string()),
-                            "claude".to_string(),
-                        )
-                    } else {
-                        ("~".to_string(), "claude".to_string())
-                    }
-                } else {
-                    ("~".to_string(), "claude".to_string())
-                };
-                (fb_cwd, sid.unwrap_or_default(), fb_agent)
+        // Resolve session info from window_binding or session store
+        let old_window_id: String;
+        let cwd: String;
+        let session_id: String;
+        let agent_type_name: String;
+
+        if let Some(wb) = rt.resolve_window_binding(user_id, thread_id) {
+            old_window_id = wb.window_id.clone();
+            cwd = wb.cwd.clone();
+            session_id = wb.session_id.clone();
+            agent_type_name = wb.agent_type.clone();
+        } else {
+            // Window is dead — reconstruct from chat_binding + sessions
+            old_window_id = String::new();
+            session_id = cb.session_id.clone();
+            let si = if !session_id.is_empty() {
+                rt.sessions.get(&session_id)
+            } else {
+                None
+            };
+            if let Some(si) = si {
+                cwd = si.cwd.clone();
+                agent_type_name = si.agent_type.clone();
+            } else {
+                cwd = "~".to_string();
+                agent_type_name = "claude".to_string();
             }
-        };
-        let cwd = cwd.as_str();
-        let session_id = session_id.as_str();
-        let agent_type_name = agent_type_name.as_str();
+        }
 
         let agent = self
             .config
             .agent_registry
-            .get(agent_type_name)
+            .get(&agent_type_name)
             .cloned()
             .unwrap_or_else(|| self.config.agent_registry.default().clone());
 
@@ -3676,12 +3711,12 @@ impl Server {
             .await;
 
         // Create new tmux window
-        let window_name = &binding.display_name;
-        let new_window_id = self.tmux_mgr.new_window(window_name, cwd).await?;
+        let window_name = &cb.display_name;
+        let new_window_id = self.tmux_mgr.new_window(window_name, &cwd).await?;
 
         // Launch agent (resume if we have a session_id)
         if !session_id.is_empty() && agent.supports_sessions() {
-            if let Some(resume_cmd) = agent.resume_command(session_id) {
+            if let Some(resume_cmd) = agent.resume_command(&session_id) {
                 self.tmux_mgr.send_line(&new_window_id, &resume_cmd).await?;
             } else {
                 let launch_cmd = agent_launch_cmd(&agent);
@@ -3706,120 +3741,77 @@ impl Server {
             tokio::time::sleep(Duration::from_millis(1500)).await;
         }
 
-        // ── Update V1 state: re-key window_states and binding to the new window_id ──
-        let mut new_state = self.state_mgr.load_state().await?;
-        if let Some(old_ws) = new_state.window_states.remove(&old_window_id) {
-            new_state
-                .window_states
-                .insert(new_window_id.0.clone(), old_ws);
-        }
-        if let Some(b) = new_state
-            .thread_bindings
-            .iter_mut()
-            .find(|b| b.user_id == user_id && b.thread_id == thread_id)
-        {
-            b.window_id = new_window_id.0.clone();
-        }
-        self.state_mgr.save_state(&new_state).await?;
-
         // ── Update V2 runtime: re-key window_binding and chat_binding ──
-        let mut rt = self.state_mgr.load_runtime().await?;
+        // Single load-save cycle to avoid race conditions with concurrent state writers.
+        if !old_window_id.is_empty() {
+            rt.window_bindings.remove(&old_window_id);
+        }
 
-        // Remove old window binding
-        rt.window_bindings.remove(&old_window_id);
+        let new_session_id: String = if !session_id.is_empty() && agent.supports_sessions() {
+            session_id.clone()
+        } else {
+            String::new()
+        };
 
-        // Insert new window binding for the new window
         rt.window_bindings.insert(
             new_window_id.0.clone(),
             WindowBinding {
                 window_id: new_window_id.0.clone(),
-                session_id: if !session_id.is_empty() && agent.supports_sessions() {
-                    session_id.to_string()
-                } else {
-                    String::new()
-                },
-                cwd: cwd.to_string(),
+                session_id: new_session_id.clone(),
+                cwd: cwd.clone(),
                 agent_type: agent.name().to_string(),
                 window_name: window_name.clone(),
             },
         );
 
-        // Update chat_binding session_id if we have one
-        if let Some(cb) = rt
-            .chat_bindings
-            .iter_mut()
-            .find(|cb| cb.user_id == user_id && cb.thread_id == thread_id)
-            && !session_id.is_empty()
-            && agent.supports_sessions()
+        if !new_session_id.is_empty()
+            && let Some(cb) = rt
+                .chat_bindings
+                .iter_mut()
+                .find(|cb| cb.user_id == user_id && cb.thread_id == thread_id)
         {
-            cb.session_id = session_id.to_string();
+            cb.session_id = new_session_id.clone();
         }
 
-        self.state_mgr.save_runtime(&rt).await?;
-
         // Clean up stale session_map entries for the old window_id
-        if let Ok(mut map) = self.state_mgr.load_session_map().await
+        if !old_window_id.is_empty()
+            && let Ok(mut map) = self.state_mgr.load_session_map().await
             && map.remove(&old_window_id).is_some()
         {
             let _ = self.state_mgr.save_session_map(&map).await;
         }
 
-        // For session-based agents, resolve the new session_id if not resuming
-        if !session_id.is_empty() && agent.supports_sessions() {
-            // Already resumed — update window_state with the resolved session_id
-            if let Ok(mut final_state) = self.state_mgr.load_state().await {
-                if let Some(ws) = final_state.window_states.get_mut(&new_window_id.0) {
-                    ws.session_id = session_id.to_string();
-                }
-                let _ = self.state_mgr.save_state(&final_state).await;
-            }
-            // Also update the V2 runtime binding with the resolved session_id
-            let mut final_rt = self.state_mgr.load_runtime().await?;
-            if let Some(wb) = final_rt.window_bindings.get_mut(&new_window_id.0) {
-                wb.session_id = session_id.to_string();
-            }
-            // Update session_map so monitor can track this window
-            {
-                let mut map = self.state_mgr.load_session_map().await.unwrap_or_default();
-                map.insert(new_window_id.0.clone(), session_id.to_string());
-                let _ = self.state_mgr.save_session_map(&map).await;
-            }
-            // Clear the old monitor offset so the monitor re-scans from the beginning
-            self.state_mgr.remove_offset(session_id).await.ok();
-            self.byte_offsets.lock().await.remove(session_id);
-            self.state_mgr.save_runtime(&final_rt).await?;
+        // For resumed sessions, update session_map + clear monitor offset
+        if !new_session_id.is_empty() {
+            let mut map = self.state_mgr.load_session_map().await.unwrap_or_default();
+            map.insert(new_window_id.0.clone(), new_session_id.clone());
+            let _ = self.state_mgr.save_session_map(&map).await;
+            self.state_mgr.remove_offset(&session_id).await.ok();
+            self.byte_offsets.lock().await.remove(&session_id);
         } else if agent.supports_sessions() {
+            // Resolve session_id for new session-based agents
             let wid = new_window_id.0.clone();
             if let Some(sid) = self
-                .resolve_session_id(&wid, Duration::from_secs(15), Some(cwd))
+                .resolve_session_id(&wid, Duration::from_secs(15), Some(&cwd))
                 .await
             {
-                // Update V1 state
-                if let Ok(mut final_state) = self.state_mgr.load_state().await {
-                    if let Some(ws) = final_state.window_states.get_mut(&wid) {
-                        ws.session_id = sid.clone();
-                    }
-                    let _ = self.state_mgr.save_state(&final_state).await;
-                }
-                // Update V2 runtime
-                let mut final_rt = self.state_mgr.load_runtime().await?;
-                if let Some(wb) = final_rt.window_bindings.get_mut(&wid) {
+                if let Some(wb) = rt.window_bindings.get_mut(&wid) {
                     wb.session_id = sid.clone();
                 }
-                if let Some(cb) = final_rt
+                if let Some(cb) = rt
                     .chat_bindings
                     .iter_mut()
                     .find(|cb| cb.user_id == user_id && cb.thread_id == thread_id)
                 {
                     cb.session_id = sid.clone();
                 }
-                // Update session_map
                 let mut map = self.state_mgr.load_session_map().await.unwrap_or_default();
                 map.insert(wid, sid);
                 let _ = self.state_mgr.save_session_map(&map).await;
-                self.state_mgr.save_runtime(&final_rt).await?;
             }
         }
+
+        self.state_mgr.save_runtime(&rt).await?;
 
         // Forward the user's original text to the new window
         let is_copilot = agent.name() == "copilot";
@@ -3831,11 +3823,11 @@ impl Server {
             self.tmux_mgr.send_line(&new_window_id, text).await?;
         }
 
-        let sc_chat_id = binding.group_chat_id.unwrap_or(binding.chat_id);
+        let sc_chat_id = cb.group_chat_id.unwrap_or(cb.chat_id);
         self.status_consumed
             .lock()
             .await
-            .remove(&(sc_chat_id, binding.thread_id));
+            .remove(&(sc_chat_id, cb.thread_id));
 
         Ok(())
     }
@@ -3851,22 +3843,27 @@ impl Server {
             return Ok(());
         }
 
-        let mut state = self.state_mgr.load_state().await?;
-        if let Some(binding) = state
-            .thread_bindings
+        let mut rt = self.state_mgr.load_runtime().await?;
+        if let Some(cb) = rt
+            .chat_bindings
             .iter_mut()
             .find(|b| b.user_id == user_id && b.thread_id == thread_id)
         {
-            binding.display_name = new_name.to_string();
-            if let Some(topic) = &mut binding.topic_name {
+            cb.display_name = new_name.to_string();
+            if let Some(topic) = &mut cb.topic_name {
                 *topic = new_name.to_string();
             }
-            let wid = WindowId(binding.window_id.clone());
-            let _ = self.tmux_mgr.rename_window(&wid, new_name).await;
-            if let Some(ws) = state.window_states.get_mut(&binding.window_id) {
-                ws.window_name = new_name.to_string();
+            if !cb.session_id.is_empty()
+                && let Some(wb) = rt
+                    .window_bindings
+                    .values_mut()
+                    .find(|wb| wb.session_id == cb.session_id)
+            {
+                wb.window_name = new_name.to_string();
+                let wid = WindowId(wb.window_id.clone());
+                let _ = self.tmux_mgr.rename_window(&wid, new_name).await;
             }
-            self.state_mgr.save_state(&state).await?;
+            self.state_mgr.save_runtime(&rt).await?;
         }
         Ok(())
     }
@@ -3879,15 +3876,19 @@ impl Server {
         thread_id: i64,
         agent_name: &str,
     ) -> Result<()> {
-        let mut state = self.state_mgr.load_state().await?;
-        if let Some(binding) = state
-            .thread_bindings
+        let mut rt = self.state_mgr.load_runtime().await?;
+        if let Some(cb) = rt
+            .chat_bindings
             .iter()
             .find(|b| b.user_id == user_id && b.thread_id == thread_id)
-            && let Some(ws) = state.window_states.get_mut(&binding.window_id)
+            && !cb.session_id.is_empty()
+            && let Some(wb) = rt
+                .window_bindings
+                .values_mut()
+                .find(|wb| wb.session_id == cb.session_id)
         {
-            ws.agent_type = agent_name.to_string();
-            self.state_mgr.save_state(&state).await?;
+            wb.agent_type = agent_name.to_string();
+            self.state_mgr.save_runtime(&rt).await?;
         }
         Ok(())
     }

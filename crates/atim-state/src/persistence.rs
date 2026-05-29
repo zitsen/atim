@@ -7,9 +7,7 @@ use tokio::sync::Mutex;
 
 use atim_core::config::ConfigToml;
 use atim_core::error::{Error, Result};
-use atim_core::session::{
-    ChatBinding, RuntimeState, ServerState, SessionInfo, ThreadBinding, WindowBinding, WindowState,
-};
+use atim_core::session::{ChatBinding, RuntimeState, SessionInfo, WindowBinding};
 
 // ── Schema (self-describing — SQLite stores its own version) ──
 
@@ -20,27 +18,9 @@ CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER NOT NULL
 );
 
--- V1 tables (kept for migration)
-CREATE TABLE IF NOT EXISTS window_states (
-    window_id   TEXT PRIMARY KEY NOT NULL,
-    session_id  TEXT NOT NULL DEFAULT '',
-    cwd         TEXT NOT NULL DEFAULT '',
-    window_name TEXT NOT NULL DEFAULT '',
-    agent_type  TEXT NOT NULL DEFAULT 'claude'
-);
-CREATE TABLE IF NOT EXISTS thread_bindings (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id        INTEGER NOT NULL,
-    thread_id      INTEGER NOT NULL,
-    chat_id        INTEGER NOT NULL,
-    window_id      TEXT NOT NULL,
-    display_name   TEXT NOT NULL DEFAULT '',
-    group_chat_id  INTEGER,
-    topic_name     TEXT,
-    UNIQUE(user_id, thread_id, chat_id)
-);
-CREATE INDEX IF NOT EXISTS idx_thread_bindings_window
-    ON thread_bindings(window_id);
+-- V1 tables (dropped — migration complete)
+DROP TABLE IF EXISTS window_states;
+DROP TABLE IF EXISTS thread_bindings;
 CREATE TABLE IF NOT EXISTS session_map (
     window_id  TEXT PRIMARY KEY NOT NULL,
     session_id TEXT NOT NULL
@@ -155,9 +135,6 @@ impl Store {
         // Auto-migrate from old JSON files
         store.migrate_from_json(atim_dir).await?;
 
-        // V1 → V2 migration: populate sessions, chat_bindings, window_bindings
-        store.migrate_v1_to_v2().await?;
-
         Ok(store)
     }
 
@@ -180,11 +157,71 @@ impl Store {
 
         tracing::info!("Migrating from JSON files to store.db...");
 
-        // 1. Migrate state.json → window_states + thread_bindings
+        // 1. Migrate state.json → V2 tables (sessions + window_bindings + chat_bindings)
         if let Ok(data) = tokio::fs::read_to_string(&state_json).await
-            && let Ok(state) = serde_json::from_str::<ServerState>(&data)
+            && let Ok(val) = serde_json::from_str::<serde_json::Value>(&data)
         {
-            self.import_server_state(&state).await?;
+            let db = self.db.lock().await;
+
+            // Populate sessions and window_bindings from window_states
+            if let Some(windows) = val.get("window_states").and_then(|v| v.as_object()) {
+                for (wid, ws) in windows {
+                    let session_id = ws.get("session_id").and_then(|v| v.as_str()).unwrap_or("");
+                    let cwd = ws.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
+                    let window_name = ws.get("window_name").and_then(|v| v.as_str()).unwrap_or("");
+                    let agent_type = ws
+                        .get("agent_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("claude");
+
+                    if !session_id.is_empty() {
+                        let _ = db.execute(
+                            "INSERT OR IGNORE INTO sessions (session_id, cwd, agent_type, created_at)
+                             VALUES (?1, ?2, ?3, datetime('now'))",
+                            params![session_id, cwd, agent_type],
+                        );
+                    }
+                    let _ = db.execute(
+                        "INSERT OR IGNORE INTO window_bindings
+                            (window_id, session_id, cwd, agent_type, window_name)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![wid, session_id, cwd, agent_type, window_name],
+                    );
+                }
+            }
+
+            // Populate chat_bindings from thread_bindings
+            if let Some(bindings) = val.get("thread_bindings").and_then(|v| v.as_array()) {
+                for tb in bindings {
+                    let user_id = tb.get("user_id").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let thread_id = tb.get("thread_id").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let chat_id = tb.get("chat_id").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let window_id = tb.get("window_id").and_then(|v| v.as_str()).unwrap_or("");
+                    let display_name = tb
+                        .get("display_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let group_chat_id = tb.get("group_chat_id").and_then(|v| v.as_i64());
+                    let topic_name = tb.get("topic_name").and_then(|v| v.as_str());
+
+                    // Look up session_id from the window_states in the same JSON
+                    let session_id = val
+                        .get("window_states")
+                        .and_then(|v| v.as_object())
+                        .and_then(|wins| wins.get(window_id))
+                        .and_then(|ws| ws.get("session_id"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+
+                    let _ = db.execute(
+                        "INSERT OR IGNORE INTO chat_bindings
+                            (user_id, thread_id, chat_id, display_name, group_chat_id, topic_name, session_id)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        params![user_id, thread_id, chat_id, display_name, group_chat_id, topic_name, session_id],
+                    );
+                }
+            }
+            drop(db);
         }
 
         // 2. Migrate session_map.json → session_map
@@ -230,53 +267,6 @@ impl Store {
         }
 
         tracing::info!("Migration complete.");
-        Ok(())
-    }
-
-    async fn import_server_state(&self, state: &ServerState) -> Result<()> {
-        let db = self.db.lock().await;
-
-        let mut stmt = db
-            .prepare_cached(
-                "INSERT OR REPLACE INTO window_states
-                    (window_id, session_id, cwd, window_name, agent_type)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-            )
-            .map_err(|e| Error::State(format!("prepare window_states insert: {e}")))?;
-
-        for (wid, ws) in &state.window_states {
-            stmt.execute(params![
-                wid,
-                ws.session_id,
-                ws.cwd,
-                ws.window_name,
-                ws.agent_type,
-            ])
-            .map_err(|e| Error::State(format!("insert window_state: {e}")))?;
-        }
-        drop(stmt);
-
-        let mut stmt = db
-            .prepare_cached(
-                "INSERT OR REPLACE INTO thread_bindings
-                    (user_id, thread_id, chat_id, window_id, display_name, group_chat_id, topic_name)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            )
-            .map_err(|e| Error::State(format!("prepare bindings insert: {e}")))?;
-
-        for tb in &state.thread_bindings {
-            stmt.execute(params![
-                tb.user_id,
-                tb.thread_id,
-                tb.chat_id,
-                tb.window_id,
-                tb.display_name,
-                tb.group_chat_id,
-                tb.topic_name,
-            ])
-            .map_err(|e| Error::State(format!("insert binding: {e}")))?;
-        }
-
         Ok(())
     }
 
@@ -334,136 +324,6 @@ impl Store {
                 .map_err(|e| Error::State(format!("insert feishu user_id: {e}")))?;
         }
         Ok(())
-    }
-
-    // ── Server state ──
-
-    /// Load the full server state from SQLite.
-    pub async fn load_state(&self) -> Result<ServerState> {
-        let db = self.db.lock().await;
-
-        let mut stmt = db
-            .prepare_cached(
-                "SELECT window_id, session_id, cwd, window_name, agent_type
-                 FROM window_states",
-            )
-            .map_err(|e| Error::State(format!("prepare load window_states: {e}")))?;
-
-        let windows: HashMap<String, WindowState> = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    WindowState {
-                        session_id: row.get(1)?,
-                        cwd: row.get(2)?,
-                        window_name: row.get(3)?,
-                        agent_type: row.get(4)?,
-                    },
-                ))
-            })
-            .map_err(|e| Error::State(format!("query window_states: {e}")))?
-            .filter_map(|r| r.ok())
-            .collect();
-        drop(stmt);
-
-        let mut stmt = db
-            .prepare_cached(
-                "SELECT user_id, thread_id, chat_id, window_id, display_name, group_chat_id, topic_name
-                 FROM thread_bindings ORDER BY id",
-            )
-            .map_err(|e| Error::State(format!("prepare load bindings: {e}")))?;
-
-        let bindings: Vec<ThreadBinding> = stmt
-            .query_map([], |row| {
-                Ok(ThreadBinding {
-                    user_id: row.get(0)?,
-                    thread_id: row.get(1)?,
-                    chat_id: row.get(2)?,
-                    window_id: row.get(3)?,
-                    display_name: row.get(4)?,
-                    group_chat_id: row.get(5)?,
-                    topic_name: row.get(6)?,
-                })
-            })
-            .map_err(|e| Error::State(format!("query bindings: {e}")))?
-            .filter_map(|r| r.ok())
-            .collect();
-
-        // window_display_names and user_window_offsets are deprecated
-        // but kept as empty maps for backward compat.
-        Ok(ServerState {
-            window_states: windows,
-            thread_bindings: bindings,
-            window_display_names: HashMap::new(),
-            user_window_offsets: HashMap::new(),
-        })
-    }
-
-    /// Save full server state to SQLite (transactional).
-    pub async fn save_state(&self, state: &ServerState) -> Result<()> {
-        let db = self.db.lock().await;
-
-        db.execute_batch("BEGIN")
-            .map_err(|e| Error::State(format!("begin transaction: {e}")))?;
-
-        let r = (|| -> std::result::Result<(), rusqlite::Error> {
-            db.execute("DELETE FROM window_states", [])?;
-            {
-                let mut stmt = db.prepare_cached(
-                    "INSERT INTO window_states
-                        (window_id, session_id, cwd, window_name, agent_type)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
-                )?;
-                for (wid, ws) in &state.window_states {
-                    stmt.execute(params![
-                        wid,
-                        ws.session_id,
-                        ws.cwd,
-                        ws.window_name,
-                        ws.agent_type,
-                    ])?;
-                }
-            }
-
-            db.execute("DELETE FROM thread_bindings", [])?;
-            {
-                let mut stmt = db.prepare_cached(
-                    "INSERT INTO thread_bindings
-                        (user_id, thread_id, chat_id, window_id, display_name, group_chat_id, topic_name)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                )?;
-                for tb in &state.thread_bindings {
-                    stmt.execute(params![
-                        tb.user_id,
-                        tb.thread_id,
-                        tb.chat_id,
-                        tb.window_id,
-                        tb.display_name,
-                        tb.group_chat_id,
-                        tb.topic_name,
-                    ])?;
-                }
-            }
-            Ok(())
-        })();
-
-        match r {
-            Ok(()) => {
-                db.execute_batch("COMMIT")
-                    .map_err(|e| Error::State(format!("commit: {e}")))?;
-                Ok(())
-            }
-            Err(e) => {
-                db.execute_batch("ROLLBACK").ok();
-                Err(Error::State(format!("save_state failed: {e}")))
-            }
-        }
-    }
-
-    /// Load thread bindings only.
-    pub async fn load_bindings(&self) -> Result<Vec<ThreadBinding>> {
-        let state = self.load_state().await?;
-        Ok(state.thread_bindings)
     }
 
     // ── Session map ──
@@ -678,83 +538,6 @@ impl Store {
                 Err(Error::State(format!("save_feishu_id_map failed: {e}")))
             }
         }
-    }
-
-    // ── V1 → V2 migration ──
-
-    /// Migrate from V1 (window_states + thread_bindings + session_map) to
-    /// V2 (sessions + chat_bindings + window_bindings) schema.
-    async fn migrate_v1_to_v2(&self) -> Result<()> {
-        let db = self.db.lock().await;
-
-        // Check if already migrated
-        let v2_count: i64 = db
-            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
-            .unwrap_or(0);
-        if v2_count > 0 {
-            return Ok(());
-        }
-
-        let v1_count: i64 = db
-            .query_row("SELECT COUNT(*) FROM window_states", [], |row| row.get(0))
-            .unwrap_or(0);
-        if v1_count == 0 {
-            return Ok(());
-        }
-
-        tracing::info!("Migrating V1 → V2 schema...");
-
-        // 1. sessions table: dedup by session_id, take first cwd+agent_type
-        db.execute_batch(
-            "INSERT OR IGNORE INTO sessions (session_id, cwd, agent_type, created_at)
-             SELECT DISTINCT session_id, cwd, agent_type, datetime('now')
-             FROM window_states
-             WHERE session_id != ''",
-        )
-        .map_err(|e| Error::State(format!("migrate sessions: {e}")))?;
-
-        // 2. window_bindings table: all V1 window_states
-        db.execute_batch(
-            "INSERT OR IGNORE INTO window_bindings
-                (window_id, session_id, cwd, agent_type, window_name)
-             SELECT window_id, session_id, cwd, agent_type, window_name
-             FROM window_states",
-        )
-        .map_err(|e| Error::State(format!("migrate window_bindings: {e}")))?;
-
-        // 3. chat_bindings table: join thread_bindings with window_states to get session_id
-        //    For bindings whose window has no matching window_states entry, session_id is ''
-        //    (the runtime will discover it later).
-        db.execute_batch(
-            "INSERT OR IGNORE INTO chat_bindings
-                (user_id, thread_id, chat_id, display_name, group_chat_id, topic_name, session_id)
-             SELECT tb.user_id, tb.thread_id, tb.chat_id, tb.display_name, tb.group_chat_id, tb.topic_name,
-                    COALESCE(ws.session_id, '')
-             FROM thread_bindings tb
-             LEFT JOIN window_states ws ON tb.window_id = ws.window_id",
-        )
-        .map_err(|e| Error::State(format!("migrate chat_bindings: {e}")))?;
-
-        // 4. Import session_map.json entries into sessions table if not already there
-        let sm_path = self.atim_dir.join("session_map.json");
-        if sm_path.exists()
-            && let Ok(data) = std::fs::read_to_string(&sm_path)
-            && let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&data)
-        {
-            let now = Utc::now().to_rfc3339();
-            let mut stmt = db
-                .prepare_cached(
-                    "INSERT OR IGNORE INTO sessions (session_id, cwd, agent_type, created_at)
-                     VALUES (?1, '', 'claude', ?2)",
-                )
-                .map_err(|e| Error::State(format!("prepare session_map import: {e}")))?;
-            for sid in map.values() {
-                stmt.execute(params![sid, now]).ok();
-            }
-        }
-
-        tracing::info!("V1 → V2 migration complete.");
-        Ok(())
     }
 
     // ── V2 API: RuntimeState ──

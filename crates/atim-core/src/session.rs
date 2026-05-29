@@ -2,40 +2,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::message::SessionId;
 
-// ── V1 types (kept for migration) ──
-
-/// Persistent state for a tmux window. V1 legacy — kept for DB migration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct WindowState {
-    pub session_id: String,
-    pub cwd: String,
-    pub window_name: String,
-    pub agent_type: String,
-}
-
-/// Thread binding: maps a Telegram/Flybook topic to a tmux window. V1 legacy.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ThreadBinding {
-    pub user_id: i64,
-    pub thread_id: i64,
-    pub chat_id: i64,
-    pub window_id: String,
-    pub display_name: String,
-    pub group_chat_id: Option<i64>,
-    #[serde(default)]
-    pub topic_name: Option<String>,
-}
-
-/// Full persisted state. V1 legacy.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ServerState {
-    pub window_states: std::collections::HashMap<String, WindowState>,
-    pub thread_bindings: Vec<ThreadBinding>,
-    pub window_display_names: std::collections::HashMap<String, String>,
-    pub user_window_offsets:
-        std::collections::HashMap<String, std::collections::HashMap<String, u64>>,
-}
-
 // ── V2 types — session-driven design ──
 
 /// A known session identified by its stable session_id (UUID).
@@ -80,6 +46,61 @@ pub struct RuntimeState {
     pub window_bindings: std::collections::HashMap<String, WindowBinding>,
     /// Stable chat bindings (ordered, most recent last).
     pub chat_bindings: Vec<ChatBinding>,
+}
+
+impl RuntimeState {
+    /// Resolve WindowBinding for the given (user_id, thread_id) via ChatBinding → session_id.
+    pub fn resolve_window_binding(&self, user_id: i64, thread_id: i64) -> Option<&WindowBinding> {
+        let cb = self
+            .chat_bindings
+            .iter()
+            .find(|b| b.user_id == user_id && b.thread_id == thread_id)?;
+        if cb.session_id.is_empty() {
+            return None;
+        }
+        self.window_bindings
+            .values()
+            .find(|wb| wb.session_id == cb.session_id)
+    }
+
+    /// Resolve window_id string for the given (user_id, thread_id).
+    pub fn resolve_window_id(&self, user_id: i64, thread_id: i64) -> Option<&str> {
+        self.resolve_window_binding(user_id, thread_id)
+            .map(|wb| wb.window_id.as_str())
+    }
+
+    /// Iterate all (ChatBinding, WindowBinding) pairs joined by session_id.
+    /// Skips bindings with empty session_id or no matching window.
+    pub fn resolved_bindings(&self) -> Vec<(&ChatBinding, &WindowBinding)> {
+        self.chat_bindings
+            .iter()
+            .filter_map(|cb| {
+                if cb.session_id.is_empty() {
+                    None
+                } else {
+                    self.window_bindings
+                        .values()
+                        .find(|wb| wb.session_id == cb.session_id)
+                        .map(|wb| (cb, wb))
+                }
+            })
+            .collect()
+    }
+
+    /// Find a ChatBinding matching (user_id, thread_id), then look up its window_id.
+    /// Returns (ChatBinding, window_id) or None.
+    pub fn chat_binding_with_window(
+        &self,
+        user_id: i64,
+        thread_id: i64,
+    ) -> Option<(&ChatBinding, &str)> {
+        let cb = self
+            .chat_bindings
+            .iter()
+            .find(|b| b.user_id == user_id && b.thread_id == thread_id)?;
+        let wid = self.resolve_window_id(user_id, thread_id)?;
+        Some((cb, wid))
+    }
 }
 
 // ── Monitor / agent types (unchanged) ──
