@@ -1520,14 +1520,24 @@ impl Server {
                     if !window_id_str.is_empty() {
                         rt.window_bindings.remove(&window_id_str);
                     }
-                    // Insert or update window_binding for the live window
+                    // Insert or update window_binding for the live window.
+                    // When there's no existing WindowBinding (e.g. after restart),
+                    // resolve agent_type from the session info map.
+                    let agent_type = wb_opt
+                        .map(|w| w.agent_type.clone())
+                        .or_else(|| {
+                            rt.sessions
+                                .get(&binding.session_id)
+                                .map(|s| s.agent_type.clone())
+                        })
+                        .unwrap_or_default();
                     rt.window_bindings.insert(
                         real_wid.clone(),
                         WindowBinding {
                             window_id: real_wid.clone(),
                             session_id: binding.session_id.clone(),
                             cwd: wb_opt.map(|w| w.cwd.clone()).unwrap_or_default(),
-                            agent_type: wb_opt.map(|w| w.agent_type.clone()).unwrap_or_default(),
+                            agent_type,
                             window_name: binding.display_name.clone(),
                         },
                     );
@@ -1804,49 +1814,67 @@ impl Server {
                         && let Some(stored_type) = stored_agent_type
                         && running_agent != stored_type
                     {
-                        tracing::info!(
-                            "[handle_text_message] Agent type mismatch: stored='{stored_type}' running='{running_agent}', prompting user {}",
-                            user_id,
-                        );
-                        let key = (user_id, thread_id);
-                        {
-                            let mut pending = self.pending_messages.lock().await;
-                            pending.insert(key, text.to_string());
+                        if stored_type.is_empty() {
+                            // Empty agent_type means the window_binding was created
+                            // by a previous bug or missing session data. Fix it silently
+                            // instead of prompting the user.
+                            tracing::info!(
+                                "[handle_text_message] Fixing empty agent_type → '{running_agent}' for window {}",
+                                window_id_str,
+                            );
+                            if let Ok(mut rt) = self.state_mgr.load_runtime().await
+                                && let Some(wb) = rt.window_bindings.get_mut(&window_id_str)
+                            {
+                                wb.agent_type = running_agent.to_string();
+                                let _ = self.state_mgr.save_runtime(&rt).await;
+                            }
+                        } else {
+                            tracing::info!(
+                                "[handle_text_message] Agent type mismatch: stored='{stored_type}' running='{running_agent}', prompting user {}",
+                                user_id,
+                            );
+                            let key = (user_id, thread_id);
+                            {
+                                let mut pending = self.pending_messages.lock().await;
+                                pending.insert(key, text.to_string());
+                            }
+                            let mut ctx_lock = self.callback_contexts.lock().await;
+                            let rebind_token =
+                                Self::make_callback_token(&mut ctx_lock, user_id, thread_id);
+                            let cancel_token =
+                                Self::make_callback_token(&mut ctx_lock, user_id, thread_id);
+                            let buttons = vec![
+                                vec![Button {
+                                    text: "🔄 Update Binding".into(),
+                                    callback_data: format!("cb:{rebind_token}:rebind"),
+                                }],
+                                vec![
+                                    Button {
+                                        text: "🆕 New Session".into(),
+                                        callback_data: format!("cb:{rebind_token}:new"),
+                                    },
+                                    Button {
+                                        text: "❌ Cancel".into(),
+                                        callback_data: format!(
+                                            "cb:{cancel_token}:lifecycle_cancel"
+                                        ),
+                                    },
+                                ],
+                            ];
+                            drop(ctx_lock);
+                            let _ = self
+                                .im_adapter
+                                .send_keyboard(
+                                    &target,
+                                    &format!(
+                                        "Agent type has changed from '{}' to '{}'. What would you like to do?",
+                                        stored_type, running_agent,
+                                    ),
+                                    &buttons,
+                                )
+                                .await;
+                            return Ok(());
                         }
-                        let mut ctx_lock = self.callback_contexts.lock().await;
-                        let rebind_token =
-                            Self::make_callback_token(&mut ctx_lock, user_id, thread_id);
-                        let cancel_token =
-                            Self::make_callback_token(&mut ctx_lock, user_id, thread_id);
-                        let buttons = vec![
-                            vec![Button {
-                                text: "🔄 Update Binding".into(),
-                                callback_data: format!("cb:{rebind_token}:rebind"),
-                            }],
-                            vec![
-                                Button {
-                                    text: "🆕 New Session".into(),
-                                    callback_data: format!("cb:{rebind_token}:new"),
-                                },
-                                Button {
-                                    text: "❌ Cancel".into(),
-                                    callback_data: format!("cb:{cancel_token}:lifecycle_cancel"),
-                                },
-                            ],
-                        ];
-                        drop(ctx_lock);
-                        let _ = self
-                            .im_adapter
-                            .send_keyboard(
-                                &target,
-                                &format!(
-                                    "Agent type has changed from '{}' to '{}'. What would you like to do?",
-                                    stored_type, running_agent,
-                                ),
-                                &buttons,
-                            )
-                            .await;
-                        return Ok(());
                     }
 
                     // Try to resolve empty session_id (e.g. copilot sessions)
