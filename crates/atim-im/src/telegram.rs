@@ -555,6 +555,30 @@ impl ImAdapter for TelegramAdapter {
         self.api_post("setMessageReaction", &params).await?;
         Ok(())
     }
+
+    async fn send_kv_table(
+        &self,
+        target: &MessageTarget,
+        title: &str,
+        rows: &[(String, String)],
+    ) -> Result<MessageId> {
+        let mut html = format!("<b>{}</b>\n", title);
+        for (key, val) in rows {
+            html.push_str(&format!("<b>{}</b> {}\n", key, val));
+        }
+        let mut params = serde_json::json!({
+            "chat_id": target.chat_id.0,
+            "text": html.trim(),
+            "parse_mode": "HTML",
+        });
+        if let Some(thread) = target.thread_id {
+            params["message_thread_id"] = serde_json::json!(thread.0);
+        }
+        let result = self.api_post("sendMessage", &params).await?;
+        Ok(MessageId(
+            result["message_id"].as_i64().unwrap_or(0).to_string(),
+        ))
+    }
 }
 
 // ── Parsing helpers ──

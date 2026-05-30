@@ -264,6 +264,15 @@ impl ImAdapter for FloodControlledAdapter {
         // Don't rate-limit reactions
         self.inner.add_reaction(target, message_id, emoji).await
     }
+
+    async fn send_kv_table(
+        &self,
+        target: &MessageTarget,
+        title: &str,
+        rows: &[(String, String)],
+    ) -> Result<MessageId> {
+        self.inner.send_kv_table(target, title, rows).await
+    }
 }
 
 #[cfg(test)]
@@ -340,6 +349,14 @@ mod tests {
             _emoji: &str,
         ) -> Result<()> {
             Ok(())
+        }
+        async fn send_kv_table(
+            &self,
+            _target: &MessageTarget,
+            _title: &str,
+            _rows: &[(String, String)],
+        ) -> Result<MessageId> {
+            Ok(MessageId("mock:1".into()))
         }
     }
 

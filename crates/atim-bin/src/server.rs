@@ -640,7 +640,8 @@ impl Server {
             return Ok(());
         }
 
-        // Check for /usage command
+        // Check for /usage command — uses the same dismiss-then-capture flow
+        // as other Claude Code built-in slash commands.
         if text.trim() == "/usage" {
             if let Some((_binding, wb)) = find_cb() {
                 let wid_str = wb.map(|w| &w.window_id).map(|s| s.as_str()).unwrap_or("");
@@ -651,40 +652,62 @@ impl Server {
                         .await;
                     return Ok(());
                 }
-                let window_id = atim_core::message::WindowId(wid_str.to_string());
-                if !self.tmux_mgr.window_exists(&window_id).await {
+                let wid = WindowId(wid_str.to_string());
+                if !self.tmux_mgr.window_exists(&wid).await {
                     let _ = self
                         .im_adapter
-                        .send_message(&target, "Window no longer exists.")
+                        .send_message(&target, "Session window no longer exists.")
+                        .await;
+                    return Ok(());
+                }
+                let _ = self.im_adapter.send_chat_action(&target).await;
+                self.send_slash_and_capture(&target, &wid, "/usage").await;
+            } else {
+                let _ = self
+                    .im_adapter
+                    .send_message(&target, "No active session.")
+                    .await;
+            }
+            return Ok(());
+        }
+
+        // Claude Code built-in slash commands — capture output and return to chat
+        let trimmed = text.trim();
+        if matches!(
+            trimmed,
+            "/status" | "/doctor" | "/help" | "/compact" | "/clear"
+        ) {
+            if let Some((_binding, wb)) = find_cb() {
+                let wid_str = wb.map(|w| &w.window_id).map(|s| s.as_str()).unwrap_or("");
+                if wid_str.is_empty() {
+                    let _ = self
+                        .im_adapter
+                        .send_message(&target, "No active session.")
+                        .await;
+                    return Ok(());
+                }
+                let wid = WindowId(wid_str.to_string());
+                if !self.tmux_mgr.window_exists(&wid).await {
+                    let _ = self
+                        .im_adapter
+                        .send_message(&target, "Session window no longer exists.")
                         .await;
                     return Ok(());
                 }
 
                 let _ = self.im_adapter.send_chat_action(&target).await;
-                let _ = self
-                    .im_adapter
-                    .send_message(&target, "Fetching usage info...")
-                    .await;
 
-                // Send /usage to the agent
-                self.tmux_mgr.send_line(&window_id, "/usage").await?;
-                // Wait for modal to render
-                tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
-
-                // Capture pane content
-                match self.tmux_mgr.capture_pane(&window_id).await {
-                    Ok(raw) => {
-                        let parsed = parse_usage_output(&raw);
-                        let _ = self.im_adapter.send_message(&target, &parsed).await;
-                    }
-                    Err(e) => {
-                        let msg = format!("Failed to capture usage: {e}");
-                        let _ = self.im_adapter.send_message(&target, &msg).await;
-                    }
+                if matches!(trimmed, "/compact" | "/clear") {
+                    // Silent commands — just forward and confirm
+                    self.tmux_mgr.send_line(&wid, trimmed).await?;
+                    let _ = self
+                        .im_adapter
+                        .send_message(&target, &format!("Sent `{trimmed}` to agent."))
+                        .await;
+                } else {
+                    // Commands that open a modal — capture output and dismiss
+                    self.send_slash_and_capture(&target, &wid, trimmed).await;
                 }
-
-                // Dismiss the modal
-                let _ = self.tmux_mgr.send_key(&window_id, "q").await;
             } else {
                 let _ = self
                     .im_adapter
@@ -4154,6 +4177,103 @@ impl Server {
         Ok(())
     }
 
+    /// Send a slash command to the agent, capture the modal content,
+    /// return it to the chat, then dismiss the modal.
+    async fn send_slash_and_capture(
+        &self,
+        target: &MessageTarget,
+        window_id: &WindowId,
+        command: &str,
+    ) {
+        // 1. Flush stale pane content
+        let _ = self.tmux_mgr.capture_pane(window_id).await;
+        // 2. Send the slash command — opens a modal
+        self.tmux_mgr.send_line(window_id, command).await.ok();
+        // 3. Wait for modal to fully render (status can be slow)
+        tokio::time::sleep(Duration::from_millis(5000)).await;
+
+        // 4. Capture pane content
+        let raw = self
+            .tmux_mgr
+            .capture_pane(window_id)
+            .await
+            .ok()
+            .unwrap_or_default();
+        let content = strip_ansi(&raw);
+
+        // 5. Dismiss the modal
+        self.tmux_mgr.send_key(window_id, "Escape").await.ok();
+
+        // 6. Find the last occurrence of the command in the captured output
+        //    and take everything after it as the modal content.
+        let content: String = content
+            .lines()
+            .rev()
+            .position(|line| line.contains(command))
+            .map(|pos| {
+                let line_count = content.lines().count();
+                let skip = line_count - pos - 1;
+                content.lines().skip(skip).collect::<Vec<_>>().join("\n")
+            })
+            .unwrap_or(content);
+
+        if content.trim().is_empty() {
+            let _ = self
+                .im_adapter
+                .send_message(target, &format!("`{command}` returned no output."))
+                .await;
+            return;
+        }
+
+        match command {
+            "/status" => {
+                let rows = extract_kv_rows(&content, &["Auth token", "Setting sources", "API key"]);
+                if rows.is_empty() {
+                    let _ = self
+                        .im_adapter
+                        .send_message(target, &format!("`{command}` returned no output."))
+                        .await;
+                } else {
+                    let _ = self.im_adapter.send_kv_table(target, "Status", &rows).await;
+                }
+            }
+            "/usage" => {
+                let rows = extract_kv_rows(&content, &[]);
+                if rows.is_empty() {
+                    let _ = self
+                        .im_adapter
+                        .send_message(target, &format!("`{command}` returned no output."))
+                        .await;
+                } else {
+                    let _ = self.im_adapter.send_kv_table(target, "Usage", &rows).await;
+                }
+            }
+            _ => {
+                let extracted = extract_modal_text(&content);
+                if extracted.is_empty() {
+                    let _ = self
+                        .im_adapter
+                        .send_message(target, &format!("`{command}` returned no output."))
+                        .await;
+                } else if extracted.len() > MAX_MSG_LEN {
+                    let truncated: String = extracted.chars().take(MAX_MSG_LEN).collect();
+                    let _ = self
+                        .im_adapter
+                        .send_message(
+                            target,
+                            &format!("`{command}` _(truncated):_\n```\n{}…\n```", truncated),
+                        )
+                        .await;
+                } else {
+                    let _ = self
+                        .im_adapter
+                        .send_message(target, &format!("`{command}`:\n```\n{}\n```", extracted))
+                        .await;
+                }
+            }
+        }
+    }
+
     /// Handle `/atim status` and `/atim help` commands.
     async fn handle_atim_command(&self, target: &MessageTarget, cmd: &str) -> Result<()> {
         match cmd {
@@ -4245,8 +4365,13 @@ impl Server {
                     "`/atim help`   — This help\n",
                     "`/ss` / `/screenshot` — Capture terminal screenshot\n",
                     "`/usage` — Show Claude Code API usage\n",
+                    "`/status` — Show Claude Code session info\n",
+                    "`/doctor` — Claude Code diagnostics\n",
+                    "`/compact` — Compact Claude Code conversation\n",
+                    "`/clear` — Clear Claude Code conversation\n",
                     "`/switch <agent>` — Switch running agent\n",
                     "`/esc` / `/dismiss` — Send Escape key\n",
+                    "`/enter` — Send Enter key\n",
                     "`/rebind` — Re-detect agent & session\n",
                     "`/check` — Health check\n\n",
                     "Send any text to forward it to the agent.",
@@ -4425,145 +4550,106 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
-/// Parse Claude Code usage modal output into a readable summary.
+/// Extract meaningful text from a Claude Code modal capture.
 ///
-/// Strips ANSI, finds the usage section, and extracts key metrics
-/// (tokens, cost, sessions) into a clean text format.
-fn parse_usage_output(raw: &str) -> String {
-    let clean = strip_ansi(raw);
-
+/// Strips box-drawing characters, control characters, and lines that are
+/// purely decorative (separators, blank lines with only box-drawing glyphs).
+fn extract_modal_text(s: &str) -> String {
     let mut lines: Vec<String> = Vec::new();
-    let mut in_usage = false;
-    let mut found_data = false;
-
-    for line in clean.lines() {
+    for line in s.lines() {
         let trimmed = line.trim();
 
-        // Detect start of usage section
-        if trimmed.contains("Usage") || trimmed.contains("usage") {
-            in_usage = true;
-            continue;
-        }
-
-        if !in_usage {
-            // Also check for common box-drawing chars around "Usage"
-            if trimmed
-                .replace(['─', '╭', '│'], "")
-                .trim()
-                .eq_ignore_ascii_case("usage")
-            {
-                in_usage = true;
-            }
-            continue;
-        }
-
-        // Stop at common modal boundaries
-        if trimmed.contains("q to close")
-            || trimmed.contains("Press")
-            || trimmed.starts_with("══")
-            || trimmed.starts_with("╰")
-            || trimmed.starts_with("╭")
-        {
-            break;
-        }
-
-        // Skip separator lines (box drawing, dashes, etc.)
-        if trimmed.chars().all(|c| {
-            c == '─'
-                || c == '═'
-                || c == '╭'
-                || c == '╮'
-                || c == '╰'
-                || c == '╯'
-                || c == '├'
-                || c == '┤'
-                || c == '│'
-                || c == ' '
-                || c == '═'
-                || c == '━'
-                || c == '┃'
-        }) {
-            continue;
-        }
-        if trimmed.is_empty() || trimmed == "│" {
-            continue;
-        }
-
-        // Replace multiple spaces with single space
-        let normalized: String = trimmed
+        // Skip lines that contain only box-drawing + whitespace
+        if trimmed
             .chars()
-            .filter(|c| !c.is_control())
+            .all(|c| c.is_whitespace() || BOX_DRAWING.contains(&c))
+        {
+            continue;
+        }
+
+        // Skip the "Press q to close" / "q to close" instruction line
+        if trimmed.to_lowercase().contains("q to close")
+            || trimmed.to_lowercase().contains("press ")
+        {
+            continue;
+        }
+
+        // Strip remaining box-drawing glyphs from content lines
+        let cleaned: String = trimmed
+            .chars()
+            .filter(|c| !BOX_DRAWING.contains(c) && !c.is_control())
             .collect::<String>()
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
 
-        if normalized.is_empty() {
-            continue;
-        }
-
-        // Clean up any remaining box-drawing chars
-        let cleaned = normalized.replace(['│', '┃'], "").trim().to_string();
-
         if !cleaned.is_empty() {
-            found_data = true;
             lines.push(cleaned);
         }
     }
-
-    if !found_data {
-        // Fallback: just return a summary with token/cost info found anywhere
-        let fallback = extract_usage_fallback(&clean);
-        if !fallback.is_empty() {
-            return fallback;
-        }
-        return "No usage data available. The /usage modal may not be supported in this version."
-            .into();
-    }
-
-    format!("📊 Usage:\n{}", lines.join("\n"))
+    lines.join("\n")
 }
 
-/// Fallback: scan the entire captured text for usage-like patterns.
-fn extract_usage_fallback(text: &str) -> String {
-    let mut results = Vec::new();
-    let patterns = [
-        ("Input tokens", "token"),
-        ("Output tokens", "token"),
-        ("Total tokens", "token"),
-        ("Cost", "$"),
-        ("Sessions", "session"),
-        ("Total input", "input"),
-        ("Total output", "output"),
-    ];
+/// Extract key-value pairs from a Claude Code modal capture.
+fn extract_kv_rows(s: &str, exclude_keys: &[&str]) -> Vec<(String, String)> {
+    let clean = strip_ansi(s);
+    let mut rows = Vec::new();
 
-    for line in text.lines() {
-        for (label, _) in &patterns {
-            if line.to_lowercase().contains(&label.to_lowercase()) {
-                let cleaned: String = line.chars().filter(|c| !c.is_control()).collect();
-                let parts: Vec<&str> = cleaned.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    let val = parts.last().unwrap_or(&"");
-                    if val.contains(|c: char| c.is_ascii_digit()) {
-                        results.push(format!("  {label}: {val}"));
-                    }
-                }
-                break;
+    for line in clean.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.is_empty()
+            || trimmed
+                .chars()
+                .all(|c| c.is_whitespace() || BOX_DRAWING.contains(&c))
+        {
+            continue;
+        }
+
+        let cleaned: String = trimmed
+            .chars()
+            .filter(|c| !BOX_DRAWING.contains(c) && !c.is_control())
+            .collect();
+        let cleaned = cleaned.trim();
+
+        if cleaned
+            .split_whitespace()
+            .all(|w| matches!(w, "Settings" | "Status" | "Config" | "Usage" | "Stats"))
+            || cleaned.eq_ignore_ascii_case("status")
+            || cleaned.eq_ignore_ascii_case("usage")
+        {
+            continue;
+        }
+
+        if cleaned.to_lowercase().contains("q to close")
+            || cleaned.to_lowercase().contains("press ")
+            || cleaned.to_lowercase().contains("esc to")
+            || cleaned.to_lowercase().contains("esc ")
+        {
+            continue;
+        }
+
+        if let Some((key, val)) = cleaned.split_once(':') {
+            let k = key.trim();
+            let v = val.trim();
+            if !k.is_empty() && !exclude_keys.contains(&k) {
+                rows.push((k.to_string(), v.to_string()));
             }
         }
     }
 
-    if results.is_empty() {
-        String::new()
-    } else {
-        let mut out = "📊 Usage:\n".to_string();
-        for r in results {
-            out.push_str(&r);
-            out.push('\n');
-        }
-        out.trim_end().to_string()
-    }
+    rows
 }
+
+const BOX_DRAWING: &[char] = &[
+    '─', '━', '│', '┃', '┄', '┅', '┆', '┇', '┈', '┉', '┊', '┋', '┌', '┍', '┎', '┏', '┐', '┑', '┒',
+    '┓', '└', '┕', '┖', '┗', '┘', '┙', '┚', '┛', '├', '┝', '┞', '┟', '┠', '┡', '┢', '┣', '┤', '┥',
+    '┦', '┧', '┨', '┩', '┪', '┫', '┬', '┭', '┮', '┯', '┰', '┱', '┲', '┳', '┴', '┵', '┶', '┷', '┸',
+    '┹', '┺', '┻', '┼', '┽', '┾', '┿', '╀', '╁', '╂', '╃', '╄', '╅', '╆', '╇', '╈', '╉', '╊', '╋',
+    '╌', '╍', '╎', '╏', '═', '║', '╒', '╓', '╔', '╕', '╖', '╗', '╘', '╙', '╚', '╛', '╜', '╝', '╞',
+    '╟', '╠', '╡', '╢', '╣', '╤', '╥', '╦', '╧', '╨', '╩', '╪', '╫', '╬', '╭', '╮', '╯', '╰', '╱',
+    '╲', '╳', '╴', '╵', '╶', '╷', '╸', '╹', '╺', '╻', '╼', '╽', '╾', '╿',
+];
 
 /// Transcribe an OGG voice message using OpenAI's gpt-4o-transcribe model.
 async fn transcribe_voice(api_key: &str, base_url: &str, audio_data: &[u8]) -> Result<String> {
@@ -4851,42 +4937,64 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_usage_output_clean() {
+    fn test_extract_modal_text_usage() {
         let input = "╭──────────────────────╮\n│ Usage                │\n├──────────────────────┤\n│ Input tokens    1234 │\n│ Output tokens   5678 │\n│ Total tokens   6912  │\n│ Cost           $0.12 │\n├──────────────────────┤\n│ Press q to close     │\n╰──────────────────────╯\n";
-        let result = parse_usage_output(input);
+        let result = extract_modal_text(input);
         assert!(result.contains("Usage"));
-        assert!(result.contains("Input tokens"));
-        assert!(result.contains("1234"));
+        assert!(result.contains("Input tokens 1234"));
         assert!(result.contains("Cost"));
-        assert!(result.contains("$0.12"));
+        assert!(!result.to_lowercase().contains("q to close"));
+        assert!(!result.contains("╭"));
     }
 
     #[test]
-    fn test_parse_usage_output_with_ansi() {
-        let input = "\x1b[32m╭──────────────────────╮\n\x1b[0m│ \x1b[1mUsage\x1b[0m                │\n├──────────────────────┤\n│ Input tokens    1234 │\n│ Output tokens   5678 │\n│ Total tokens   6912  │\n│ Cost           $0.12 │\n│ Press q to close     │\n╰──────────────────────╯\n";
-        let result = parse_usage_output(input);
-        assert!(result.contains("Input tokens"));
-        assert!(result.contains("1234"));
+    fn test_extract_modal_text_with_ansi() {
+        let input = "\x1b[32m╭──────────────────────╮\n\x1b[0m│ \x1b[1mStatus\x1b[0m                │\n├──────────────────────┤\n│ Mode: Normal         │\n│ Messages: 42         │\n╰──────────────────────╯\n";
+        // strip_ansi first, then extract
+        let cleaned = strip_ansi(input);
+        let result = extract_modal_text(&cleaned);
+        assert!(result.contains("Status"));
+        assert!(result.contains("Mode: Normal"));
+        assert!(result.contains("Messages: 42"));
     }
 
     #[test]
-    fn test_parse_usage_output_no_data() {
-        let result = parse_usage_output("just some random text\nwith no usage info\n");
-        assert!(result.contains("No usage data"));
+    fn test_extract_modal_text_empty() {
+        assert_eq!(extract_modal_text(""), "");
+        assert_eq!(extract_modal_text("╭─╮\n│ │\n╰─╯"), "");
     }
 
     #[test]
-    fn test_extract_usage_fallback_simple() {
-        let text = "some preamble\nInput tokens: 1,234\nOutput tokens: 5,678\nmore text\n";
-        let result = extract_usage_fallback(text);
-        assert!(result.contains("Input tokens"));
-        assert!(result.contains("1,234"));
+    fn test_extract_kv_rows_basic() {
+        let input = "Settings Status Config Usage Stats\nStatus\nVersion: 2.1.152\nSession name: add-nerd-font-support\nModel: deepseek-chat\nEsc to cancel";
+        let rows = extract_kv_rows(input, &["Auth token", "Setting sources", "API key"]);
+        assert!(rows.iter().any(|(k, _)| k == "Version"));
+        assert!(rows.iter().any(|(_, v)| v == "2.1.152"));
+        assert!(rows.iter().any(|(k, _)| k == "Model"));
+        assert!(!rows.iter().any(|(k, _)| k == "Auth token"));
     }
 
     #[test]
-    fn test_extract_usage_fallback_empty() {
-        let result = extract_usage_fallback("nothing useful here");
-        assert_eq!(result, "");
+    fn test_extract_kv_rows_filters_diagnostics() {
+        let input = "Status\nVersion: 2.1.152\nSession name: test\n⚠ installMethod is native\nbut claude not found";
+        let rows = extract_kv_rows(input, &["Auth token", "Setting sources", "API key"]);
+        assert!(rows.iter().any(|(k, _)| k == "Version"));
+        assert_eq!(rows.len(), 2); // only Version and Session name
+    }
+
+    #[test]
+    fn test_extract_kv_rows_usage() {
+        let input = "Usage\nInput tokens: 1234\nOutput tokens: 5678\nTotal tokens: 6912\nCost: $0.12\nPress q to close";
+        let rows = extract_kv_rows(input, &[]);
+        assert!(rows.iter().any(|(k, _)| k == "Input tokens"));
+        assert!(rows.iter().any(|(_, v)| v == "1234"));
+        assert!(rows.iter().any(|(k, _)| k == "Cost"));
+        assert_eq!(rows.len(), 4);
+    }
+
+    #[test]
+    fn test_extract_kv_rows_empty() {
+        assert_eq!(extract_kv_rows("", &[]).len(), 0);
     }
 
     #[test]

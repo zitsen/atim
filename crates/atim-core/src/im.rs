@@ -87,4 +87,12 @@ pub trait ImAdapter: Send + Sync {
         message_id: &str,
         emoji: &str,
     ) -> Result<()>;
+
+    /// Send a key-value table card.
+    async fn send_kv_table(
+        &self,
+        target: &MessageTarget,
+        title: &str,
+        rows: &[(String, String)],
+    ) -> Result<MessageId>;
 }

@@ -901,6 +901,53 @@ impl ImAdapter for FeishuAdapter {
         }
         Ok(())
     }
+
+    async fn send_kv_table(
+        &self,
+        target: &MessageTarget,
+        title: &str,
+        rows: &[(String, String)],
+    ) -> Result<MessageId> {
+        let chat_id = self
+            .resolve_chat(&target.chat_id)
+            .await
+            .ok_or_else(|| Error::Feishu("unknown chat_id".into()))?;
+
+        let mut elements: Vec<serde_json::Value> = vec![serde_json::json!({
+            "tag": "markdown",
+            "content": format!("**{}**", title),
+        })];
+
+        for (key, val) in rows {
+            elements.push(serde_json::json!({
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": format!("**{}**  {}", key, val),
+                }
+            }));
+        }
+
+        let card = serde_json::json!({
+            "config": { "wide_screen_mode": true },
+            "elements": elements,
+        });
+
+        let mut body = serde_json::json!({
+            "receive_id": chat_id,
+            "msg_type": "interactive",
+            "content": serde_json::to_string(&card)
+                .map_err(|e| Error::Feishu(format!("card serialization: {e}")))?,
+        });
+
+        self.add_thread_id(&mut body, target).await;
+
+        let data = self
+            .api_post("/im/v1/messages?receive_id_type=chat_id", &body)
+            .await?;
+        let msg_id = data["message_id"].as_str().unwrap_or("").to_string();
+        Ok(MessageId(msg_id))
+    }
 }
 
 // ── Payload processing loop ──
