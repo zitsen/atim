@@ -294,6 +294,60 @@ impl TmuxManager {
 
     // ── Utility ──
 
+    /// List windows across all tmux sessions.
+    ///
+    /// Each result includes the session name in the format:
+    /// `window_id|window_name|pane_command|session_name`.
+    pub async fn list_all_windows(&self) -> Result<Vec<(WindowInfo, String)>> {
+        let out = self
+            .tmux(&[
+                "list-windows",
+                "-a",
+                "-F",
+                "#{window_id}|#{window_name}|#{pane_current_command}|#{session_name}",
+            ])
+            .await?;
+
+        Ok(out
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| {
+                let mut parts = l.splitn(4, '|');
+                Some((
+                    WindowInfo {
+                        window_id: WindowId(parts.next()?.to_string()),
+                        name: parts.next()?.to_string(),
+                        current_command: parts.next().unwrap_or("").to_string(),
+                    },
+                    parts.next().unwrap_or("").to_string(),
+                ))
+            })
+            .collect())
+    }
+
+    /// Move a window from another session into the atim session.
+    pub async fn move_window_into_session(
+        &self,
+        src_session: &str,
+        window_id: &WindowId,
+    ) -> Result<()> {
+        self.tmux(&[
+            "move-window",
+            "-s",
+            &format!("{src_session}:{}", window_id.0),
+            "-t",
+            &self.session_name,
+        ])
+        .await?;
+        tracing::info!(
+            "Moved window {} from session '{}' to '{}'",
+            window_id.0,
+            src_session,
+            self.session_name,
+        );
+        Ok(())
+    }
+
     /// Check whether the atim tmux session exists.
     pub async fn session_exists(&self) -> bool {
         self.tmux(&["has-session", "-t", &self.session_name])

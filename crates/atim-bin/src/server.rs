@@ -4124,7 +4124,12 @@ impl Server {
     }
 
     /// Find a live tmux window by matching the display/name field.
-    /// Falls back to partial match if no exact match.
+    ///
+    /// First searches the atim session (exact then contains match).
+    /// Falls back to all sessions — if a matching window is found in a
+    /// different session, it is moved into the atim session so all
+    /// subsequent operations (send-keys, capture-pane, etc.) work through
+    /// the normal session-prefixed path.
     async fn find_window_by_name(&self, name: &str) -> Option<String> {
         let windows = self.tmux_mgr.list_windows().await.ok()?;
         // Try exact match first
@@ -4132,10 +4137,42 @@ impl Server {
             return Some(w.window_id.0.clone());
         }
         // Try contains match (e.g. "Skills" matches "3:Skills")
-        windows
+        if let Some(w) = windows
             .iter()
             .find(|w| w.name.contains(name) || name.contains(&w.name))
-            .map(|w| w.window_id.0.clone())
+        {
+            return Some(w.window_id.0.clone());
+        }
+
+        // Fallback: search all tmux sessions (window may be in a user's
+        // session rather than the atim session — common after restart).
+        let all_windows = self.tmux_mgr.list_all_windows().await.ok()?;
+        // Try exact match across all sessions
+        for (w, session) in &all_windows {
+            if w.name == name {
+                // Move into atim session so future lookups work directly
+                if session != &self.tmux_mgr.session_name {
+                    self.tmux_mgr
+                        .move_window_into_session(session, &w.window_id)
+                        .await
+                        .ok()?;
+                }
+                return Some(w.window_id.0.clone());
+            }
+        }
+        // Try contains match across all sessions
+        for (w, session) in &all_windows {
+            if w.name.contains(name) || name.contains(&w.name) {
+                if session != &self.tmux_mgr.session_name {
+                    self.tmux_mgr
+                        .move_window_into_session(session, &w.window_id)
+                        .await
+                        .ok()?;
+                }
+                return Some(w.window_id.0.clone());
+            }
+        }
+        None
     }
 
     /// Detect the actual agent type from a running process name.
