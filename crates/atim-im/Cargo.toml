@@ -19,4 +19,4 @@ chrono = { workspace = true }
 mime_guess = "2"
 pulldown-cmark = { workspace = true }
 openlark = { version = "0.16", features = ["websocket"] }
-atim-core = { path = "../atim-core" }
+atim-core = { path = "../atim-core", version = "0.3.3" }

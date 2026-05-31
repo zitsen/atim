@@ -13,7 +13,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
-atim-core = { path = "../atim-core" }
+atim-core = { path = "../atim-core", version = "0.3.3" }
 image = { version = "0.25", default-features = false, features = ["png"] }
 imageproc = "0.25"
 ab_glyph = "0.2"
