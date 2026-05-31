@@ -50,6 +50,11 @@ impl CopilotJsonlParser {
     }
 
     /// Read new data from a file starting at a given byte offset.
+    ///
+    /// Returns the parsed entries and the byte position of the last complete
+    /// line. If the last line is incomplete (partial write by Copilot), the
+    /// returned offset stays at the start of that line so it will be re-read
+    /// on the next poll.
     pub async fn read_new<P: AsRef<Path>>(path: P, offset: u64) -> Result<(Vec<ParsedEntry>, u64)> {
         let mut file = fs::File::open(path.as_ref()).await?;
         let metadata = file.metadata().await?;
@@ -69,7 +74,13 @@ impl CopilotJsonlParser {
         let text = String::from_utf8_lossy(&new_data);
         let entries = Self::parse_str(&text)?;
 
-        Ok((entries, file_size))
+        // Find end of last complete line in the read data.
+        // If the file ends mid-line, back up so the next poll re-reads it.
+        // Pass has_entries so complete lines without \n still advance.
+        let new_offset =
+            crate::jsonl::last_complete_line_offset(offset, &new_data, !entries.is_empty());
+
+        Ok((entries, new_offset))
     }
 
     /// Parse a single Copilot JSONL line into zero or more `ParsedEntry`s.

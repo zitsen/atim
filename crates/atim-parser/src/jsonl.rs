@@ -42,6 +42,11 @@ impl JsonlParser {
     }
 
     /// Read new data from a file starting at a given byte offset.
+    ///
+    /// Returns the parsed entries and the byte position of the last complete
+    /// line. If the last line is incomplete (partial write by Claude Code),
+    /// the returned offset stays at the start of that line so it will be
+    /// re-read on the next poll.
     pub async fn read_new<P: AsRef<Path>>(path: P, offset: u64) -> Result<(Vec<ParsedEntry>, u64)> {
         let mut file = fs::File::open(path.as_ref()).await?;
         let metadata = file.metadata().await?;
@@ -61,7 +66,14 @@ impl JsonlParser {
         let text = String::from_utf8_lossy(&new_data);
         let entries = Self::parse_str(&text)?;
 
-        Ok((entries, file_size))
+        // Find end of last complete line in the read data.
+        // If the file ends mid-line, we back up so the next poll
+        // re-reads the incomplete line when it's fully written.
+        // If no entries were produced (e.g. metadata-only lines),
+        // we still advance past complete lines to avoid getting stuck.
+        let new_offset = last_complete_line_offset(offset, &new_data, !entries.is_empty());
+
+        Ok((entries, new_offset))
     }
 
     /// Parse a single JSONL line into zero or more `ParsedEntry`s.
@@ -483,6 +495,31 @@ fn extract_tool_result_text(content: Option<&serde_json::Value>) -> ExtractedCon
     }
 }
 
+/// Given `start_offset` and the raw bytes read from that point, return the byte
+/// position of the last **complete** line end. If the data ends mid-line (no
+/// trailing `\n`), the returned offset is moved back to the start of that
+/// incomplete line so it can be re-read when fully written.
+///
+/// `has_entries` signals whether `parse_str` successfully extracted at least
+/// one entry from the data. When true and there's no trailing `\n`, the data
+/// is treated as a complete line (valid JSON without line terminator) and we
+/// advance past it. When false and no `\n`, data is incomplete — don't advance.
+pub(crate) fn last_complete_line_offset(start_offset: u64, data: &[u8], has_entries: bool) -> u64 {
+    if data.is_empty() {
+        return start_offset;
+    }
+    if let Some(pos) = data.iter().rposition(|&b| b == b'\n') {
+        // Found a newline — advance past it (safe for completed lines)
+        start_offset + pos as u64 + 1
+    } else if has_entries {
+        // No newline but data was fully parsed — advance past complete content
+        start_offset + data.len() as u64
+    } else {
+        // No newline and nothing was parsed — data is incomplete, stay
+        start_offset
+    }
+}
+
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 
@@ -691,6 +728,49 @@ mod tests {
             Some(42)
         );
         assert_eq!(extract_exit_code("No code here"), None);
+    }
+
+    #[test]
+    fn test_last_complete_line_offset() {
+        // Complete lines (newline-terminated)
+        let data = b"line1\nline2\n";
+        assert_eq!(
+            super::last_complete_line_offset(0, data, false),
+            12, // offset after "line1\nline2\n"
+        );
+
+        // Incomplete last line
+        let data = b"line1\nline2\npartial";
+        assert_eq!(
+            super::last_complete_line_offset(0, data, false),
+            12, // offset after "line1\nline2\n", skips "partial"
+        );
+
+        // Single complete line
+        let data = b"line1\n";
+        assert_eq!(super::last_complete_line_offset(0, data, false), 6);
+
+        // Single incomplete line (no newline) with no entries
+        let data = b"partial";
+        assert_eq!(super::last_complete_line_offset(0, data, false), 0);
+
+        // No newline but has entries — advance past content
+        let data = b"complete_json_line_no_newline";
+        assert_eq!(
+            super::last_complete_line_offset(0, data, true),
+            29, // data.len()
+        );
+
+        // Empty data
+        let data = b"";
+        assert_eq!(super::last_complete_line_offset(0, data, false), 0);
+
+        // Non-zero offset
+        let data = b"line2\npartial";
+        assert_eq!(
+            super::last_complete_line_offset(10, data, false),
+            16, // 10 + len("line2\n")
+        );
     }
 
     #[test]

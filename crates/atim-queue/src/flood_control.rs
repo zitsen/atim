@@ -140,9 +140,9 @@ impl ImAdapter for FloodControlledAdapter {
     async fn send_message(&self, target: &MessageTarget, text: &str) -> Result<MessageId> {
         let chat_id = Self::get_chat_id(target).await;
         if self.rate_limit(chat_id, false).await {
-            // Should not drop content messages — return a fake MessageId
-            // and log a warning
-            tracing::warn!("Flood control dropping message to chat {chat_id} (past max delay)");
+            tracing::warn!(
+                "Flood control rate-limited send_message to chat {chat_id} — proceeding anyway"
+            );
         }
         let result = self.inner.send_message(target, text).await;
         if result.is_ok() {
@@ -159,7 +159,9 @@ impl ImAdapter for FloodControlledAdapter {
     ) -> Result<()> {
         let chat_id = Self::get_chat_id(target).await;
         if self.rate_limit(chat_id, false).await {
-            return Ok(()); // silently drop edit
+            tracing::warn!(
+                "Flood control rate-limited edit_message to chat {chat_id} — proceeding anyway"
+            );
         }
         let result = self.inner.edit_message(target, msg_id, text).await;
         if result.is_ok() {

@@ -4189,8 +4189,11 @@ impl Server {
         let _ = self.tmux_mgr.capture_pane(window_id).await;
         // 2. Send the slash command — opens a modal
         self.tmux_mgr.send_line(window_id, command).await.ok();
-        // 3. Wait for modal to fully render (status can be slow)
-        tokio::time::sleep(Duration::from_millis(5000)).await;
+
+        // 3. Wait for modal to fully render
+        //    /usage needs more time since it fetches API data
+        let wait_ms = if command == "/usage" { 10_000 } else { 5_000 };
+        tokio::time::sleep(Duration::from_millis(wait_ms)).await;
 
         // 4. Capture pane content
         let raw = self
@@ -4200,6 +4203,11 @@ impl Server {
             .ok()
             .unwrap_or_default();
         let content = strip_ansi(&raw);
+
+        tracing::debug!(
+            "send_slash_and_capture({command}): captured {} chars after {wait_ms}ms",
+            content.len()
+        );
 
         // 5. Dismiss the modal
         self.tmux_mgr.send_key(window_id, "Escape").await.ok();
@@ -4216,8 +4224,10 @@ impl Server {
                 content.lines().skip(skip).collect::<Vec<_>>().join("\n")
             })
             .unwrap_or(content);
+        let trimmed = content.trim();
 
-        if content.trim().is_empty() {
+        if trimmed.is_empty() {
+            tracing::warn!("send_slash_and_capture({command}): captured empty content");
             let _ = self
                 .im_adapter
                 .send_message(target, &format!("`{command}` returned no output."))
@@ -4227,7 +4237,7 @@ impl Server {
 
         match command {
             "/status" => {
-                let rows = extract_kv_rows(&content, &["Auth token", "Setting sources", "API key"]);
+                let rows = extract_kv_rows(trimmed, &["Auth token", "Setting sources", "API key"]);
                 if rows.is_empty() {
                     let _ = self
                         .im_adapter
@@ -4238,18 +4248,30 @@ impl Server {
                 }
             }
             "/usage" => {
-                let rows = extract_kv_rows(&content, &[]);
+                let rows = extract_kv_rows(trimmed, &[]);
                 if rows.is_empty() {
-                    let _ = self
-                        .im_adapter
-                        .send_message(target, &format!("`{command}` returned no output."))
-                        .await;
+                    // Fallback: send the raw captured text so user can see what happened
+                    let extracted = extract_modal_text(trimmed);
+                    if extracted.is_empty() {
+                        tracing::warn!(
+                            "send_slash_and_capture(/usage): empty rows, raw content: {trimmed:?}"
+                        );
+                        let _ = self
+                            .im_adapter
+                            .send_message(target, "`/usage` returned no output.")
+                            .await;
+                    } else {
+                        let _ = self
+                            .im_adapter
+                            .send_message(target, &format!("`/usage`:\n```\n{extracted}\n```"))
+                            .await;
+                    }
                 } else {
                     let _ = self.im_adapter.send_kv_table(target, "Usage", &rows).await;
                 }
             }
             _ => {
-                let extracted = extract_modal_text(&content);
+                let extracted = extract_modal_text(trimmed);
                 if extracted.is_empty() {
                     let _ = self
                         .im_adapter

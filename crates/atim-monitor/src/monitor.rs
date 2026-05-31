@@ -432,14 +432,19 @@ impl SessionMonitor {
                 offsets.get(session_id).copied().unwrap_or(0)
             };
 
-            let (entries, file_size) = atim_parser::read_jsonl(&path, offset).await?;
+            let (entries, new_offset) = atim_parser::read_jsonl(&path, offset).await?;
+
+            // Always advance the byte offset past processed data, even when
+            // entries is empty (e.g. thinking-only or metadata-only lines).
+            // This prevents getting stuck on lines that never produce entries.
+            if new_offset > offset {
+                let mut offsets = self.byte_offsets.lock().await;
+                offsets.insert(session_id.clone(), new_offset);
+            }
 
             if !entries.is_empty() {
-                let mut offsets = self.byte_offsets.lock().await;
-                offsets.insert(session_id.clone(), file_size);
-
                 tracing::info!(
-                    "[monitor] Parsed {} new entries from {session_id}.jsonl (offset {offset} → {file_size})",
+                    "[monitor] Parsed {} new entries from {session_id}.jsonl (offset {offset} → {new_offset})",
                     entries.len(),
                 );
 
