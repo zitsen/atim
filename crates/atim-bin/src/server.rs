@@ -3388,12 +3388,8 @@ impl Server {
                 self.show_setup_flow(&target, user_id, thread_id).await?;
             }
             "recover" => {
-                self.handle_recover_session(&target, user_id, thread_id, &text)
+                self.handle_recover_session(&target, user_id, thread_id, &text, &msg_id)
                     .await?;
-                let _ = self
-                    .im_adapter
-                    .edit_message(&target, &msg_id, "Session recovered.")
-                    .await;
             }
             "rename" => {
                 let new_name = self
@@ -3858,12 +3854,16 @@ impl Server {
     /// Creates a new tmux window, (re-)launches the agent, optionally
     /// resumes the stored session, re-keys state bindings (both V1 and
     /// V2 runtime), then forwards the user's pending text.
+    ///
+    /// Updates the original card (`msg_id`) in-place instead of sending
+    /// a separate status message.
     async fn handle_recover_session(
         &self,
         target: &MessageTarget,
         user_id: i64,
         thread_id: i64,
         text: &str,
+        msg_id: &MessageId,
     ) -> Result<()> {
         let mut rt = self.state_mgr.load_runtime().await?;
 
@@ -3922,7 +3922,7 @@ impl Server {
 
         let _ = self
             .im_adapter
-            .send_message(target, "🔄 Recovering session...")
+            .edit_message(target, msg_id, "🔄 Recovering session...")
             .await;
 
         // Create new tmux window
@@ -4058,6 +4058,12 @@ impl Server {
             .lock()
             .await
             .remove(&(sc_chat_id, cb.thread_id));
+
+        // Update the original card in-place
+        let _ = self
+            .im_adapter
+            .edit_message(target, msg_id, "✅ Session recovered.")
+            .await;
 
         Ok(())
     }
