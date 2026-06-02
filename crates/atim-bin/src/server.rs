@@ -3952,9 +3952,15 @@ impl Server {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
-        if !agent.supports_sessions() {
-            tokio::time::sleep(Duration::from_millis(1500)).await;
-        }
+        // Give the agent TUI time to initialize its input handler.
+        // The loop above only confirms the shell process exited; the agent
+        // still needs to render its UI and become ready for keystrokes.
+        let startup_wait = if agent.supports_sessions() {
+            2000
+        } else {
+            1500
+        };
+        tokio::time::sleep(Duration::from_millis(startup_wait)).await;
 
         // ── Update V2 runtime: re-key window_binding and chat_binding ──
         // Single load-save cycle to avoid race conditions with concurrent state writers.
@@ -4007,20 +4013,9 @@ impl Server {
 
         self.state_mgr.save_runtime(&rt).await?;
 
-        // Forward the user's original text to the new window FIRST.
-        // Some agents (Copilot) need the message to create a session file.
-        let is_copilot = agent.name() == "copilot";
-        if is_copilot {
-            self.tmux_mgr
-                .send_line_chars(&new_window_id, text, 10)
-                .await?;
-        } else {
-            self.tmux_mgr.send_line(&new_window_id, text).await?;
-        }
-
-        // THEN resolve session_id for fresh sessions so the monitor can route.
-        // resolve_session_id actively polls until the session is found, so
-        // no fixed sleep is needed.
+        // For fresh sessions, resolve session_id FIRST (like create_and_bind_in_dir).
+        // This both establishes routing AND gives the agent time to initialize
+        // its TUI input handler before we forward the pending message.
         if new_session_id.is_empty() && agent.supports_sessions() {
             let wid = new_window_id.0.clone();
             if let Some(sid) = self
@@ -4051,6 +4046,22 @@ impl Server {
                 map.insert(wid, sid);
                 let _ = self.state_mgr.save_session_map(&map).await;
             }
+        }
+
+        // Forward the user's original text to the agent.
+        // resolve_session_id above gives the agent enough time to initialize.
+        tracing::info!(
+            "[recover] Forwarding pending message (len={}) to window {}",
+            text.len(),
+            new_window_id.0,
+        );
+        let is_copilot = agent.name() == "copilot";
+        if is_copilot {
+            self.tmux_mgr
+                .send_line_chars(&new_window_id, text, 10)
+                .await?;
+        } else {
+            self.tmux_mgr.send_line(&new_window_id, text).await?;
         }
 
         let sc_chat_id = cb.group_chat_id.unwrap_or(cb.chat_id);
