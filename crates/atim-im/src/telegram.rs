@@ -331,7 +331,9 @@ impl ImAdapter for TelegramAdapter {
     }
 
     async fn send_message(&self, target: &MessageTarget, text: &str) -> Result<MessageId> {
-        let html = markdown_to_html(text);
+        // Convert markdown tables to card-style format (Telegram doesn't support HTML tables).
+        let text = atim_parser::table::convert_tables(text);
+        let html = markdown_to_html(&text);
         let mut params = serde_json::json!({
             "chat_id": target.chat_id.0,
             "text": html,
@@ -378,7 +380,8 @@ impl ImAdapter for TelegramAdapter {
         msg_id: &MessageId,
         text: &str,
     ) -> Result<()> {
-        let html = markdown_to_html(text);
+        let text = atim_parser::table::convert_tables(text);
+        let html = markdown_to_html(&text);
         let mut params = serde_json::json!({
             "chat_id": target.chat_id.0,
             "message_id": msg_id.0,

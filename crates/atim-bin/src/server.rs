@@ -465,12 +465,13 @@ impl Server {
                                 }
                             }
                             _ => {
-                                // Text — convert tables, then accumulate for merging
-                                let converted = atim_parser::table::convert_tables(&msg.text);
+                                // Text — accumulate for merging.
+                                // Tables are handled by each adapter separately:
+                                // Telegram converts to card-style, Feishu renders natively.
                                 if !merged.is_empty() {
                                     merged.push('\n');
                                 }
-                                merged.push_str(&converted);
+                                merged.push_str(&msg.text);
                                 if merged.len() >= MAX_MSG_LEN {
                                     flush!();
                                 }

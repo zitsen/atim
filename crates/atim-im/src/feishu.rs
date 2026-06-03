@@ -583,13 +583,15 @@ impl ImAdapter for FeishuAdapter {
             .await
             .ok_or_else(|| Error::Feishu("unknown chat_id".into()))?;
 
-        // Send as interactive card so Feishu renders markdown and future edits
-        // can use PATCH (instead of recall+resend).
+        // Send as interactive card (v2 schema for better markdown rendering).
         let card = serde_json::json!({
+            "schema": "2.0",
             "config": { "wide_screen_mode": true },
-            "elements": [
-                { "tag": "markdown", "content": text },
-            ],
+            "body": {
+                "elements": [
+                    { "tag": "markdown", "content": text },
+                ],
+            },
         });
 
         let mut body = serde_json::json!({
@@ -637,12 +639,13 @@ impl ImAdapter for FeishuAdapter {
         elements.pop();
 
         let card = serde_json::json!({
+            "schema": "2.0",
             "config": { "wide_screen_mode": true },
             "header": {
                 "title": { "tag": "plain_text", "content": title },
                 "template": "blue",
             },
-            "elements": elements,
+            "body": { "elements": elements },
         });
 
         let mut body = serde_json::json!({
@@ -673,10 +676,13 @@ impl ImAdapter for FeishuAdapter {
             .ok_or_else(|| Error::Feishu("unknown chat_id".into()))?;
 
         let card = serde_json::json!({
+            "schema": "2.0",
             "config": { "wide_screen_mode": true },
-            "elements": [
-                { "tag": "markdown", "content": text },
-            ],
+            "body": {
+                "elements": [
+                    { "tag": "markdown", "content": text },
+                ],
+            },
         });
         let card_str = serde_json::to_string(&card)
             .map_err(|e| Error::Feishu(format!("card serialization: {e}")))?;
@@ -929,8 +935,9 @@ impl ImAdapter for FeishuAdapter {
         }
 
         let card = serde_json::json!({
+            "schema": "2.0",
             "config": { "wide_screen_mode": true },
-            "elements": elements,
+            "body": { "elements": elements },
         });
 
         let mut body = serde_json::json!({
@@ -1395,6 +1402,7 @@ fn build_card(text: &str, buttons: &[Vec<Button>]) -> serde_json::Value {
     }
 
     serde_json::json!({
+        "schema": "2.0",
         "config": {
             "wide_screen_mode": true,
         },
@@ -1405,7 +1413,7 @@ fn build_card(text: &str, buttons: &[Vec<Button>]) -> serde_json::Value {
             },
             "template": "blue",
         },
-        "elements": elements,
+        "body": { "elements": elements },
     })
 }
 
@@ -1509,12 +1517,12 @@ mod tests {
 
         let card = build_card("Proceed?", &buttons);
         assert_eq!(card["header"]["title"]["content"], "Atim — Agent Response");
-        assert_eq!(card["elements"].as_array().unwrap().len(), 3);
+        assert_eq!(card["body"]["elements"].as_array().unwrap().len(), 3);
 
-        let actions_row0 = card["elements"][1]["actions"].as_array().unwrap();
+        let actions_row0 = card["body"]["elements"][1]["actions"].as_array().unwrap();
         assert_eq!(actions_row0[0]["text"]["content"], "Yes");
         assert_eq!(actions_row0[0]["type"], "primary");
-        let actions_row1 = card["elements"][2]["actions"].as_array().unwrap();
+        let actions_row1 = card["body"]["elements"][2]["actions"].as_array().unwrap();
         assert_eq!(actions_row1[0]["text"]["content"], "No");
         assert_eq!(actions_row1[0]["type"], "danger");
     }
