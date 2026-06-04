@@ -2237,10 +2237,7 @@ impl Server {
                 });
                 buttons.push(nav_row);
 
-                let text = format!(
-                    "🔄 Select a session to resume (or choose New):\n{}",
-                    state.current_path.display()
-                );
+                let text = format!("Session Picker\n{}", state.current_path.display());
                 (text, buttons)
             }
             BrowserMode::WindowPick { windows: _ } => {
@@ -2370,7 +2367,7 @@ impl Server {
                 } else {
                     self.browser.show_session_picker(user_id, sessions).await;
                     let _ = self
-                        .send_browser_keyboard(target, user_id, thread_id, Some(msg_id.clone()))
+                        .send_browser_keyboard(target, user_id, thread_id, None)
                         .await;
                 }
             }
