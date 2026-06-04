@@ -2410,9 +2410,8 @@ impl Server {
                 {
                     self.browser.navigate_to(user_id, &entry.path).await;
                     let _ = self
-                        .send_browser_keyboard(target, user_id, thread_id, None)
+                        .send_browser_keyboard(target, user_id, thread_id, Some(msg_id.clone()))
                         .await;
-                    let _ = self.im_adapter.delete_message(target, msg_id).await;
                 }
             }
             s if s.starts_with("sel:") => {

@@ -856,6 +856,8 @@ impl ImAdapter for FeishuAdapter {
                 "Feishu edit_keyboard PATCH failed ({msg}), falling back to new message"
             );
             let _ = self.send_keyboard(target, "(updated)", buttons).await?;
+        } else {
+            tracing::debug!("Feishu edit_keyboard PATCH ok for msg_id={}", msg_id.0);
         }
         Ok(())
     }
