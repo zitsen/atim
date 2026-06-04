@@ -1296,13 +1296,12 @@ async fn handle_card_action(adapter: &FeishuAdapter, payload: &serde_json::Value
 
     let thread_id = if let Some(tid) = ctx_thread_id.or(root_id) {
         Some(adapter.register_thread(tid).await)
-    } else if is_group {
-        // Fallback: derive a thread_id from chat_id that is distinct from
-        // the chat_id itself, so the binding model has a unique (chat_id,
-        // thread_id) pair per group without conflating the two dimensions.
-        Some(adapter.register_chat_thread(chat_id).await)
     } else {
-        None
+        // Always derive a thread_id from chat_id for card actions.
+        // Feishu doesn't include chat_type in card events, so we can't
+        // distinguish p2p from group. Using the chat-derived thread_id
+        // ensures the binding lookup works for both.
+        Some(adapter.register_chat_thread(chat_id).await)
     };
 
     let target = MessageTarget {

@@ -3092,21 +3092,20 @@ impl Server {
         // Handle UI navigation callbacks (no token validation needed)
         if data.starts_with("ui:") {
             let rt = self.state_mgr.load_runtime().await?;
-            let window_id = rt
-                .chat_bindings
-                .iter()
-                .find(|b| {
-                    b.user_id == user_id
-                        && b.thread_id == target.thread_id.map(|t| t.0).unwrap_or(0)
-                })
+            let chat_id = target.chat_id.0;
+            let thread_id = target.thread_id.map(|t| t.0).unwrap_or(0);
+            // Try exact (user_id, thread_id) match first, then fall back to
+            // (user_id, chat_id) for group chats where card actions don't
+            // include a thread_id.
+            let cb = rt.chat_bindings.iter().find(|b| {
+                b.user_id == user_id && (b.thread_id == thread_id || b.chat_id == chat_id)
+            });
+            let window_id = cb
+                .filter(|cb| !cb.session_id.is_empty())
                 .and_then(|cb| {
-                    if cb.session_id.is_empty() {
-                        None
-                    } else {
-                        rt.window_bindings
-                            .values()
-                            .find(|wb| wb.session_id == cb.session_id)
-                    }
+                    rt.window_bindings
+                        .values()
+                        .find(|wb| wb.session_id == cb.session_id)
                 })
                 .map(|wb| &wb.window_id);
             if let Some(wid) = window_id {
