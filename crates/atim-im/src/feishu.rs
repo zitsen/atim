@@ -21,6 +21,7 @@ use atim_core::message::{
     Button, ChatId, CheckItem, ImEvent, ImEventKind, MessageId, MessageTarget, ThreadId, UserId,
 };
 
+#[allow(deprecated)]
 use open_lark::Config;
 use open_lark::ws_client::{EventDispatcherHandler, LarkWsClient};
 
@@ -491,6 +492,7 @@ impl TokenCache {
 
 #[async_trait]
 impl ImAdapter for FeishuAdapter {
+    #[allow(deprecated)]
     async fn run(&self, tx: mpsc::UnboundedSender<ImEvent>) -> Result<()> {
         // Store the event sender so WS event handlers can emit events
         {

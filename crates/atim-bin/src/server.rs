@@ -2183,16 +2183,12 @@ impl Server {
                 let mut buttons: Vec<Vec<Button>> = Vec::new();
 
                 for (i, session) in page.sessions.iter().enumerate() {
-                    let timestamp_short = if session.timestamp.len() > 16 {
-                        &session.timestamp[..16]
-                    } else {
-                        &session.timestamp
-                    };
-                    let summary = if session.summary.len() > 40 {
+                    let relative = relative_time(&session.timestamp);
+                    let summary = if session.summary.len() > 45 {
                         let end = session
                             .summary
                             .char_indices()
-                            .nth(37)
+                            .nth(42)
                             .map(|(i, _)| i)
                             .unwrap_or(session.summary.len());
                         format!("{}…", &session.summary[..end])
@@ -2203,10 +2199,7 @@ impl Server {
                     };
                     let token = Self::make_callback_token(&mut ctx_lock, user_id, thread_id);
                     buttons.push(vec![Button {
-                        text: format!(
-                            "🔄 {} {} | {}",
-                            timestamp_short, session.project_slug, summary
-                        ),
+                        text: format!("🔄 {} | {}", relative, summary),
                         callback_data: format!("cb:{token}:browse:sel:{i}"),
                     }]);
                 }
@@ -4561,6 +4554,40 @@ async fn run_capture_loop(
 }
 
 /// Check if a process name is a shell (agent has likely exited).
+/// Convert an ISO 8601 timestamp to a human-readable relative time.
+///
+/// Returns strings like "13s", "2m", "4h", "2d", "1w", "4w".
+fn relative_time(ts: &str) -> String {
+    let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) else {
+        // Try without timezone
+        if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S") {
+            let dt = naive.and_utc();
+            let now = chrono::Utc::now();
+            let delta = now.signed_duration_since(dt);
+            return format_delta(delta);
+        }
+        return "(unknown)".into();
+    };
+    let now = chrono::Utc::now();
+    let delta = now.signed_duration_since(dt);
+    format_delta(delta)
+}
+
+fn format_delta(delta: chrono::TimeDelta) -> String {
+    let secs = delta.num_seconds();
+    if secs < 60 {
+        format!("{}s", secs.max(0))
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h", secs / 3600)
+    } else if secs < 604800 {
+        format!("{}d", secs / 86400)
+    } else {
+        format!("{}w", secs / 604800)
+    }
+}
+
 fn is_shell_process(process: &str) -> bool {
     matches!(process, "zsh" | "bash" | "sh" | "fish" | "dash" | "ksh")
 }

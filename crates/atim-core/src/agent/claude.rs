@@ -344,7 +344,22 @@ fn scan_claude_session_files(cwd: Option<&Path>) -> Result<Vec<DetectedSession>>
             .join("-")
     });
 
-    // First pass: slug-filtered scan
+    // Fast path: try ~/.claude.json for the target cwd first.
+    // This avoids scanning JSONL files for summary/timestamp when we already
+    // have metadata from Claude Code's own state file.
+    if let Some(canonical) = cwd.and_then(|p| std::fs::canonicalize(p).ok())
+        && let Some(fast_session) =
+            fast_session_from_claude_json(&canonical, target_slug.as_deref())
+    {
+        let mut sessions = scan_projects_dir(&projects_dir, target_slug.as_deref())?;
+        // Deduplicate: remove JSONL-derived entry with the same ID
+        sessions.retain(|s| s.id != fast_session.id);
+        sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        sessions.insert(0, fast_session);
+        return Ok(sessions);
+    }
+
+    // Slow path: scan JSONL files as before.
     let mut sessions = scan_projects_dir(&projects_dir, target_slug.as_deref())?;
 
     // Fallback: slug filter yielded nothing despite a slug being specified.
@@ -363,6 +378,52 @@ fn scan_claude_session_files(cwd: Option<&Path>) -> Result<Vec<DetectedSession>>
     }
 
     Ok(sessions)
+}
+
+/// Try to read the last session info for `cwd` from `~/.claude.json`.
+///
+/// Returns a `DetectedSession` with the stored session ID and metadata,
+/// avoiding the need to read JSONL files for summary/timestamp extraction.
+fn fast_session_from_claude_json(cwd: &Path, target_slug: Option<&str>) -> Option<DetectedSession> {
+    let claude_json_path = claude_projects_dir()?.join("../../.claude.json");
+    // Canonicalize to handle the `..` path component
+    let claude_json_path = std::fs::canonicalize(&claude_json_path).ok()?;
+    let content = std::fs::read_to_string(&claude_json_path).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let projects = parsed.get("projects")?.as_object()?;
+    let cwd_str = cwd.to_str()?;
+    let proj = projects.get(cwd_str)?;
+    let session_id = proj.get("lastSessionId")?.as_str()?;
+    if session_id.is_empty() {
+        return None;
+    }
+    let slug = target_slug.unwrap_or("").to_string();
+    let summary = proj
+        .get("lastSessionFirstPrompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let timestamp = proj
+        .get("lastSessionModified")
+        .and_then(|v| v.as_i64())
+        .map(|ms| {
+            // Convert unix ms to ISO 8601 string for consistency with JSONL timestamps
+            use std::time::{Duration, UNIX_EPOCH};
+            let secs = ms / 1000;
+            let nsecs = ((ms % 1000) * 1_000_000) as u32;
+            let dt = UNIX_EPOCH + Duration::new(secs as u64, nsecs);
+            chrono::DateTime::<chrono::Utc>::from(dt)
+                .format("%Y-%m-%dT%H:%M:%SZ")
+                .to_string()
+        })
+        .unwrap_or_default();
+    Some(DetectedSession {
+        id: session_id.to_string(),
+        project_slug: slug,
+        summary,
+        timestamp,
+        message_count: 0, // unknown from claude.json
+    })
 }
 
 /// Scan one or all project directories under `projects_dir`.
