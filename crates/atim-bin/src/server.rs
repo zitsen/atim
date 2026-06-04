@@ -2355,11 +2355,15 @@ impl Server {
                 let sessions = browser::scan_claude_sessions(&state.current_path);
                 if sessions.is_empty() {
                     // No existing sessions — create new directly
-                    let topic_name = self
-                        .topic_names
-                        .lock()
-                        .await
-                        .remove(&(target.chat_id.0, thread_id));
+                    let key = (target.chat_id.0, thread_id);
+                    let mut topic_name = self.topic_names.lock().await.remove(&key);
+                    if topic_name.is_none() {
+                        topic_name = self
+                            .pending_chat_names
+                            .lock()
+                            .await
+                            .remove(&(user_id, thread_id));
+                    }
                     self.browser.end_session(user_id).await;
                     // Override cwd for the new window
                     let _ = self
@@ -2389,11 +2393,15 @@ impl Server {
             }
             "new" => {
                 // Create a new session in the selected directory
-                let topic_name = self
-                    .topic_names
-                    .lock()
-                    .await
-                    .remove(&(target.chat_id.0, thread_id));
+                let key = (target.chat_id.0, thread_id);
+                let mut topic_name = self.topic_names.lock().await.remove(&key);
+                if topic_name.is_none() {
+                    topic_name = self
+                        .pending_chat_names
+                        .lock()
+                        .await
+                        .remove(&(user_id, thread_id));
+                }
                 self.browser.end_session(user_id).await;
                 let _ = self
                     .im_adapter
@@ -2434,11 +2442,15 @@ impl Server {
                     state_now.as_ref().map(|s| &s.mode)
                     && let Some(session) = sessions.get(idx)
                 {
-                    let topic_name = self
-                        .topic_names
-                        .lock()
-                        .await
-                        .remove(&(target.chat_id.0, thread_id));
+                    let key = (target.chat_id.0, thread_id);
+                    let mut topic_name = self.topic_names.lock().await.remove(&key);
+                    if topic_name.is_none() {
+                        topic_name = self
+                            .pending_chat_names
+                            .lock()
+                            .await
+                            .remove(&(user_id, thread_id));
+                    }
                     self.browser.end_session(user_id).await;
                     let _ = self
                         .im_adapter
@@ -2475,11 +2487,15 @@ impl Server {
                         .im_adapter
                         .edit_message(target, msg_id, "Attaching to existing window...")
                         .await;
-                    let topic_name = self
-                        .topic_names
-                        .lock()
-                        .await
-                        .remove(&(target.chat_id.0, thread_id));
+                    let key = (target.chat_id.0, thread_id);
+                    let mut topic_name = self.topic_names.lock().await.remove(&key);
+                    if topic_name.is_none() {
+                        topic_name = self
+                            .pending_chat_names
+                            .lock()
+                            .await
+                            .remove(&(user_id, thread_id));
+                    }
                     self.bind_window(
                         target,
                         user_id,
