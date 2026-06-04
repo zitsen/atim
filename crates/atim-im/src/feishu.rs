@@ -1404,7 +1404,6 @@ fn build_card(text: &str, buttons: &[Vec<Button>]) -> serde_json::Value {
     }
 
     serde_json::json!({
-        "schema": "2.0",
         "config": {
             "wide_screen_mode": true,
         },
@@ -1415,7 +1414,7 @@ fn build_card(text: &str, buttons: &[Vec<Button>]) -> serde_json::Value {
             },
             "template": "blue",
         },
-        "body": { "elements": elements },
+        "elements": elements,
     })
 }
 
@@ -1519,12 +1518,12 @@ mod tests {
 
         let card = build_card("Proceed?", &buttons);
         assert_eq!(card["header"]["title"]["content"], "Atim — Agent Response");
-        assert_eq!(card["body"]["elements"].as_array().unwrap().len(), 3);
+        assert_eq!(card["elements"].as_array().unwrap().len(), 3);
 
-        let actions_row0 = card["body"]["elements"][1]["actions"].as_array().unwrap();
+        let actions_row0 = card["elements"][1]["actions"].as_array().unwrap();
         assert_eq!(actions_row0[0]["text"]["content"], "Yes");
         assert_eq!(actions_row0[0]["type"], "primary");
-        let actions_row1 = card["body"]["elements"][2]["actions"].as_array().unwrap();
+        let actions_row1 = card["elements"][2]["actions"].as_array().unwrap();
         assert_eq!(actions_row1[0]["text"]["content"], "No");
         assert_eq!(actions_row1[0]["type"], "danger");
     }
