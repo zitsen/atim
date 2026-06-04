@@ -340,6 +340,7 @@ fn scan_claude_session_files(cwd: Option<&Path>) -> Result<Vec<DetectedSession>>
     let target_slug = cwd.map(|p| {
         p.iter()
             .filter_map(|c| c.to_str())
+            .filter(|s| *s != "/") // skip root component
             .collect::<Vec<_>>()
             .join("-")
     });
