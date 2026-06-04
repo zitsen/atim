@@ -529,6 +529,8 @@ fn extract_session_summary(content: &str) -> String {
                 // New format: content is a string
                 if let Some(text) = content_val.as_str()
                     && text.len() > 3
+                    && !text.starts_with('<')
+                // skip system XML echoes
                 {
                     summary = text.to_string();
                     break;
@@ -537,7 +539,9 @@ fn extract_session_summary(content: &str) -> String {
                 if let Some(blocks) = content_val.as_array() {
                     for block in blocks {
                         let text = block["text"].as_str().unwrap_or("");
-                        if !text.is_empty() && text.len() > 3 {
+                        if !text.is_empty() && text.len() > 3 && !text.starts_with('<')
+                        // skip system XML echoes
+                        {
                             summary = text.to_string();
                             break;
                         }
