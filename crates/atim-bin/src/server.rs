@@ -1525,6 +1525,8 @@ impl Server {
             // - tmux renumbering on restart (stale @id)
             // - window repurposed (exists but has a different name)
             // - no window_binding found (window_id_str is empty)
+            // Clear any stale browser state — user is chatting with a bound agent.
+            self.browser.end_session(user_id).await;
             if let Some(real_wid) = self.find_window_by_name(&binding.display_name).await {
                 tracing::info!(
                     "[handle_text_message] Resolved binding '{}' to live window {} (was {})",
