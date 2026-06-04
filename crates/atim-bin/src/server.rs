@@ -3977,7 +3977,7 @@ impl Server {
 
         // Resolve session info from window_binding or session store
         let old_window_id: String;
-        let cwd: String;
+        let mut cwd: String;
         let session_id: String;
         let agent_type_name: String;
 
@@ -3999,9 +3999,21 @@ impl Server {
                 cwd = si.cwd.clone();
                 agent_type_name = si.agent_type.clone();
             } else {
-                cwd = "~".to_string();
+                // Last resort: try any window_binding with matching session_id
+                let wb_cwd = rt
+                    .window_bindings
+                    .values()
+                    .find(|wb| wb.session_id == session_id)
+                    .map(|wb| wb.cwd.as_str())
+                    .filter(|c| *c != "~" && !c.is_empty());
+                cwd = wb_cwd.unwrap_or("~").to_string();
                 agent_type_name = "claude".to_string();
             }
+        }
+
+        // Normalize ~ to actual home path
+        if cwd == "~" || cwd.is_empty() {
+            cwd = std::env::var("HOME").unwrap_or_else(|_| "/home/huolinhe".into());
         }
 
         let agent = self
