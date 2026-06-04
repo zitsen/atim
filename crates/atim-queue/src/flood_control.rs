@@ -197,9 +197,13 @@ impl ImAdapter for FloodControlledAdapter {
         buttons: &[Vec<Button>],
     ) -> Result<MessageId> {
         let chat_id = Self::get_chat_id(target).await;
-        if self.rate_limit(chat_id, true).await {
-            // Drop keyboard — it's interactive UI, safe to drop
-            return self.inner.send_message(target, text).await;
+        // Keyboard cards are essential for setup flows (browser, session
+        // picker, agent picker). Dropping them to plain text breaks the UX.
+        // Rate-limit but don't drop — proceed anyway.
+        if self.rate_limit(chat_id, false).await {
+            tracing::warn!(
+                "Flood control rate-limited send_keyboard to chat {chat_id} — proceeding anyway"
+            );
         }
         let result = self.inner.send_keyboard(target, text, buttons).await;
         if result.is_ok() {
