@@ -2682,13 +2682,31 @@ impl Server {
         self.tmux_mgr.send_line(&window_id, &launch_cmd).await?;
 
         // Wait for agent process to actually start (non-shell process appears)
+        let mut agent_started = false;
         for _ in 0..10 {
             if let Ok(info) = self.tmux_mgr.find_window(&window_id).await
                 && !is_shell_process(&info.current_command)
             {
+                agent_started = true;
                 break;
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+
+        if !agent_started {
+            let pane = self
+                .tmux_mgr
+                .capture_pane(&window_id)
+                .await
+                .unwrap_or_default();
+            let clean = atim_parser::terminal::TerminalParser::strip_ansi(&pane);
+            let err_msg = if clean.trim().is_empty() {
+                "❌ Agent failed to start. Check agent command and configuration.".into()
+            } else {
+                format!("❌ Agent failed to start:\n```\n{}```", clean.trim())
+            };
+            let _ = self.im_adapter.send_message(target, &err_msg).await;
+            return Ok(());
         }
 
         // Notify user the session is ready
@@ -2895,13 +2913,27 @@ impl Server {
             let launch_cmd = agent_launch_cmd(&agent);
             self.tmux_mgr.send_line(&wid, &launch_cmd).await?;
             // Wait for agent process to start
+            let mut agent_started = false;
             for _ in 0..10 {
                 if let Ok(info) = self.tmux_mgr.find_window(&wid).await
                     && !is_shell_process(&info.current_command)
                 {
+                    agent_started = true;
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+
+            if !agent_started {
+                let pane = self.tmux_mgr.capture_pane(&wid).await.unwrap_or_default();
+                let clean = atim_parser::terminal::TerminalParser::strip_ansi(&pane);
+                let err_msg = if clean.trim().is_empty() {
+                    "❌ Agent failed to start. Check agent command and configuration.".into()
+                } else {
+                    format!("❌ Agent failed to start:\n```\n{}```", clean.trim())
+                };
+                let _ = self.im_adapter.send_message(target, &err_msg).await;
+                return Ok(());
             }
         }
 
@@ -3005,13 +3037,31 @@ impl Server {
         self.tmux_mgr.send_line(&window_id, &launch_cmd).await?;
 
         // Wait for agent process to actually start (non-shell process appears)
+        let mut agent_started = false;
         for _ in 0..10 {
             if let Ok(info) = self.tmux_mgr.find_window(&window_id).await
                 && !is_shell_process(&info.current_command)
             {
+                agent_started = true;
                 break;
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+
+        if !agent_started {
+            let pane = self
+                .tmux_mgr
+                .capture_pane(&window_id)
+                .await
+                .unwrap_or_default();
+            let clean = atim_parser::terminal::TerminalParser::strip_ansi(&pane);
+            let err_msg = if clean.trim().is_empty() {
+                "❌ Agent failed to start. Check agent command and configuration.".into()
+            } else {
+                format!("❌ Agent failed to start:\n```\n{}```", clean.trim())
+            };
+            let _ = self.im_adapter.send_message(target, &err_msg).await;
+            return Ok(());
         }
 
         // Notify user the session is ready
@@ -3936,13 +3986,31 @@ impl Server {
         }
 
         // Wait for agent process to start
+        let mut agent_started = false;
         for _ in 0..10 {
             if let Ok(info) = self.tmux_mgr.find_window(&new_window_id).await
                 && !is_shell_process(&info.current_command)
             {
+                agent_started = true;
                 break;
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+
+        if !agent_started {
+            let pane = self
+                .tmux_mgr
+                .capture_pane(&new_window_id)
+                .await
+                .unwrap_or_default();
+            let clean = atim_parser::terminal::TerminalParser::strip_ansi(&pane);
+            let err_msg = if clean.trim().is_empty() {
+                "❌ Agent failed to start. Check agent command and configuration.".into()
+            } else {
+                format!("❌ Agent failed to start:\n```\n{}```", clean.trim())
+            };
+            let _ = self.im_adapter.edit_message(target, msg_id, &err_msg).await;
+            return Ok(());
         }
 
         // Give the agent TUI time to initialize its input handler.
