@@ -1455,7 +1455,7 @@ impl Server {
                     self.browser.navigate_to(user_id, &matched_path).await;
                     let thread_id = target.thread_id.map(|t| t.0).unwrap_or(0);
                     let _ = self
-                        .send_browser_keyboard(&target, user_id, thread_id)
+                        .send_browser_keyboard(&target, user_id, thread_id, None)
                         .await;
                     return Ok(());
                 }
@@ -1480,7 +1480,7 @@ impl Server {
                         self.browser.navigate_to(user_id, path).await;
                         let thread_id = target.thread_id.map(|t| t.0).unwrap_or(0);
                         let _ = self
-                            .send_browser_keyboard(&target, user_id, thread_id)
+                            .send_browser_keyboard(&target, user_id, thread_id, None)
                             .await;
                     } else {
                         let _ = self
@@ -2005,7 +2005,9 @@ impl Server {
         let start_path = std::env::current_dir().unwrap_or_else(|_| Path::new("/").to_path_buf());
 
         self.browser.start_browsing(user_id, &start_path).await;
-        let _ = self.send_browser_keyboard(target, user_id, thread_id).await;
+        let _ = self
+            .send_browser_keyboard(target, user_id, thread_id, None)
+            .await;
         Ok(())
     }
 
@@ -2107,7 +2109,9 @@ impl Server {
         self.browser
             .show_window_picker(user_id, unbound.to_vec())
             .await;
-        let _ = self.send_browser_keyboard(target, user_id, thread_id).await;
+        let _ = self
+            .send_browser_keyboard(target, user_id, thread_id, None)
+            .await;
         Ok(())
     }
 
@@ -2117,6 +2121,7 @@ impl Server {
         target: &MessageTarget,
         user_id: i64,
         thread_id: i64,
+        msg_id: Option<MessageId>,
     ) -> Result<()> {
         let state = match self.browser.get_state(user_id).await {
             Some(s) => s,
@@ -2285,7 +2290,16 @@ impl Server {
         };
 
         drop(ctx_lock);
-        let _ = self.im_adapter.send_keyboard(target, &text, &buttons).await;
+
+        if let Some(edit_id) = msg_id {
+            // Edit existing card in-place
+            let _ = self
+                .im_adapter
+                .edit_keyboard(target, &edit_id, &buttons)
+                .await;
+        } else {
+            let _ = self.im_adapter.send_keyboard(target, &text, &buttons).await;
+        }
         Ok(())
     }
 
@@ -2317,15 +2331,17 @@ impl Server {
             }
             "up" => {
                 self.browser.go_up(user_id).await;
-                let _ = self.send_browser_keyboard(target, user_id, thread_id).await;
-                let _ = self.im_adapter.delete_message(target, msg_id).await;
+                let _ = self
+                    .send_browser_keyboard(target, user_id, thread_id, Some(msg_id.clone()))
+                    .await;
             }
             "page" => {
                 // Toggle to next page
                 let new_page = state.page + 1;
                 self.browser.set_page(user_id, new_page).await;
-                let _ = self.send_browser_keyboard(target, user_id, thread_id).await;
-                let _ = self.im_adapter.delete_message(target, msg_id).await;
+                let _ = self
+                    .send_browser_keyboard(target, user_id, thread_id, Some(msg_id.clone()))
+                    .await;
             }
             "confirm" => {
                 // Scan the current directory for sessions and show picker
@@ -2353,14 +2369,16 @@ impl Server {
                     .await?;
                 } else {
                     self.browser.show_session_picker(user_id, sessions).await;
-                    let _ = self.send_browser_keyboard(target, user_id, thread_id).await;
-                    let _ = self.im_adapter.delete_message(target, msg_id).await;
+                    let _ = self
+                        .send_browser_keyboard(target, user_id, thread_id, Some(msg_id.clone()))
+                        .await;
                 }
             }
             "back" => {
                 self.browser.show_browsing(user_id).await;
-                let _ = self.send_browser_keyboard(target, user_id, thread_id).await;
-                let _ = self.im_adapter.delete_message(target, msg_id).await;
+                let _ = self
+                    .send_browser_keyboard(target, user_id, thread_id, Some(msg_id.clone()))
+                    .await;
             }
             "new" => {
                 // Create a new session in the selected directory
@@ -2391,7 +2409,9 @@ impl Server {
                     && entry.is_dir
                 {
                     self.browser.navigate_to(user_id, &entry.path).await;
-                    let _ = self.send_browser_keyboard(target, user_id, thread_id).await;
+                    let _ = self
+                        .send_browser_keyboard(target, user_id, thread_id, None)
+                        .await;
                     let _ = self.im_adapter.delete_message(target, msg_id).await;
                 }
             }
@@ -2427,8 +2447,9 @@ impl Server {
             "new_win" => {
                 // User chose "New Session" from window picker — go to directory browser
                 self.browser.show_browsing(user_id).await;
-                let _ = self.send_browser_keyboard(target, user_id, thread_id).await;
-                let _ = self.im_adapter.delete_message(target, msg_id).await;
+                let _ = self
+                    .send_browser_keyboard(target, user_id, thread_id, Some(msg_id.clone()))
+                    .await;
             }
             w if w.starts_with("win:") => {
                 // User selected an unbound tmux window to attach
