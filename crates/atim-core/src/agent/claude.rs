@@ -524,14 +524,23 @@ fn extract_session_summary(content: &str) -> String {
     for line in content.lines() {
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
             let role = val["message"]["role"].as_str().unwrap_or("");
-            if role == "user"
-                && let Some(blocks) = val["message"]["content"].as_array()
-            {
-                for block in blocks {
-                    let text = block["text"].as_str().unwrap_or("");
-                    if !text.is_empty() && text.len() > 3 {
-                        summary = text.to_string();
-                        break;
+            if role == "user" {
+                let content_val = &val["message"]["content"];
+                // New format: content is a string
+                if let Some(text) = content_val.as_str()
+                    && text.len() > 3
+                {
+                    summary = text.to_string();
+                    break;
+                }
+                // Old format: content is an array of blocks
+                if let Some(blocks) = content_val.as_array() {
+                    for block in blocks {
+                        let text = block["text"].as_str().unwrap_or("");
+                        if !text.is_empty() && text.len() > 3 {
+                            summary = text.to_string();
+                            break;
+                        }
                     }
                 }
             }
