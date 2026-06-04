@@ -528,7 +528,7 @@ fn extract_session_summary(content: &str) -> String {
                 let content_val = &val["message"]["content"];
                 // New format: content is a string
                 if let Some(text) = content_val.as_str()
-                    && text.len() > 3
+                    && !text.is_empty()
                     && !text.starts_with('<')
                 // skip system XML echoes
                 {
