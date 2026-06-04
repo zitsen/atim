@@ -2416,8 +2416,13 @@ impl Server {
                     && entry.is_dir
                 {
                     self.browser.navigate_to(user_id, &entry.path).await;
+                    // Patch old card to text-only, send new card for fresh listing
                     let _ = self
-                        .send_browser_keyboard(target, user_id, thread_id, Some(msg_id.clone()))
+                        .im_adapter
+                        .edit_message(target, msg_id, &format!("📁 {}", entry.path.display()))
+                        .await;
+                    let _ = self
+                        .send_browser_keyboard(target, user_id, thread_id, None)
                         .await;
                 }
             }
