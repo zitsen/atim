@@ -2341,6 +2341,16 @@ impl Server {
                     .await;
             }
             "confirm" => {
+                // Update the cwd picker card in-place to show the selected dir
+                let _ = self
+                    .im_adapter
+                    .edit_message(
+                        target,
+                        msg_id,
+                        &format!("📁 Selected: {}", state.current_path.display()),
+                    )
+                    .await;
+
                 // Scan the current directory for sessions and show picker
                 let sessions = browser::scan_claude_sessions(&state.current_path);
                 if sessions.is_empty() {
