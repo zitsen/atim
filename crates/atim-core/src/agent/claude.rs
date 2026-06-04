@@ -399,11 +399,21 @@ fn fast_session_from_claude_json(cwd: &Path, target_slug: Option<&str>) -> Optio
         return None;
     }
     let slug = target_slug.unwrap_or("").to_string();
-    let summary = proj
+    let mut summary = proj
         .get("lastSessionFirstPrompt")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    // If ~/.claude.json doesn't have the summary, try reading the JSONL file
+    if summary.is_empty() {
+        let jsonl_path = claude_projects_dir()?
+            .join("projects")
+            .join(&slug)
+            .join(format!("{}.jsonl", session_id));
+        if let Ok(content) = std::fs::read_to_string(&jsonl_path) {
+            summary = extract_session_summary(&content);
+        }
+    }
     let timestamp = proj
         .get("lastSessionModified")
         .and_then(|v| v.as_i64())
