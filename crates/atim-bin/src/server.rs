@@ -485,10 +485,17 @@ impl Server {
                                     if let Some(mid) =
                                         map.remove(&(chat_id, thread_id_val, tuid.clone()))
                                     {
-                                        let _ = self
-                                            .im_adapter
-                                            .edit_message(&target, &mid, &msg.text)
-                                            .await;
+                                        // Edit tool: diff card already sent, just append result
+                                        let is_edit = matches!(
+                                            msg.tool_name.as_deref(),
+                                            Some("Edit" | "EditTool" | "TextEditTool")
+                                        );
+                                        if !is_edit {
+                                            let _ = self
+                                                .im_adapter
+                                                .edit_message(&target, &mid, &msg.text)
+                                                .await;
+                                        }
                                     } else {
                                         let _ =
                                             self.im_adapter.send_message(&target, &msg.text).await;
