@@ -309,7 +309,26 @@ fn summarize_tool_result(text: &str, tool_name: Option<&str>) -> String {
 
     match tool_name {
         Some("Read") | Some("ReadTool") | Some("FileReadTool") => {
-            return format!("📄 Read {line_count} lines");
+            // Include file content in the output (truncated for card display).
+            // Strip the "N\t" line-number prefix that Claude Code adds.
+            let cleaned: String = text
+                .lines()
+                .filter_map(|line| line.split_once('\t').map(|(_, rest)| rest).or(Some(line)))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let truncated = if cleaned.len() > 3000 {
+                format!(
+                    "{}…\n(truncated)",
+                    &cleaned[..cleaned
+                        .char_indices()
+                        .nth(2997)
+                        .map(|(i, _)| i)
+                        .unwrap_or(cleaned.len())]
+                )
+            } else {
+                cleaned
+            };
+            return format!("📄 Read {} lines\n```\n{}```", line_count, truncated);
         }
         Some("Edit") | Some("EditTool") | Some("TextEditTool") => {
             // Count additions (+) and deletions (-) in diff output
