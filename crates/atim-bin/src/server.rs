@@ -3960,15 +3960,21 @@ impl Server {
     ) -> Result<()> {
         let mut rt = self.state_mgr.load_runtime().await?;
 
-        // Find ChatBinding for this user+thread
+        // Find ChatBinding for this user+thread (fall back to chat_id)
+        let chat_id = target.chat_id.0;
         let cb = match rt
             .chat_bindings
             .iter()
-            .find(|b| b.user_id == user_id && b.thread_id == thread_id)
+            .find(|b| {
+                b.user_id == user_id
+                    && (b.thread_id == thread_id || b.chat_id == chat_id)
+            })
         {
             Some(cb) => cb.clone(),
             None => {
-                tracing::warn!("[recover] No chat binding for user={user_id} thread={thread_id}");
+                tracing::warn!(
+                    "[recover] No chat binding for user={user_id} thread={thread_id} chat={chat_id}"
+                );
                 let _ = self
                     .im_adapter
                     .send_message(target, "Session not found.")
@@ -3976,6 +3982,10 @@ impl Server {
                 return Ok(());
             }
         };
+
+        // Re-resolve thread_id from the found binding (card actions use
+        // chat-derived thread_id which may differ from the binding's thread_id).
+        let thread_id = cb.thread_id;
 
         // Resolve session info from window_binding or session store
         let old_window_id: String;
