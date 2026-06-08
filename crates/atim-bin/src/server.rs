@@ -442,10 +442,29 @@ impl Server {
                                         self.send_ask_user_card(&target, raw, &msg.text).await
                                 {
                                     if let Some(tuid) = &msg.tool_use_id {
-                                        self.tool_use_msg_ids.lock().await.insert(
-                                            (chat_id, thread_id_val, tuid.clone()),
-                                            mid,
-                                        );
+                                        self.tool_use_msg_ids
+                                            .lock()
+                                            .await
+                                            .insert((chat_id, thread_id_val, tuid.clone()), mid);
+                                    }
+                                    continue;
+                                }
+                                // Edit: include diff content in the card
+                                if matches!(
+                                    msg.tool_name.as_deref(),
+                                    Some("Edit" | "EditTool" | "TextEditTool")
+                                ) && let Some(ref raw) = msg.raw_input
+                                {
+                                    let diff_text = build_edit_diff_card(raw, &msg.text);
+                                    if let Ok(mid) =
+                                        self.im_adapter.send_message(&target, &diff_text).await
+                                    {
+                                        if let Some(tuid) = &msg.tool_use_id {
+                                            self.tool_use_msg_ids.lock().await.insert(
+                                                (chat_id, thread_id_val, tuid.clone()),
+                                                mid,
+                                            );
+                                        }
                                     }
                                     continue;
                                 }
@@ -5005,6 +5024,56 @@ fn format_delta(delta: chrono::TimeDelta) -> String {
 
 fn is_shell_process(process: &str) -> bool {
     matches!(process, "zsh" | "bash" | "sh" | "fish" | "dash" | "ksh")
+}
+
+/// Build a markdown card showing Edit tool diff content.
+fn build_edit_diff_card(raw_input: &str, fallback: &str) -> String {
+    let parsed: serde_json::Value = match serde_json::from_str(raw_input) {
+        Ok(v) => v,
+        Err(_) => return fallback.to_string(),
+    };
+    let file_path = parsed["file_path"].as_str().unwrap_or("?");
+    let old = parsed["old_string"].as_str().unwrap_or("");
+    let new = parsed["new_string"].as_str().unwrap_or("");
+    let replace_all = parsed["replace_all"].as_bool().unwrap_or(false);
+
+    let mut out = format!("✏️ Edit: {file_path}");
+    if replace_all {
+        out.push_str(" (replace_all)");
+    }
+
+    // Truncate long strings for display
+    let old_display = if old.len() > 800 {
+        format!(
+            "{}…",
+            &old[..old
+                .char_indices()
+                .nth(797)
+                .map(|(i, _)| i)
+                .unwrap_or(old.len())]
+        )
+    } else {
+        old.to_string()
+    };
+    let new_display = if new.len() > 800 {
+        format!(
+            "{}…",
+            &new[..new
+                .char_indices()
+                .nth(797)
+                .map(|(i, _)| i)
+                .unwrap_or(new.len())]
+        )
+    } else {
+        new.to_string()
+    };
+
+    out.push_str(&format!(
+        "\n```diff\n- {}\n+ {}\n```",
+        old_display.replace('\n', "\n- "),
+        new_display.replace('\n', "\n+ ")
+    ));
+    out
 }
 
 /// Build the launch command string for an agent (command + extra args).

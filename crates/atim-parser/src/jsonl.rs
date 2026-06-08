@@ -133,12 +133,13 @@ impl JsonlParser {
                                 tool_names.insert(tool_use_id.to_string(), tool_name.to_string());
                                 let input = block.get("input");
                                 let summary = summarize_tool_use(tool_name, input);
-                                // Preserve full input JSON for AskUserQuestion so the
-                                // server can build interactive cards from the questions.
-                                let raw_input = if tool_name == "AskUserQuestion" {
-                                    input.map(|v| v.to_string())
-                                } else {
-                                    None
+                                // Preserve full input JSON for tools that need rich display.
+                                let raw_input = match tool_name {
+                                    "AskUserQuestion" => input.map(|v| v.to_string()),
+                                    "Edit" | "EditTool" | "TextEditTool" => {
+                                        input.map(|v| v.to_string())
+                                    }
+                                    _ => None,
                                 };
                                 tool_entries.push(ParsedEntry {
                                     role: role.clone(),
