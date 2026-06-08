@@ -4669,12 +4669,63 @@ impl Server {
                     }
                 }
             }
+            cmd if cmd.starts_with("rm ") => {
+                let name = cmd.strip_prefix("rm").unwrap().trim();
+                if name.is_empty() {
+                    let _ = self
+                        .im_adapter
+                        .send_message(target, "Usage: `/atim rm <name>`")
+                        .await;
+                } else {
+                    let mut rt = self.state_mgr.load_runtime().await?;
+                    // Find window binding by name
+                    let wid = rt
+                        .window_bindings
+                        .values()
+                        .find(|wb| wb.window_name == name)
+                        .map(|wb| wb.window_id.clone());
+                    match wid {
+                        Some(wid) => {
+                            // Remove from window_bindings
+                            if let Some(wb) = rt.window_bindings.remove(&wid) {
+                                // Remove associated chat bindings
+                                rt.chat_bindings.retain(|cb| cb.session_id != wb.session_id);
+                            }
+                            // Remove from session_map
+                            let mut map =
+                                self.state_mgr.load_session_map().await.unwrap_or_default();
+                            map.remove(&wid);
+                            let _ = self.state_mgr.save_session_map(&map).await;
+                            self.state_mgr.save_runtime(&rt).await?;
+                            // Close tmux window if it still exists
+                            let window_id = atim_core::message::WindowId(wid.clone());
+                            if self.tmux_mgr.window_exists(&window_id).await {
+                                let _ = self.tmux_mgr.kill_window(&window_id).await;
+                            }
+                            let _ = self
+                                .im_adapter
+                                .send_message(
+                                    target,
+                                    &format!("🗑 Removed session `{}` (window {})", name, wid),
+                                )
+                                .await;
+                        }
+                        None => {
+                            let _ = self
+                                .im_adapter
+                                .send_message(target, &format!("No session with name `{}`", name))
+                                .await;
+                        }
+                    }
+                }
+            }
             "help" | "h" | "-h" | "--help" => {
                 let help = concat!(
                     "**Available commands**\n\n",
                     "`/atim status` — System CPU/mem/disk status\n",
                     "`/atim ls`     — List sessions (name, window, cwd, agent, session-id)\n",
                     "`/atim chdir <name> <dir>` — Update session cwd\n",
+                    "`/atim rm <name>` — Remove session and close tmux window\n",
                     "`/atim help`   — This help\n",
                     "`/ss` / `/screenshot` — Capture terminal screenshot\n",
                     "`/usage` — Show Claude Code API usage\n",
