@@ -3961,8 +3961,10 @@ impl Server {
         let mut rt = self.state_mgr.load_runtime().await?;
 
         // Match by chat_id — the only stable Feishu session identifier.
-        // thread_id from card actions may differ from the binding's thread_id.
         let chat_id = target.chat_id.0;
+        tracing::info!(
+            "[recover] Looking up binding for user={user_id} thread={thread_id} chat={chat_id}"
+        );
         let cb = match rt
             .chat_bindings
             .iter()
@@ -3973,6 +3975,13 @@ impl Server {
                 tracing::warn!(
                     "[recover] No chat binding for user={user_id} thread={thread_id} chat={chat_id}"
                 );
+                // Dump all bindings for this user to help diagnose
+                for b in rt.chat_bindings.iter().filter(|b| b.user_id == user_id) {
+                    tracing::warn!(
+                        "[recover]   candidate: thread={} chat={} display={}",
+                        b.thread_id, b.chat_id, b.display_name
+                    );
+                }
                 let _ = self
                     .im_adapter
                     .send_message(target, "Session not found.")
@@ -3980,6 +3989,11 @@ impl Server {
                 return Ok(());
             }
         };
+
+        tracing::info!(
+            "[recover] Found binding: display={} thread={} chat={} session={}",
+            cb.display_name, cb.thread_id, cb.chat_id, cb.session_id
+        );
 
         // Re-resolve thread_id from the found binding (card actions use
         // chat-derived thread_id which may differ from the binding's thread_id).
@@ -4024,6 +4038,29 @@ impl Server {
         // Normalize ~ to actual home path
         if cwd == "~" || cwd.is_empty() {
             cwd = std::env::var("HOME").unwrap_or_else(|_| "/home/huolinhe".into());
+        }
+
+        // Try to get real cwd from ~/.claude.json (maps cwd→lastSessionId).
+        // More reliable than window_binding which may have a fallback cwd.
+        if !session_id.is_empty() {
+            if let Some(claude_dir) = atim_core::agent::claude::claude_projects_dir() {
+                let json_path = claude_dir.join("../../.claude.json");
+                if let Ok(json_path) = std::fs::canonicalize(&json_path)
+                    && let Ok(content) = std::fs::read_to_string(&json_path)
+                    && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content)
+                    && let Some(projects) = parsed["projects"].as_object()
+                {
+                    for (cwd_str, proj) in projects {
+                        if proj.get("lastSessionId").and_then(|v| v.as_str()) == Some(&session_id)
+                            && !cwd_str.is_empty()
+                        {
+                            tracing::info!("[recover] Resolved cwd from claude.json: {cwd_str}");
+                            cwd = cwd_str.clone();
+                            break;
+                        }
+                    }
+                }
+            }
         }
 
         let agent = self
