@@ -3803,10 +3803,9 @@ impl Server {
 
             // New or changed UI — send keyboard
             if let Some(interactive) = ui {
-                // Skip AskUser cards — the TUI prompt (❯) from any agent is
-                // wrongly detected as a question via stale scrollback content.
-                let should_send_card = interactive.kind != UiKind::AskUserQuestion;
-                if should_send_card {
+                // Send all interactive UI cards including AskUserQuestion
+                // (options are extracted and shown as clickable buttons)
+                {
                     let target = MessageTarget {
                         chat_id: ChatId(cb.group_chat_id.unwrap_or(cb.chat_id)),
                         thread_id: Some(ThreadId(cb.thread_id)),
@@ -5147,10 +5146,108 @@ fn truncate_ui_content(content: &str, max_len: usize) -> String {
     }
 }
 
+/// Extract option lines from AskUserQuestion content.
+///
+/// Options typically appear as:
+///   ❯ 1. Option A
+///     2. Option B
+///     3. Option C
+/// or:
+///   ☐ Option A
+///   ☐ Option B
+fn extract_options(content: &str) -> Vec<String> {
+    let mut options = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        // Match numbered options: "❯ 1. Foo", "  2. Bar", "☐ Foo"
+        if let Some(rest) = trimmed.strip_prefix('❯').map(|s| s.trim()) {
+            if let Some(opt) = rest.strip_prefix(|c: char| c.is_ascii_digit()) {
+                if let Some(opt) = opt.strip_prefix('.').or_else(|| opt.strip_prefix(')')) {
+                    options.push(opt.trim().to_string());
+                    continue;
+                }
+            }
+        }
+        if let Some(rest) = trimmed.strip_prefix(|c: char| c.is_ascii_digit()) {
+            if let Some(opt) = rest.strip_prefix('.').or_else(|| rest.strip_prefix(')')) {
+                let opt = opt.trim();
+                if !opt.is_empty() && !opt.starts_with(|c: char| c == '·') {
+                    options.push(opt.to_string());
+                    continue;
+                }
+            }
+        }
+        // Match checkbox options: "☐ Foo", "✔ Foo"
+        if trimmed.starts_with('☐') || trimmed.starts_with('✔') || trimmed.starts_with('☒') {
+            options.push(trimmed[4..].trim().to_string());
+            continue;
+        }
+    }
+    options
+}
+
 /// Build inline keyboard buttons for an interactive UI.
 fn ui_to_buttons(ui: &InteractiveUi) -> Vec<Vec<Button>> {
     match ui.kind {
-        UiKind::AskUserQuestion | UiKind::ExitPlanMode => {
+        UiKind::AskUserQuestion => {
+            let options = extract_options(&ui.content);
+            if options.is_empty() {
+                // Fallback: generic Up/Down/Select buttons
+                vec![
+                    vec![
+                        Button {
+                            text: "⬆ Up".into(),
+                            callback_data: "ui:up".into(),
+                        },
+                        Button {
+                            text: "⬇ Down".into(),
+                            callback_data: "ui:down".into(),
+                        },
+                    ],
+                    vec![
+                        Button {
+                            text: "✔ Select".into(),
+                            callback_data: "ui:enter".into(),
+                        },
+                        Button {
+                            text: "✖ Cancel".into(),
+                            callback_data: "ui:esc".into(),
+                        },
+                    ],
+                ]
+            } else {
+                // Each option as a clickable button — send the option text via
+                // ui:select:<index>, which the handler translates to Down×N + Enter.
+                let mut buttons: Vec<Vec<Button>> = options
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, opt)| {
+                        let label = if opt.len() > 45 {
+                            format!(
+                                "{}…",
+                                &opt[..opt
+                                    .char_indices()
+                                    .nth(42)
+                                    .map(|(j, _)| j)
+                                    .unwrap_or(opt.len())]
+                            )
+                        } else {
+                            opt
+                        };
+                        vec![Button {
+                            text: label,
+                            callback_data: format!("ui:select:{i}"),
+                        }]
+                    })
+                    .collect();
+                buttons.push(vec![Button {
+                    text: "✖ Cancel".into(),
+                    callback_data: "ui:esc".into(),
+                }]);
+                buttons
+            }
+        }
+        UiKind::ExitPlanMode => {
             vec![
                 vec![
                     Button {
@@ -5266,6 +5363,16 @@ async fn handle_ui_callback(
         }
         "ui:no" => {
             tmux.send_key(&wid, "Tab").await?; // Tab to No, then Enter
+            tmux.send_key(&wid, "Enter").await?;
+        }
+        s if s.starts_with("ui:select:") => {
+            // Navigate to option index then press Enter
+            let idx: usize = s[10..].parse().unwrap_or(0);
+            // First option is already selected (❯), so press Down for each index > 0
+            for _ in 0..idx {
+                tmux.send_key(&wid, "Down").await?;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
             tmux.send_key(&wid, "Enter").await?;
         }
         _ => {}
