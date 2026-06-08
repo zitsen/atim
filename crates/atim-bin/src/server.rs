@@ -435,6 +435,24 @@ impl Server {
                         match msg.content_type {
                             ContentType::ToolUse => {
                                 flush!();
+                                // AskUserQuestion: send interactive card with option buttons
+                                if msg.tool_name.as_deref() == Some("AskUserQuestion")
+                                    && let Some(ref raw) = msg.raw_input
+                                {
+                                    if let Ok(mid) = self
+                                        .send_ask_user_card(&target, raw, &msg.text)
+                                        .await
+                                        .and_then(|mid| Ok(mid))
+                                    {
+                                        if let Some(tuid) = &msg.tool_use_id {
+                                            self.tool_use_msg_ids.lock().await.insert(
+                                                (chat_id, thread_id_val, tuid.clone()),
+                                                mid,
+                                            );
+                                        }
+                                    }
+                                    continue;
+                                }
                                 if let Some(tuid) = &msg.tool_use_id
                                     && let Ok(mid) =
                                         self.im_adapter.send_message(&target, &msg.text).await
@@ -2115,6 +2133,81 @@ impl Server {
             .send_browser_keyboard(target, user_id, thread_id, None)
             .await;
         Ok(())
+    }
+
+    /// Send an AskUserQuestion as a Feishu interactive card with clickable option buttons.
+    ///
+    /// Parses the tool_use input JSON to extract questions/options, builds
+    /// a card with one button per option, and returns the message_id for
+    /// tracking (so the ToolResult can edit it later).
+    async fn send_ask_user_card(
+        &self,
+        target: &MessageTarget,
+        raw_input: &str,
+        fallback_text: &str,
+    ) -> Result<MessageId> {
+        let parsed: serde_json::Value = serde_json::from_str(raw_input)
+            .map_err(|e| atim_core::error::Error::Config(format!("AskUserQuestion JSON: {e}")))?;
+
+        let questions = parsed["questions"].as_array();
+        let mut all_buttons: Vec<Vec<Button>> = Vec::new();
+        let mut card_text = String::new();
+
+        if let Some(qs) = questions {
+            for (qi, q) in qs.iter().enumerate() {
+                let question = q["question"].as_str().unwrap_or("Choose:");
+                let header = q["header"].as_str().unwrap_or("");
+                if !header.is_empty() {
+                    card_text.push_str(&format!("**{}**: {}\n", header, question));
+                } else if qs.len() > 1 {
+                    card_text.push_str(&format!("**Q{}**: {}\n", qi + 1, question));
+                } else {
+                    card_text.push_str(&format!("**{}**\n", question));
+                }
+
+                if let Some(options) = q["options"].as_array() {
+                    for (i, opt) in options.iter().enumerate() {
+                        let label = opt["label"].as_str().unwrap_or("");
+                        let desc = opt["description"].as_str().unwrap_or("");
+                        let btn_text = if !desc.is_empty() && desc != label {
+                            format!("{}. {} — {}", i + 1, label, desc)
+                        } else {
+                            format!("{}. {}", i + 1, label)
+                        };
+                        let btn_label = if btn_text.len() > 45 {
+                            format!(
+                                "{}…",
+                                &btn_text[..btn_text
+                                    .char_indices()
+                                    .nth(42)
+                                    .map(|(j, _)| j)
+                                    .unwrap_or(btn_text.len())]
+                            )
+                        } else {
+                            btn_text
+                        };
+                        all_buttons.push(vec![Button {
+                            text: btn_label,
+                            callback_data: format!("ui:select:{i}"),
+                        }]);
+                    }
+                }
+            }
+        }
+
+        if card_text.is_empty() {
+            card_text = fallback_text.to_string();
+        }
+
+        // Always add a cancel button
+        all_buttons.push(vec![Button {
+            text: "✖ Cancel".into(),
+            callback_data: "ui:esc".into(),
+        }]);
+
+        self.im_adapter
+            .send_keyboard(target, &card_text, &all_buttons)
+            .await
     }
 
     /// Build and send the current browser keyboard to the user.

@@ -465,6 +465,7 @@ impl SessionMonitor {
                         role: entry.role,
                         tool_name: entry.tool_name,
                         image_data: entry.image_data,
+                        raw_input: entry.raw_input,
                     });
                 }
 

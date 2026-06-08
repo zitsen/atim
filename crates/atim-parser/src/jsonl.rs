@@ -131,7 +131,15 @@ impl JsonlParser {
                                 let tool_use_id =
                                     block.get("id").and_then(|v| v.as_str()).unwrap_or("");
                                 tool_names.insert(tool_use_id.to_string(), tool_name.to_string());
-                                let summary = summarize_tool_use(tool_name, block.get("input"));
+                                let input = block.get("input");
+                                let summary = summarize_tool_use(tool_name, input);
+                                // Preserve full input JSON for AskUserQuestion so the
+                                // server can build interactive cards from the questions.
+                                let raw_input = if tool_name == "AskUserQuestion" {
+                                    input.map(|v| v.to_string())
+                                } else {
+                                    None
+                                };
                                 tool_entries.push(ParsedEntry {
                                     role: role.clone(),
                                     text: summary,
@@ -140,6 +148,7 @@ impl JsonlParser {
                                     tool_name: Some(tool_name.to_string()),
                                     timestamp: timestamp.clone(),
                                     image_data: None,
+                                    raw_input,
                                 });
                             }
                             _ => {}
@@ -157,6 +166,7 @@ impl JsonlParser {
                         tool_name: None,
                         timestamp: timestamp.clone(),
                         image_data: None,
+                        raw_input: None,
                     });
                 }
                 entries.extend(tool_entries);
@@ -188,6 +198,7 @@ impl JsonlParser {
                                         tool_name: tool_name.map(String::from),
                                         timestamp: timestamp.clone(),
                                         image_data: None,
+                                        raw_input: None,
                                     });
                                 }
 
@@ -202,6 +213,7 @@ impl JsonlParser {
                                         tool_name: None,
                                         timestamp: timestamp.clone(),
                                         image_data: Some(images),
+                                        raw_input: None,
                                     });
                                 }
 
@@ -229,6 +241,7 @@ impl JsonlParser {
                         tool_name: None,
                         timestamp,
                         image_data: None,
+                        raw_input: None,
                     });
                 }
             }

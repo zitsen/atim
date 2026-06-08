@@ -197,6 +197,8 @@ pub struct ParsedEntry {
     pub tool_name: Option<String>,
     pub timestamp: Option<String>,
     pub image_data: Option<Vec<(String, Vec<u8>)>>, // (media_type, raw_bytes)
+    /// Raw JSON input for tool_use (e.g. AskUserQuestion questions payload).
+    pub raw_input: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -233,4 +235,6 @@ pub struct NewMessage {
     pub role: String,
     pub tool_name: Option<String>,
     pub image_data: Option<Vec<(String, Vec<u8>)>>,
+    /// Raw JSON input for tool_use (e.g. AskUserQuestion questions payload).
+    pub raw_input: Option<String>,
 }

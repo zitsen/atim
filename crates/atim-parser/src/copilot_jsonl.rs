@@ -121,6 +121,7 @@ impl CopilotJsonlParser {
                         tool_name: None,
                         timestamp,
                         image_data: None,
+                        raw_input: None,
                     });
                 }
             }
@@ -141,6 +142,7 @@ impl CopilotJsonlParser {
                         tool_name: None,
                         timestamp: timestamp.clone(),
                         image_data: None,
+                        raw_input: None,
                     });
                 }
 
@@ -166,6 +168,7 @@ impl CopilotJsonlParser {
                             tool_name: Some(tool_name.to_string()),
                             timestamp: timestamp.clone(),
                             image_data: None,
+                            raw_input: None,
                         });
                     }
                 }
@@ -192,6 +195,7 @@ impl CopilotJsonlParser {
                     tool_name: tool_name.map(String::from),
                     timestamp,
                     image_data: None,
+                    raw_input: None,
                 });
             }
             // Skip all other event types (session.start, system.message,
