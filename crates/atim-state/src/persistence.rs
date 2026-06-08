@@ -66,6 +66,15 @@ CREATE TABLE IF NOT EXISTS feishu_id_map (
     remote_id TEXT NOT NULL,
     PRIMARY KEY (id_type, local_id)
 );
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp  TEXT NOT NULL,
+    operation  TEXT NOT NULL,
+    table_name TEXT NOT NULL,
+    record_key TEXT NOT NULL,
+    summary    TEXT NOT NULL
+);
 ";
 
 // ── Store ──
@@ -702,6 +711,21 @@ impl Store {
         }
     }
 
+    // ── Audit log ──
+
+    /// Write an audit log entry for a critical state change.
+    /// Silently ignores errors (audit is best-effort, must not block operations).
+    fn audit(&self, operation: &str, table_name: &str, record_key: &str, summary: &str) {
+        // Use unwrap_or_default on lock — if poisoned, skip audit silently.
+        if let Ok(db) = self.db.try_lock() {
+            let _ = db.execute(
+                "INSERT INTO audit_log (timestamp, operation, table_name, record_key, summary)
+                 VALUES (datetime('now'), ?1, ?2, ?3, ?4)",
+                params![operation, table_name, record_key, summary],
+            );
+        }
+    }
+
     // ── V2 helpers: incremental mutations ──
 
     /// Upsert a session into the sessions table.
@@ -715,6 +739,13 @@ impl Store {
             params![&session.session_id, &session.cwd, &session.agent_type],
         )
         .map_err(|e| Error::State(format!("upsert_session: {e}")))?;
+        drop(db);
+        self.audit(
+            "upsert",
+            "sessions",
+            &session.session_id,
+            &format!("cwd={} agent={}", session.cwd, session.agent_type),
+        );
         Ok(())
     }
 
@@ -736,6 +767,16 @@ impl Store {
             ],
         )
         .map_err(|e| Error::State(format!("upsert_window_binding: {e}")))?;
+        drop(db);
+        self.audit(
+            "upsert",
+            "window_bindings",
+            &wb.window_id,
+            &format!(
+                "session={} cwd={} name={}",
+                wb.session_id, wb.cwd, wb.window_name
+            ),
+        );
         Ok(())
     }
 
@@ -790,6 +831,13 @@ impl Store {
             Ok(()) => {
                 db.execute_batch("COMMIT")
                     .map_err(|e| Error::State(format!("commit: {e}")))?;
+                drop(db);
+                self.audit(
+                    "upsert",
+                    "chat_bindings",
+                    &format!("{}:{}:{}", cb.user_id, cb.thread_id, cb.chat_id),
+                    &format!("display={} session={}", cb.display_name, cb.session_id),
+                );
                 Ok(())
             }
             Err(e) => {
@@ -807,17 +855,29 @@ impl Store {
             params![window_id],
         )
         .map_err(|e| Error::State(format!("remove_window_binding: {e}")))?;
+        drop(db);
+        self.audit("delete", "window_bindings", window_id, "removed");
         Ok(())
     }
 
     /// Clear a session_id from all window bindings (session stolen by another window).
     pub async fn clear_session_from_windows(&self, session_id: &str) -> Result<()> {
         let db = self.db.lock().await;
-        db.execute(
-            "UPDATE window_bindings SET session_id = '' WHERE session_id = ?1",
-            params![session_id],
-        )
-        .map_err(|e| Error::State(format!("clear_session_from_windows: {e}")))?;
+        let affected = db
+            .execute(
+                "UPDATE window_bindings SET session_id = '' WHERE session_id = ?1",
+                params![session_id],
+            )
+            .map_err(|e| Error::State(format!("clear_session_from_windows: {e}")))?;
+        drop(db);
+        if affected > 0 {
+            self.audit(
+                "clear",
+                "window_bindings",
+                session_id,
+                &format!("cleared session_id from {affected} window(s)"),
+            );
+        }
         Ok(())
     }
 
