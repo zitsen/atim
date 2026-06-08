@@ -438,18 +438,14 @@ impl Server {
                                 // AskUserQuestion: send interactive card with option buttons
                                 if msg.tool_name.as_deref() == Some("AskUserQuestion")
                                     && let Some(ref raw) = msg.raw_input
+                                    && let Ok(mid) =
+                                        self.send_ask_user_card(&target, raw, &msg.text).await
                                 {
-                                    if let Ok(mid) = self
-                                        .send_ask_user_card(&target, raw, &msg.text)
-                                        .await
-                                        .and_then(|mid| Ok(mid))
-                                    {
-                                        if let Some(tuid) = &msg.tool_use_id {
-                                            self.tool_use_msg_ids.lock().await.insert(
-                                                (chat_id, thread_id_val, tuid.clone()),
-                                                mid,
-                                            );
-                                        }
+                                    if let Some(tuid) = &msg.tool_use_id {
+                                        self.tool_use_msg_ids.lock().await.insert(
+                                            (chat_id, thread_id_val, tuid.clone()),
+                                            mid,
+                                        );
                                     }
                                     continue;
                                 }
@@ -5253,21 +5249,20 @@ fn extract_options(content: &str) -> Vec<String> {
     for line in content.lines() {
         let trimmed = line.trim();
         // Match numbered options: "❯ 1. Foo", "  2. Bar", "☐ Foo"
-        if let Some(rest) = trimmed.strip_prefix('❯').map(|s| s.trim()) {
-            if let Some(opt) = rest.strip_prefix(|c: char| c.is_ascii_digit()) {
-                if let Some(opt) = opt.strip_prefix('.').or_else(|| opt.strip_prefix(')')) {
-                    options.push(opt.trim().to_string());
-                    continue;
-                }
-            }
+        if let Some(rest) = trimmed.strip_prefix('❯').map(|s| s.trim())
+            && let Some(opt) = rest.strip_prefix(|c: char| c.is_ascii_digit())
+            && let Some(opt) = opt.strip_prefix('.').or_else(|| opt.strip_prefix(')'))
+        {
+            options.push(opt.trim().to_string());
+            continue;
         }
-        if let Some(rest) = trimmed.strip_prefix(|c: char| c.is_ascii_digit()) {
-            if let Some(opt) = rest.strip_prefix('.').or_else(|| rest.strip_prefix(')')) {
-                let opt = opt.trim();
-                if !opt.is_empty() && !opt.starts_with(|c: char| c == '·') {
-                    options.push(opt.to_string());
-                    continue;
-                }
+        if let Some(rest) = trimmed.strip_prefix(|c: char| c.is_ascii_digit())
+            && let Some(opt) = rest.strip_prefix('.').or_else(|| rest.strip_prefix(')'))
+        {
+            let opt = opt.trim();
+            if !opt.is_empty() && !opt.starts_with('·') {
+                options.push(opt.to_string());
+                continue;
             }
         }
         // Match checkbox options: "☐ Foo", "✔ Foo"
