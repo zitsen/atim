@@ -3979,7 +3979,9 @@ impl Server {
                 for b in rt.chat_bindings.iter().filter(|b| b.user_id == user_id) {
                     tracing::warn!(
                         "[recover]   candidate: thread={} chat={} display={}",
-                        b.thread_id, b.chat_id, b.display_name
+                        b.thread_id,
+                        b.chat_id,
+                        b.display_name
                     );
                 }
                 let _ = self
@@ -3992,7 +3994,10 @@ impl Server {
 
         tracing::info!(
             "[recover] Found binding: display={} thread={} chat={} session={}",
-            cb.display_name, cb.thread_id, cb.chat_id, cb.session_id
+            cb.display_name,
+            cb.thread_id,
+            cb.chat_id,
+            cb.session_id
         );
 
         // Re-resolve thread_id from the found binding (card actions use
@@ -4037,7 +4042,7 @@ impl Server {
 
         // Normalize ~ to actual home path
         if cwd == "~" || cwd.is_empty() {
-            cwd = std::env::var("HOME").unwrap_or_else(|_| "/home/huolinhe".into());
+            cwd = std::env::var("HOME").unwrap_or_default();
             if !session_id.is_empty() {
                 let _ = self
                     .im_adapter
@@ -4592,10 +4597,84 @@ impl Server {
                     .send_message(target, &lines.join("\n"))
                     .await;
             }
+            cmd if cmd.starts_with("ls") => {
+                let rt = self.state_mgr.load_runtime().await?;
+                let mut lines = vec!["| Name | Window | CWD | Agent | Session ID |".to_string()];
+                lines.push("|------|--------|-----|-------|------------|".to_string());
+                for (wb_id, wb) in &rt.window_bindings {
+                    let name = if wb.window_name.is_empty() {
+                        "-"
+                    } else {
+                        &wb.window_name
+                    };
+                    let agent = if wb.agent_type.is_empty() {
+                        "-"
+                    } else {
+                        &wb.agent_type
+                    };
+                    let sid = if wb.session_id.is_empty() {
+                        "-"
+                    } else {
+                        &wb.session_id
+                    };
+                    let sid_short = if sid.len() > 8 { &sid[..8] } else { sid };
+                    lines.push(format!(
+                        "| {} | {} | {} | {} | {} |",
+                        name, wb_id, wb.cwd, agent, sid_short
+                    ));
+                }
+                if rt.window_bindings.is_empty() {
+                    lines.push("_No sessions_".to_string());
+                }
+                let _ = self
+                    .im_adapter
+                    .send_message(target, &lines.join("\n"))
+                    .await;
+            }
+            cmd if cmd.starts_with("chdir ") => {
+                let args = cmd.strip_prefix("chdir").unwrap().trim();
+                let mut parts = args.splitn(2, ' ');
+                let name = parts.next().unwrap_or("").trim();
+                let dir = parts.next().unwrap_or("").trim();
+                if name.is_empty() || dir.is_empty() {
+                    let _ = self
+                        .im_adapter
+                        .send_message(target, "Usage: `/atim chdir <name> <dir>`")
+                        .await;
+                } else {
+                    let mut rt = self.state_mgr.load_runtime().await?;
+                    let found = rt
+                        .window_bindings
+                        .values_mut()
+                        .find(|wb| wb.window_name == name);
+                    match found {
+                        Some(wb) => {
+                            let old = wb.cwd.clone();
+                            wb.cwd = dir.to_string();
+                            self.state_mgr.save_runtime(&rt).await?;
+                            let _ = self
+                                .im_adapter
+                                .send_message(
+                                    target,
+                                    &format!("Updated `{}` cwd: `{}` → `{}`", name, old, dir),
+                                )
+                                .await;
+                        }
+                        None => {
+                            let _ = self
+                                .im_adapter
+                                .send_message(target, &format!("No session with name `{}`", name))
+                                .await;
+                        }
+                    }
+                }
+            }
             "help" | "h" | "-h" | "--help" => {
                 let help = concat!(
                     "**Available commands**\n\n",
                     "`/atim status` — System CPU/mem/disk status\n",
+                    "`/atim ls`     — List sessions (name, window, cwd, agent, session-id)\n",
+                    "`/atim chdir <name> <dir>` — Update session cwd\n",
                     "`/atim help`   — This help\n",
                     "`/ss` / `/screenshot` — Capture terminal screenshot\n",
                     "`/usage` — Show Claude Code API usage\n",

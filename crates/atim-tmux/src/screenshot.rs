@@ -14,9 +14,6 @@ const LATIN_FONT_PATHS: &[&str] = &[
     "/usr/share/fonts/TTF/MesloLGMNerdFontMono-Regular.ttf",
     "/usr/share/fonts/TTF/MesloLGLNerdFontMono-Regular.ttf",
     "/usr/share/fonts/TTF/MesloLGSNerdFontMono-Regular.ttf",
-    // User-installed Nerd Fonts (home directory)
-    "/home/huolinhe/.local/share/fonts/MesloLGMNerdFontMono-Regular.ttf",
-    "/home/huolinhe/.local/share/fonts/MesloLGLNerdFontMono-Regular.ttf",
     // DejaVu fallback
     "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
