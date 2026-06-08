@@ -4038,28 +4038,18 @@ impl Server {
         // Normalize ~ to actual home path
         if cwd == "~" || cwd.is_empty() {
             cwd = std::env::var("HOME").unwrap_or_else(|_| "/home/huolinhe".into());
-        }
-
-        // Try to get real cwd from ~/.claude.json (maps cwd→lastSessionId).
-        // More reliable than window_binding which may have a fallback cwd.
-        if !session_id.is_empty() {
-            if let Some(claude_dir) = atim_core::agent::claude::claude_projects_dir() {
-                let json_path = claude_dir.join("../../.claude.json");
-                if let Ok(json_path) = std::fs::canonicalize(&json_path)
-                    && let Ok(content) = std::fs::read_to_string(&json_path)
-                    && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content)
-                    && let Some(projects) = parsed["projects"].as_object()
-                {
-                    for (cwd_str, proj) in projects {
-                        if proj.get("lastSessionId").and_then(|v| v.as_str()) == Some(&session_id)
-                            && !cwd_str.is_empty()
-                        {
-                            tracing::info!("[recover] Resolved cwd from claude.json: {cwd_str}");
-                            cwd = cwd_str.clone();
-                            break;
-                        }
-                    }
-                }
+            if !session_id.is_empty() {
+                let _ = self
+                    .im_adapter
+                    .edit_message(
+                        target,
+                        msg_id,
+                        &format!(
+                            "⚠️ Could not resolve project directory for session.\n\
+                             Starting in HOME ({cwd}) — agent context may be wrong."
+                        ),
+                    )
+                    .await;
             }
         }
 
