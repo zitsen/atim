@@ -4601,6 +4601,7 @@ impl Server {
                 let rt = self.state_mgr.load_runtime().await?;
                 let mut lines = vec!["| Name | Window | CWD | Agent | Session ID |".to_string()];
                 lines.push("|------|--------|-----|-------|------------|".to_string());
+                // Sessions with a tmux window
                 for (wb_id, wb) in &rt.window_bindings {
                     let name = if wb.window_name.is_empty() {
                         "-"
@@ -4623,7 +4624,39 @@ impl Server {
                         name, wb_id, wb.cwd, agent, sid_short
                     ));
                 }
-                if rt.window_bindings.is_empty() {
+                // Sessions with a chat binding but no window (dead/lost)
+                let window_sids: std::collections::HashSet<&str> = rt
+                    .window_bindings
+                    .values()
+                    .map(|wb| wb.session_id.as_str())
+                    .collect();
+                for cb in &rt.chat_bindings {
+                    if cb.session_id.is_empty() || window_sids.contains(cb.session_id.as_str()) {
+                        continue;
+                    }
+                    let name = if cb.display_name.is_empty() {
+                        "-"
+                    } else {
+                        &cb.display_name
+                    };
+                    let sid = &cb.session_id;
+                    let sid_short = if sid.len() > 8 {
+                        &sid[..8]
+                    } else {
+                        sid.as_str()
+                    };
+                    let cwd = rt.sessions.get(sid).map(|s| s.cwd.as_str()).unwrap_or("-");
+                    let agent = rt
+                        .sessions
+                        .get(sid)
+                        .map(|s| s.agent_type.as_str())
+                        .unwrap_or("-");
+                    lines.push(format!(
+                        "| {} | - | {} | {} | {} |",
+                        name, cwd, agent, sid_short
+                    ));
+                }
+                if lines.len() <= 2 {
                     lines.push("_No sessions_".to_string());
                 }
                 let _ = self
