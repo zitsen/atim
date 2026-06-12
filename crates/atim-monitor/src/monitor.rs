@@ -327,6 +327,18 @@ impl SessionMonitor {
                 max_time = *time;
             }
 
+            // Filter out mimo internal/system messages
+            let body_trimmed = body.trim();
+            if body_trimmed.starts_with("<system-reminder>")
+                || body_trimmed.starts_with("Checkpoint updated")
+                || body_trimmed.starts_with("<command-message>")
+                || body_trimmed.starts_with("<command-name>")
+                || body_trimmed.starts_with("<local-command")
+                || body_trimmed.is_empty()
+            {
+                continue;
+            }
+
             let role = if kind.starts_with("user") {
                 "user".to_string()
             } else {
