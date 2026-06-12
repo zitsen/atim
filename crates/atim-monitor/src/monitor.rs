@@ -286,17 +286,34 @@ impl SessionMonitor {
                 )
                 .map_err(|e| atim_core::error::Error::State(format!("mimo open: {e}")))?;
 
+                // Only fetch messages from the most recently active session to
+                // avoid sending greetings from every historical session.
+                let active_session: Option<String> = db
+                    .query_row(
+                        "SELECT id FROM session ORDER BY time_updated DESC LIMIT 1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .ok();
+
+                let active_session = match active_session {
+                    Some(s) => s,
+                    None => return Ok(vec![]),
+                };
+
                 let mut stmt = db
                     .prepare(
                         "SELECT message_id, session_id, kind, body, time_created
                      FROM history_fts
-                     WHERE time_created > ?1 AND kind IN ('user_text', 'assistant_text')
+                     WHERE time_created > ?1
+                       AND session_id = ?2
+                       AND kind IN ('user_text', 'assistant_text')
                      ORDER BY time_created ASC",
                     )
                     .map_err(|e| atim_core::error::Error::State(format!("mimo prepare: {e}")))?;
 
                 let rows: Vec<(String, String, String, String, i64)> = stmt
-                    .query_map(rusqlite::params![last_time], |row| {
+                    .query_map(rusqlite::params![last_time, active_session], |row| {
                         Ok((
                             row.get(0)?,
                             row.get(1)?,
