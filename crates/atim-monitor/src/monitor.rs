@@ -7,6 +7,13 @@ use atim_core::error::Result;
 use atim_core::message::{NewMessage, SessionId};
 use tokio::sync::{Mutex, mpsc};
 
+/// Path to the mimo SQLite database (if it exists).
+fn mimo_db_path() -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    let p = PathBuf::from(home).join(".local/share/mimocode/mimocode.db");
+    if p.exists() { Some(p) } else { None }
+}
+
 /// Polling interval for JSONL file changes.
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -122,6 +129,11 @@ impl SessionMonitor {
             // 2. Poll all known session JSONL files
             if let Err(e) = self.poll_sessions(&tx).await {
                 tracing::warn!("Session poll failed: {e}");
+            }
+
+            // 2b. Poll mimo SQLite DB for new messages
+            if let Err(e) = self.poll_mimo_db(&tx).await {
+                tracing::debug!("Mimo DB poll failed: {e}");
             }
 
             // 3. Periodically persist byte offsets
@@ -247,6 +259,103 @@ impl SessionMonitor {
 
         // CRITICAL: actually track known sessions so we don't re-detect them next cycle
         self.last_known_sessions = current_sessions;
+
+        Ok(())
+    }
+
+    /// Poll the mimo SQLite DB for new messages from mimo agent sessions.
+    async fn poll_mimo_db(&mut self, tx: &mpsc::UnboundedSender<MonitorEvent>) -> Result<()> {
+        let db_path = match mimo_db_path() {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+
+        let mimo_offset_key = "__mimo_last_time";
+
+        let last_time: i64 = {
+            let offsets = self.byte_offsets.lock().await;
+            offsets.get(mimo_offset_key).copied().unwrap_or(0) as i64
+        };
+
+        // rusqlite Connection is !Send, so run the entire query in a blocking task.
+        let rows = tokio::task::spawn_blocking(
+            move || -> Result<Vec<(String, String, String, String, i64)>> {
+                let db = rusqlite::Connection::open_with_flags(
+                    &db_path,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )
+                .map_err(|e| atim_core::error::Error::State(format!("mimo open: {e}")))?;
+
+                let mut stmt = db
+                    .prepare(
+                        "SELECT message_id, session_id, kind, body, time_created
+                     FROM history_fts
+                     WHERE time_created > ?1 AND kind IN ('user_text', 'assistant_text')
+                     ORDER BY time_created ASC",
+                    )
+                    .map_err(|e| atim_core::error::Error::State(format!("mimo prepare: {e}")))?;
+
+                let rows: Vec<(String, String, String, String, i64)> = stmt
+                    .query_map(rusqlite::params![last_time], |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    })
+                    .map_err(|e| atim_core::error::Error::State(format!("mimo query: {e}")))?
+                    .filter_map(|r| r.ok())
+                    .collect();
+
+                Ok(rows)
+            },
+        )
+        .await
+        .map_err(|e| atim_core::error::Error::State(format!("mimo task: {e}")))??;
+
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        let mut max_time: i64 = last_time;
+        let mut messages = Vec::new();
+
+        for (msg_id, session_id, kind, body, time) in &rows {
+            if *time > max_time {
+                max_time = *time;
+            }
+
+            let role = if kind.starts_with("user") {
+                "user".to_string()
+            } else {
+                "assistant".to_string()
+            };
+
+            messages.push(NewMessage {
+                session_id: SessionId(session_id.clone()),
+                text: body.clone(),
+                is_complete: true,
+                content_type: atim_core::message::ContentType::Text,
+                tool_use_id: Some(msg_id.clone()),
+                role,
+                tool_name: None,
+                image_data: None,
+                raw_input: None,
+            });
+        }
+
+        // Advance offset
+        {
+            let mut offsets = self.byte_offsets.lock().await;
+            offsets.insert(mimo_offset_key.to_string(), max_time as u64);
+        }
+
+        if !messages.is_empty() {
+            tracing::info!("[monitor] Mimo DB: {} new messages", messages.len());
+            let _ = tx.send(MonitorEvent::NewMessages(messages));
+        }
 
         Ok(())
     }
