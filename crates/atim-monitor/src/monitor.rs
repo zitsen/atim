@@ -277,6 +277,20 @@ impl SessionMonitor {
             offsets.get(mimo_offset_key).copied().unwrap_or(0) as i64
         };
 
+        // Collect known session IDs before entering spawn_blocking
+        let known_sessions: Vec<String> = {
+            let offsets = self.byte_offsets.lock().await;
+            offsets
+                .keys()
+                .filter(|k| !k.starts_with("__"))
+                .cloned()
+                .collect()
+        };
+
+        if known_sessions.is_empty() {
+            return Ok(());
+        }
+
         // rusqlite Connection is !Send, so run the entire query in a blocking task.
         let rows = tokio::task::spawn_blocking(
             move || -> Result<Vec<(String, String, String, String, i64)>> {
@@ -286,34 +300,37 @@ impl SessionMonitor {
                 )
                 .map_err(|e| atim_core::error::Error::State(format!("mimo open: {e}")))?;
 
-                // Only fetch messages from the most recently active session to
-                // avoid sending greetings from every historical session.
-                let active_session: Option<String> = db
-                    .query_row(
-                        "SELECT id FROM session ORDER BY time_updated DESC LIMIT 1",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .ok();
+                // Build a SQL IN clause for known sessions
+                let placeholders: String = known_sessions
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| format!("?{}", i + 2))
+                    .collect::<Vec<_>>()
+                    .join(",");
 
-                let active_session = match active_session {
-                    Some(s) => s,
-                    None => return Ok(vec![]),
-                };
-
-                let mut stmt = db
-                    .prepare(
-                        "SELECT message_id, session_id, kind, body, time_created
+                let sql = format!(
+                    "SELECT message_id, session_id, kind, body, time_created
                      FROM history_fts
                      WHERE time_created > ?1
-                       AND session_id = ?2
+                       AND session_id IN ({placeholders})
                        AND kind IN ('user_text', 'assistant_text')
-                     ORDER BY time_created ASC",
-                    )
+                     ORDER BY time_created ASC"
+                );
+
+                let mut stmt = db
+                    .prepare(&sql)
                     .map_err(|e| atim_core::error::Error::State(format!("mimo prepare: {e}")))?;
 
+                // Build params: last_time + all known session IDs
+                let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(last_time)];
+                for sid in &known_sessions {
+                    params.push(Box::new(sid.clone()));
+                }
+                let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                    params.iter().map(|p| p.as_ref()).collect();
+
                 let rows: Vec<(String, String, String, String, i64)> = stmt
-                    .query_map(rusqlite::params![last_time, active_session], |row| {
+                    .query_map(param_refs.as_slice(), |row| {
                         Ok((
                             row.get(0)?,
                             row.get(1)?,
