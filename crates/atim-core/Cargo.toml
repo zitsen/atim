@@ -15,5 +15,6 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
+rusqlite = { workspace = true }
 regex = { workspace = true }
 toml = { workspace = true }
