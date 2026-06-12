@@ -135,6 +135,7 @@ impl AgentRegistry {
         reg.register(AgentHandle::new(super::claude::ClaudeAgent));
         reg.register(AgentHandle::new(super::copilot::CopilotAgent));
         reg.register(AgentHandle::new(super::codex::CodexAgent));
+        reg.register(AgentHandle::new(super::mimo::MimoAgent));
 
         // Determine default from ATIM_AGENT_COMMAND (or fallback env vars)
         let cmd = std::env::var("ATIM_AGENT_COMMAND")
@@ -146,6 +147,8 @@ impl AgentRegistry {
             "copilot"
         } else if cmd.contains("codex") {
             "codex"
+        } else if cmd.contains("mimo") {
+            "mimo"
         } else {
             "claude"
         };

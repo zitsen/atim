@@ -150,6 +150,7 @@ pub enum AgentKind {
     ClaudeCode,
     CopilotCli,
     CodexCli,
+    MimoCode,
     Unknown,
 }
 
@@ -159,6 +160,7 @@ impl AgentKind {
             AgentKind::ClaudeCode => "claude",
             AgentKind::CopilotCli => "copilot",
             AgentKind::CodexCli => "codex",
+            AgentKind::MimoCode => "mimo",
             AgentKind::Unknown => "unknown",
         }
     }

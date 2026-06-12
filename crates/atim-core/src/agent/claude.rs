@@ -224,7 +224,7 @@ impl Agent for ClaudeAgent {
 
 /// Discover a Claude Code session by project-slug matching against
 /// `~/.claude/projects/<slug>/`.
-fn discover_session_by_slug(
+pub(crate) fn discover_session_by_slug(
     cwd: &str,
     known_ids: &std::collections::HashSet<String>,
 ) -> Result<Option<String>> {
@@ -273,7 +273,7 @@ fn discover_session_by_slug(
 }
 
 /// Trace a tmux pane PID to find an open Claude Code JSONL file via lsof.
-fn discover_by_pid_lsof(window_id: &str) -> Result<Option<String>> {
+pub(crate) fn discover_by_pid_lsof(window_id: &str) -> Result<Option<String>> {
     use std::process::Command;
 
     let output = Command::new("tmux")
@@ -332,7 +332,7 @@ const FALLBACK_MAX_SESSIONS: usize = 25;
 /// If no sessions match the slug, falls back to scanning all projects — limited
 /// to the most recent `FALLBACK_MAX_SESSIONS` — so the user never gets an empty
 /// picker when the slug heuristic misses (bind mounts, canonicalization, etc.).
-fn scan_claude_session_files(cwd: Option<&Path>) -> Result<Vec<DetectedSession>> {
+pub(crate) fn scan_claude_session_files(cwd: Option<&Path>) -> Result<Vec<DetectedSession>> {
     let claude_dir = claude_projects_dir()
         .ok_or_else(|| crate::error::Error::NotFound("no claude projects dir".into()))?;
     let projects_dir = claude_dir.join("projects");
