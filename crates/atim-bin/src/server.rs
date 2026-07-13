@@ -1053,7 +1053,11 @@ impl Server {
                         Some(binding.session_id.clone())
                     }
                 } else {
-                    Some(wb.unwrap().session_id.clone())
+                    Some(
+                        wb.expect("wb is Some in this branch (checked by outer if)")
+                            .session_id
+                            .clone(),
+                    )
                 };
 
                 let wid_str = wb.map(|w| &w.window_id).map(|s| s.as_str()).unwrap_or("");
@@ -2410,7 +2414,8 @@ impl Server {
                 (text, buttons)
             }
             BrowserMode::SessionPick { sessions: _ } => {
-                let page = browser::get_session_picker_page(&state).unwrap();
+                let page = browser::get_session_picker_page(&state)
+                    .expect("state.mode is SessionPick (checked by match arm)");
                 let mut buttons: Vec<Vec<Button>> = Vec::new();
 
                 for (i, session) in page.sessions.iter().enumerate() {
@@ -2467,7 +2472,8 @@ impl Server {
                 (text, buttons)
             }
             BrowserMode::WindowPick { windows: _ } => {
-                let page = browser::get_window_picker_page(&state).unwrap();
+                let page = browser::get_window_picker_page(&state)
+                    .expect("state.mode is WindowPick (checked by match arm)");
                 let mut buttons: Vec<Vec<Button>> = Vec::new();
 
                 for (i, win) in page.windows.iter().enumerate() {
@@ -4112,7 +4118,10 @@ impl Server {
                 if t.is_empty() {
                     return false;
                 }
-                let c = t.chars().next().unwrap();
+                let c = t
+                    .chars()
+                    .next()
+                    .expect("t is non-empty (checked by is_empty filter above)");
                 // Skip box-drawing, block, and shade characters
                 if matches!(
                     c,
@@ -4923,7 +4932,10 @@ impl Server {
                     .await;
             }
             cmd if cmd.starts_with("chdir ") => {
-                let args = cmd.strip_prefix("chdir").unwrap().trim();
+                let args = cmd
+                    .strip_prefix("chdir")
+                    .expect("guarded by starts_with above")
+                    .trim();
                 let mut parts = args.splitn(2, ' ');
                 let name = parts.next().unwrap_or("").trim();
                 let dir = parts.next().unwrap_or("").trim();
@@ -4961,7 +4973,10 @@ impl Server {
                 }
             }
             cmd if cmd.starts_with("rm ") => {
-                let name = cmd.strip_prefix("rm").unwrap().trim();
+                let name = cmd
+                    .strip_prefix("rm")
+                    .expect("guarded by starts_with above")
+                    .trim();
                 if name.is_empty() {
                     let _ = self
                         .im_adapter
