@@ -747,7 +747,30 @@ impl Server {
                 let _ = self.im_adapter.send_chat_action(&target).await;
 
                 if matches!(trimmed, "/compact" | "/clear") {
-                    // Silent commands — just forward and confirm
+                    // Clear/reset resets the conversation *and* creates a new session.
+                    // Stale bindings must be cleared so SessionMapChanged can re-assign.
+                    if trimmed == "/clear"
+                        && let (Some((_binding, _)), Some(wb)) = (find_cb(), wb)
+                    {
+                        let wid_str = &wb.window_id;
+                        let old_sid = wb.session_id.clone();
+                        let mut rt = self.state_mgr.load_runtime().await?;
+                        if let Some(wb2) = rt.window_bindings.get_mut(wid_str) {
+                            wb2.session_id.clear();
+                        }
+                        for cb in rt.chat_bindings.iter_mut() {
+                            if cb.session_id == old_sid {
+                                cb.session_id.clear();
+                            }
+                        }
+                        self.state_mgr.save_runtime(&rt).await?;
+                        if let Ok(mut map) = self.state_mgr.load_session_map().await {
+                            map.remove(wid_str);
+                            let _ = self.state_mgr.save_session_map(&map).await;
+                        }
+                        self.state_mgr.remove_offset(&old_sid).await.ok();
+                        self.byte_offsets.lock().await.remove(&old_sid);
+                    }
                     self.tmux_mgr.send_line(&wid, trimmed).await?;
                     let _ = self
                         .im_adapter
