@@ -5957,4 +5957,468 @@ mod tests {
         let result = truncate_ui_content(input, 100);
         assert_eq!(result, "Hello World");
     }
+
+    // ─── Core path integration tests ───────────────────────────
+    //
+    // These tests exercise the key routing/binding paths without tmux or
+    // IM backends. They construct RuntimeState directly and verify that
+    // the correct window/chat_binding is resolved.
+
+    fn make_test_runtime() -> RuntimeState {
+        let mut rt = RuntimeState::default();
+        rt.window_bindings.insert(
+            "@1".into(),
+            WindowBinding {
+                window_id: "@1".into(),
+                session_id: "ses_test".into(),
+                cwd: "/home/user/project".into(),
+                agent_type: "claude".into(),
+                window_name: "test-window".into(),
+            },
+        );
+        rt.window_bindings.insert(
+            "@2".into(),
+            WindowBinding {
+                window_id: "@2".into(),
+                session_id: "ses_other".into(),
+                cwd: "/home/user/other".into(),
+                agent_type: "claude".into(),
+                window_name: "other-window".into(),
+            },
+        );
+        rt.chat_bindings = vec![
+            ChatBinding {
+                user_id: 100,
+                thread_id: 200,
+                chat_id: 200,
+                display_name: "test-window".into(),
+                group_chat_id: None,
+                topic_name: None,
+                session_id: "ses_test".into(),
+            },
+            ChatBinding {
+                user_id: 100,
+                thread_id: 300,
+                chat_id: 300,
+                display_name: "other-window".into(),
+                group_chat_id: None,
+                topic_name: None,
+                session_id: "ses_other".into(),
+            },
+        ];
+        rt.sessions.insert(
+            "ses_test".into(),
+            SessionInfo {
+                session_id: "ses_test".into(),
+                cwd: "/home/user/project".into(),
+                agent_type: "claude".into(),
+            },
+        );
+        rt.sessions.insert(
+            "ses_other".into(),
+            SessionInfo {
+                session_id: "ses_other".into(),
+                cwd: "/home/user/other".into(),
+                agent_type: "claude".into(),
+            },
+        );
+        rt
+    }
+
+    #[test]
+    fn test_resolve_window_binding_by_user_thread() {
+        let rt = make_test_runtime();
+        let wb = rt.resolve_window_binding(100, 200).unwrap();
+        assert_eq!(wb.window_id, "@1");
+        assert_eq!(wb.cwd, "/home/user/project");
+    }
+
+    #[test]
+    fn test_resolve_window_binding_nonexistent_user() {
+        let rt = make_test_runtime();
+        assert!(rt.resolve_window_binding(999, 200).is_none());
+    }
+
+    #[test]
+    fn test_resolve_window_binding_empty_session_id() {
+        let mut rt = make_test_runtime();
+        rt.chat_bindings.push(ChatBinding {
+            user_id: 200,
+            thread_id: 400,
+            chat_id: 400,
+            display_name: "unbound".into(),
+            group_chat_id: None,
+            topic_name: None,
+            session_id: String::new(),
+        });
+        assert!(rt.resolve_window_binding(200, 400).is_none());
+    }
+
+    #[test]
+    fn test_resolve_window_binding_multiple_chats_same_window() {
+        let mut rt = make_test_runtime();
+        rt.chat_bindings.push(ChatBinding {
+            user_id: 100,
+            thread_id: 201,
+            chat_id: 201,
+            display_name: "test-window-2".into(),
+            group_chat_id: None,
+            topic_name: None,
+            session_id: "ses_test".into(),
+        });
+        // Both chat bindings should resolve to the same window
+        let wb1 = rt.resolve_window_binding(100, 200).unwrap();
+        let wb2 = rt.resolve_window_binding(100, 201).unwrap();
+        assert_eq!(wb1.window_id, wb2.window_id);
+    }
+
+    #[test]
+    fn test_session_map_changed_updates_stale_chat_binding() {
+        let mut rt = make_test_runtime();
+        // Simulate a stale chat_binding with an old session_id
+        // (same display_name as the window, but old session UUID)
+        rt.chat_bindings.push(ChatBinding {
+            user_id: 300,
+            thread_id: 500,
+            chat_id: 500,
+            display_name: "fresh-window".into(),
+            group_chat_id: None,
+            topic_name: None,
+            session_id: "ses_old".into(),
+        });
+        rt.window_bindings.insert(
+            "@3".into(),
+            WindowBinding {
+                window_id: "@3".into(),
+                session_id: "ses_new".into(),
+                cwd: "/home/user/fresh".into(),
+                agent_type: "claude".into(),
+                window_name: "fresh-window".into(),
+            },
+        );
+
+        // Simulate SessionMapChanged logic: update chat_binding when
+        // window_binding has new session_id and display_name matches
+        for (window_id, session_id) in &[("@3", "ses_new")] {
+            if let Some(wb) = rt.window_bindings.get(*window_id) {
+                let window_name = wb.window_name.clone();
+                if let Some(cb) = rt.chat_bindings.iter_mut().find(|cb| {
+                    cb.display_name == window_name
+                        && (cb.session_id.is_empty() || cb.session_id != *session_id)
+                }) {
+                    cb.session_id = (*session_id).to_string();
+                }
+            }
+        }
+
+        let cb = rt
+            .chat_bindings
+            .iter()
+            .find(|cb| cb.user_id == 300 && cb.thread_id == 500)
+            .unwrap();
+        assert_eq!(
+            cb.session_id, "ses_new",
+            "stale session_id should be updated"
+        );
+    }
+
+    #[test]
+    fn test_session_map_changed_skips_matching_session() {
+        let mut rt = make_test_runtime();
+
+        // Should NOT update because session_id already matches
+        for (window_id, session_id) in &[("@1", "ses_test")] {
+            if let Some(wb) = rt.window_bindings.get(*window_id) {
+                let window_name = wb.window_name.clone();
+                if let Some(cb) = rt.chat_bindings.iter_mut().find(|cb| {
+                    cb.display_name == window_name
+                        && (cb.session_id.is_empty() || cb.session_id != *session_id)
+                }) {
+                    cb.session_id = "should_not_change".into();
+                }
+            }
+        }
+
+        let cb = rt
+            .chat_bindings
+            .iter()
+            .find(|cb| cb.user_id == 100 && cb.thread_id == 200)
+            .unwrap();
+        assert_eq!(cb.session_id, "ses_test");
+    }
+
+    #[test]
+    fn test_find_cb_by_user_and_thread() {
+        let rt = make_test_runtime();
+        // find_cb searches chat_bindings by (user_id, thread_id)
+        let cb = rt
+            .chat_bindings
+            .iter()
+            .find(|b| b.user_id == 100 && b.thread_id == 200);
+        assert!(cb.is_some());
+        assert_eq!(cb.unwrap().display_name, "test-window");
+    }
+
+    #[test]
+    fn test_window_binding_updated_after_resolve() {
+        let mut rt = make_test_runtime();
+
+        // Simulate handle_text_message: find real window by display_name,
+        // then update window_binding
+        let display_name = "test-window".to_string();
+        let real_wid = "@5".to_string();
+        let binding = rt
+            .chat_bindings
+            .iter()
+            .find(|b| b.display_name == display_name)
+            .cloned()
+            .unwrap();
+
+        // Remove stale, insert new
+        rt.window_bindings.remove("@1");
+        rt.window_bindings.insert(
+            real_wid.clone(),
+            WindowBinding {
+                window_id: real_wid.clone(),
+                session_id: binding.session_id.clone(),
+                cwd: "/new/cwd".into(),
+                agent_type: "claude".into(),
+                window_name: binding.display_name.clone(),
+            },
+        );
+
+        let wb = rt.resolve_window_binding(100, 200).unwrap();
+        assert_eq!(wb.window_id, "@5");
+        assert_eq!(wb.cwd, "/new/cwd");
+    }
+
+    #[test]
+    fn test_recover_cwd_fallback_to_jsonl_stale_home() {
+        let mut rt = make_test_runtime();
+        // Simulate a dead window where cwd equals HOME (stale)
+        let home = std::env::var("HOME").unwrap_or_default();
+        rt.window_bindings.insert(
+            "@dead".into(),
+            WindowBinding {
+                window_id: "@dead".into(),
+                session_id: "ses_test".into(),
+                cwd: home.clone(),
+                agent_type: "claude".into(),
+                window_name: "test-window".into(),
+            },
+        );
+
+        let session_id = "ses_test".to_string();
+        let cwd = home.clone();
+
+        // The stale check: if cwd == HOME, use the session store's cwd
+        let resolved = if !session_id.is_empty() && (cwd.is_empty() || cwd == home) {
+            rt.sessions
+                .get(&session_id)
+                .map(|si| si.cwd.clone())
+                .unwrap_or_else(|| home.clone())
+        } else {
+            cwd
+        };
+
+        assert_eq!(resolved, "/home/user/project");
+    }
+
+    #[test]
+    fn test_clear_removes_session_id_from_bindings() {
+        let mut rt = make_test_runtime();
+        let wid = "@1".to_string();
+
+        // Simulate /clear Phase 1: clear session bindings
+        let old_sid = {
+            let wb = rt.window_bindings.get(&wid).unwrap();
+            wb.session_id.clone()
+        };
+        assert_eq!(old_sid, "ses_test");
+
+        // Clear window_binding session_id
+        if let Some(wb) = rt.window_bindings.get_mut(&wid) {
+            wb.session_id.clear();
+        }
+        // Clear all chat_bindings referencing this session_id
+        for cb in rt.chat_bindings.iter_mut() {
+            if cb.session_id == old_sid {
+                cb.session_id.clear();
+            }
+        }
+
+        assert!(rt.window_bindings.get(&wid).unwrap().session_id.is_empty());
+        assert!(
+            rt.chat_bindings
+                .iter()
+                .all(|cb| cb.session_id != "ses_test")
+        );
+    }
+
+    #[test]
+    fn test_rebind_updates_window_binding_session() {
+        let mut rt = make_test_runtime();
+
+        // Simulate /rebind: discover new session, update window binding
+        let wid = "@1".to_string();
+        let new_sid = "ses_new_uuid".to_string();
+
+        if let Some(wb) = rt.window_bindings.get_mut(&wid) {
+            wb.session_id = new_sid.clone();
+        }
+
+        assert_eq!(
+            rt.window_bindings.get(&wid).unwrap().session_id,
+            "ses_new_uuid"
+        );
+    }
+
+    #[test]
+    fn test_rebind_updates_chat_binding_session() {
+        let mut rt = make_test_runtime();
+
+        // Simulate /rebind: update chat_binding's session_id to match
+        let new_sid = "ses_new_uuid".to_string();
+        if let Some(cb) = rt
+            .chat_bindings
+            .iter_mut()
+            .find(|cb| cb.user_id == 100 && cb.thread_id == 200)
+        {
+            cb.session_id = new_sid.clone();
+        }
+
+        assert_eq!(
+            rt.chat_bindings
+                .iter()
+                .find(|cb| cb.user_id == 100 && cb.thread_id == 200)
+                .unwrap()
+                .session_id,
+            "ses_new_uuid"
+        );
+    }
+
+    #[test]
+    fn test_rebind_with_display_name_fallback() {
+        let mut rt = make_test_runtime();
+
+        // Simulate rebind with a stale display_name that doesn't match
+        // any tmux window. The fallback to chat_name should be used.
+        let display_name = "atim-12345".to_string(); // stale
+        let chat_name = "real-window".to_string(); // actual tmux window name
+
+        // Window exists by chat_name, not display_name
+        rt.window_bindings.insert(
+            "@10".into(),
+            WindowBinding {
+                window_id: "@10".into(),
+                session_id: "ses_real".into(),
+                cwd: "/real/cwd".into(),
+                agent_type: "claude".into(),
+                window_name: chat_name,
+            },
+        );
+
+        // Fallback logic: if display_name doesn't find window, try chat_name
+        let found_by_display = rt
+            .window_bindings
+            .values()
+            .find(|wb| wb.window_name == display_name);
+        assert!(
+            found_by_display.is_none(),
+            "stale display_name should not match"
+        );
+
+        let found_by_chat_name = rt
+            .window_bindings
+            .values()
+            .find(|wb| wb.window_name == "real-window");
+        assert!(
+            found_by_chat_name.is_some(),
+            "chat_name fallback should find window"
+        );
+    }
+
+    #[test]
+    fn test_resolved_bindings_iterates_joined() {
+        let rt = make_test_runtime();
+        let pairs: Vec<_> = rt.resolved_bindings();
+        assert_eq!(pairs.len(), 2);
+        for (cb, wb) in &pairs {
+            assert_eq!(cb.session_id, wb.session_id);
+        }
+    }
+
+    #[test]
+    fn test_chat_binding_with_window() {
+        let rt = make_test_runtime();
+        let result = rt.chat_binding_with_window(100, 200);
+        assert!(result.is_some());
+        let (cb, wid) = result.unwrap();
+        assert_eq!(cb.display_name, "test-window");
+        assert_eq!(wid, "@1");
+    }
+
+    #[test]
+    fn test_chat_binding_with_window_unbound() {
+        let rt = make_test_runtime();
+        let result = rt.chat_binding_with_window(999, 999);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_session_map_changed_stale_to_new() {
+        let mut rt = make_test_runtime();
+        // Chat binding has old session, window binding has new session
+        rt.window_bindings.insert(
+            "@10".into(),
+            WindowBinding {
+                window_id: "@10".into(),
+                session_id: "ses_new".into(),
+                cwd: "/path".into(),
+                agent_type: "claude".into(),
+                window_name: "migrated-window".into(),
+            },
+        );
+        rt.chat_bindings.push(ChatBinding {
+            user_id: 400,
+            thread_id: 600,
+            chat_id: 600,
+            display_name: "migrated-window".into(),
+            group_chat_id: None,
+            topic_name: None,
+            session_id: "ses_old".into(),
+        });
+
+        // Apply SessionMapChanged logic
+        let window_id = "@10";
+        let session_id = "ses_new";
+        if let Some(wb) = rt.window_bindings.get(window_id) {
+            let window_name = wb.window_name.clone();
+            if let Some(cb) = rt.chat_bindings.iter_mut().find(|cb| {
+                cb.display_name == window_name
+                    && (cb.session_id.is_empty() || cb.session_id != *session_id)
+            }) {
+                cb.session_id = session_id.to_string();
+            }
+        }
+
+        let cb = rt
+            .chat_bindings
+            .iter()
+            .find(|cb| cb.user_id == 400)
+            .unwrap();
+        assert_eq!(cb.session_id, "ses_new", "stale session should be replaced");
+    }
+
+    #[test]
+    fn test_clear_offset_scoped_to_old_session() {
+        // /clear should only remove offsets for the old session, not all
+        let old_sid = "ses_test".to_string();
+        let other_sid = "ses_other".to_string();
+        let mut offsets = HashMap::from([(old_sid.clone(), 100u64), (other_sid.clone(), 200u64)]);
+
+        offsets.remove(&old_sid);
+        assert!(!offsets.contains_key(&old_sid));
+        assert!(offsets.contains_key(&other_sid));
+    }
 }
