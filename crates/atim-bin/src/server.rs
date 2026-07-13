@@ -1050,14 +1050,36 @@ impl Server {
             if let Some((binding, _wb_opt)) = find_cb() {
                 // Find the tmux window by matching the display_name (window name)
                 // rather than relying on stale session-based bindings.
+                // Fall back to target.chat_name if display_name is stale.
                 let wid_str = match self.find_window_by_name(&binding.display_name).await {
                     Some(wid) => wid,
                     None => {
-                        let _ = self
-                            .im_adapter
-                            .send_message(&target, "No active session window found.")
-                            .await;
-                        return Ok(());
+                        // Try the IM chat_name as fallback — display_name may be stale
+                        if let Some(ref cn) = target.chat_name {
+                            match self.find_window_by_name(cn).await {
+                                Some(wid) => {
+                                    tracing::info!(
+                                        "[rebind] Found window via chat_name '{}' (display_name '{}' did not match)",
+                                        cn,
+                                        binding.display_name,
+                                    );
+                                    wid
+                                }
+                                None => {
+                                    let _ = self
+                                        .im_adapter
+                                        .send_message(&target, "No active session window found.")
+                                        .await;
+                                    return Ok(());
+                                }
+                            }
+                        } else {
+                            let _ = self
+                                .im_adapter
+                                .send_message(&target, "No active session window found.")
+                                .await;
+                            return Ok(());
+                        }
                     }
                 };
                 let window_id_str = wid_str.to_string();
@@ -1228,6 +1250,24 @@ impl Server {
                         ));
                         wb.session_id = sid.clone();
                     }
+                }
+
+                // Sync display_name and window_name when chat_name differs.
+                if let Some(ref cn) = target.chat_name
+                    && cn != &binding.display_name
+                {
+                    if let Some(cb) = rebind_rt
+                        .chat_bindings
+                        .iter_mut()
+                        .find(|cb| cb.user_id == user_id && cb.thread_id == thread_id_val)
+                    {
+                        changes.push(format!("display_name: {} → {}", cb.display_name, cn,));
+                        cb.display_name = cn.clone();
+                    }
+                    if let Some(wb) = rebind_rt.window_bindings.get_mut(&window_id_str) {
+                        wb.window_name = cn.clone();
+                    }
+                    let _ = self.tmux_mgr.rename_window(&window_id, cn).await;
                 }
 
                 // Sync the chat binding's session_id so find_cb() works.
