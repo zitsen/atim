@@ -772,9 +772,13 @@ impl Server {
                         self.state_mgr.save_runtime(&rt).await?;
                         if let Ok(mut map) = self.state_mgr.load_session_map().await {
                             map.remove(&wid_str_owned);
-                            let _ = self.state_mgr.save_session_map(&map).await;
+                            if let Err(e) = self.state_mgr.save_session_map(&map).await {
+                                tracing::warn!("[clear] Failed to save session_map: {e}");
+                            }
                         }
-                        self.state_mgr.remove_offset(&old_sid).await.ok();
+                        if let Err(e) = self.state_mgr.remove_offset(&old_sid).await {
+                            tracing::warn!("[clear] Failed to remove offset: {e}");
+                        }
                         self.byte_offsets.lock().await.remove(&old_sid);
                     }
 
@@ -804,7 +808,9 @@ impl Server {
                         self.state_mgr.save_runtime(&rt).await?;
                         if let Ok(mut map) = self.state_mgr.load_session_map().await {
                             map.insert(wid_str_owned.clone(), sid.clone());
-                            let _ = self.state_mgr.save_session_map(&map).await;
+                            if let Err(e) = self.state_mgr.save_session_map(&map).await {
+                                tracing::warn!("[clear/rebind] Failed to save session_map: {e}");
+                            }
                         }
                     }
 
@@ -951,8 +957,9 @@ impl Server {
                 // Also clear session_id from session_map so SessionMapChanged won't re-fill
                 if let Ok(mut map) = self.state_mgr.load_session_map().await
                     && map.remove(wid_str).is_some()
+                    && let Err(e) = self.state_mgr.save_session_map(&map).await
                 {
-                    let _ = self.state_mgr.save_session_map(&map).await;
+                    tracing::warn!("[switch] Failed to save session_map: {e}");
                 }
 
                 let _ = self
@@ -1089,7 +1096,9 @@ impl Server {
                 if let Some(ref session_id) = sid {
                     rt.sessions.remove(session_id);
                     // 4. Remove monitor offset
-                    self.state_mgr.remove_offset(session_id).await.ok();
+                    if let Err(e) = self.state_mgr.remove_offset(session_id).await {
+                        tracing::warn!("[unbind] Failed to remove offset: {e}");
+                    }
                 }
 
                 self.state_mgr.save_runtime(&rt).await?;
@@ -1363,7 +1372,9 @@ impl Server {
                         && map.get(&window_id_str).map(|s| s.as_str()) != Some(sid)
                     {
                         map.insert(window_id_str.clone(), sid.clone());
-                        let _ = self.state_mgr.save_session_map(&map).await;
+                        if let Err(e) = self.state_mgr.save_session_map(&map).await {
+                            tracing::warn!("[rebind] Failed to save session_map: {e}");
+                        }
                     }
                     {
                         let mut offsets = self.byte_offsets.lock().await;
@@ -2004,7 +2015,11 @@ impl Server {
                                 && let Some(wb) = rt.window_bindings.get_mut(&window_id_str)
                             {
                                 wb.agent_type = running_agent.to_string();
-                                let _ = self.state_mgr.save_runtime(&rt).await;
+                                if let Err(e) = self.state_mgr.save_runtime(&rt).await {
+                                    tracing::warn!(
+                                        "[handle_text_message] Failed to save runtime after agent_type fix: {e}"
+                                    );
+                                }
                             }
                         } else {
                             tracing::info!(
@@ -4428,16 +4443,21 @@ impl Server {
         if !old_window_id.is_empty()
             && let Ok(mut map) = self.state_mgr.load_session_map().await
             && map.remove(&old_window_id).is_some()
+            && let Err(e) = self.state_mgr.save_session_map(&map).await
         {
-            let _ = self.state_mgr.save_session_map(&map).await;
+            tracing::warn!("[recover] Failed to save session_map (old): {e}");
         }
 
         // For resumed sessions, update session_map + clear monitor offset
         if !new_session_id.is_empty() {
             let mut map = self.state_mgr.load_session_map().await.unwrap_or_default();
             map.insert(new_window_id.0.clone(), new_session_id.clone());
-            let _ = self.state_mgr.save_session_map(&map).await;
-            self.state_mgr.remove_offset(&session_id).await.ok();
+            if let Err(e) = self.state_mgr.save_session_map(&map).await {
+                tracing::warn!("[recover] Failed to save session_map (new): {e}");
+            }
+            if let Err(e) = self.state_mgr.remove_offset(&session_id).await {
+                tracing::warn!("[recover] Failed to remove offset: {e}");
+            }
             self.byte_offsets.lock().await.remove(&session_id);
         }
 
@@ -4474,7 +4494,9 @@ impl Server {
                     .await?;
                 let mut map = self.state_mgr.load_session_map().await.unwrap_or_default();
                 map.insert(wid, sid);
-                let _ = self.state_mgr.save_session_map(&map).await;
+                if let Err(e) = self.state_mgr.save_session_map(&map).await {
+                    tracing::warn!("[recover/fresh] Failed to save session_map: {e}");
+                }
             }
         }
 
@@ -5001,7 +5023,9 @@ impl Server {
                             let mut map =
                                 self.state_mgr.load_session_map().await.unwrap_or_default();
                             map.remove(&wid);
-                            let _ = self.state_mgr.save_session_map(&map).await;
+                            if let Err(e) = self.state_mgr.save_session_map(&map).await {
+                                tracing::warn!("[rm] Failed to save session_map: {e}");
+                            }
                             self.state_mgr.save_runtime(&rt).await?;
                             // Close tmux window if it still exists
                             let window_id = atim_core::message::WindowId(wid.clone());
