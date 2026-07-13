@@ -96,6 +96,7 @@ impl DirectoryBrowser {
         }
     }
 
+    /// Access the internal sessions map (used for testing/inspection).
     #[allow(dead_code)]
     pub fn state(&self) -> &Arc<Mutex<HashMap<i64, BrowserState>>> {
         &self.sessions

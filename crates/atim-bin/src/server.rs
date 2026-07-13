@@ -35,9 +35,10 @@ pub struct Server {
     pub config: Config,
     pub state_mgr: StateManager,
     pub tmux_mgr: TmuxManager,
+    /// Message queue for IM message ordering (reserved for future use).
     #[allow(dead_code)]
     pub queue: Arc<Mutex<MessageQueue>>,
-    #[allow(dead_code)]
+    /// Shared byte offsets for monitor (used in pipe handler directly).
     pub byte_offsets: Arc<Mutex<HashMap<String, u64>>>,
     pub im_adapter: Arc<dyn ImAdapter>,
     /// Track topic names by (chat_id, thread_id) from forum_topic_created/edited.

@@ -90,7 +90,7 @@ pub struct TelegramAdapter {
     bot_token: String,
     api_url: String,
     client: reqwest::Client,
-    /// Polling interval in seconds for getUpdates.
+    /// Polling interval in seconds for getUpdates. Reserved for future use.
     #[allow(dead_code)]
     poll_interval_secs: u64,
 }

@@ -437,6 +437,7 @@ fn fit_to_bounds(w: u32, h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
 }
 
 /// Fill a rectangular region of an image with a color.
+/// Not currently used — kept as utility for future rendering features.
 #[allow(dead_code)]
 pub fn fill_rect(img: &mut RgbaImage, x: u32, y: u32, w: u32, h: u32, color: image::Rgba<u8>) {
     for dy in y..y + h {
