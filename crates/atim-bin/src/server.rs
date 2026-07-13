@@ -747,15 +747,21 @@ impl Server {
                 let _ = self.im_adapter.send_chat_action(&target).await;
 
                 if matches!(trimmed, "/compact" | "/clear") {
-                    // Clear/reset resets the conversation *and* creates a new session.
-                    // Stale bindings must be cleared so SessionMapChanged can re-assign.
+                    // /clear resets the conversation and creates a new session UUID.
+                    // We need to clear old bindings, send /clear, then discover the
+                    // new UUID via /status and update bindings — like /rebind does.
+                    let thread_id_val = target.thread_id.map(|t| t.0).unwrap_or(0);
+                    let wid_str_owned = wb.map(|w| w.window_id.clone()).unwrap_or_default();
+
+                    // Phase 1: clear stale session bindings (before /clear creates new session)
                     if trimmed == "/clear"
-                        && let (Some((_binding, _)), Some(wb)) = (find_cb(), wb)
+                        && !wid_str_owned.is_empty()
+                        && let Some((_binding, wb)) = find_cb()
+                        && !wb.map(|w| w.session_id.is_empty()).unwrap_or(true)
                     {
-                        let wid_str = &wb.window_id;
-                        let old_sid = wb.session_id.clone();
+                        let old_sid = wb.map(|w| w.session_id.clone()).unwrap_or_default();
                         let mut rt = self.state_mgr.load_runtime().await?;
-                        if let Some(wb2) = rt.window_bindings.get_mut(wid_str) {
+                        if let Some(wb2) = rt.window_bindings.get_mut(&wid_str_owned) {
                             wb2.session_id.clear();
                         }
                         for cb in rt.chat_bindings.iter_mut() {
@@ -765,17 +771,85 @@ impl Server {
                         }
                         self.state_mgr.save_runtime(&rt).await?;
                         if let Ok(mut map) = self.state_mgr.load_session_map().await {
-                            map.remove(wid_str);
+                            map.remove(&wid_str_owned);
                             let _ = self.state_mgr.save_session_map(&map).await;
                         }
                         self.state_mgr.remove_offset(&old_sid).await.ok();
                         self.byte_offsets.lock().await.remove(&old_sid);
                     }
+
+                    // Phase 2: send /clear
                     self.tmux_mgr.send_line(&wid, trimmed).await?;
-                    let _ = self
-                        .im_adapter
-                        .send_message(&target, &format!("Sent `{trimmed}` to agent."))
-                        .await;
+                    let mut new_sid: Option<String> = None;
+
+                    // Phase 3: discover new session UUID via /status
+                    if trimmed == "/clear" && !wid_str_owned.is_empty() {
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        let baseline_raw = self
+                            .tmux_mgr
+                            .capture_pane(&wid)
+                            .await
+                            .ok()
+                            .unwrap_or_default();
+                        let baseline = strip_ansi(&baseline_raw);
+                        let baseline_len = baseline.lines().count();
+
+                        self.tmux_mgr.send_line(&wid, "/status").await.ok();
+                        tokio::time::sleep(Duration::from_millis(2000)).await;
+
+                        let captured_raw = self
+                            .tmux_mgr
+                            .capture_pane(&wid)
+                            .await
+                            .ok()
+                            .unwrap_or_default();
+                        let captured = strip_ansi(&captured_raw);
+                        let lines: Vec<&str> = captured.lines().collect();
+                        let new_text = lines
+                            .iter()
+                            .copied()
+                            .skip(baseline_len)
+                            .collect::<Vec<_>>()
+                            .join("\n");
+
+                        let mut sid = SESSION_ID_RE
+                            .captures(&new_text)
+                            .and_then(|c| c.get(1))
+                            .map(|m| m.as_str().to_string());
+                        if sid.is_none() {
+                            sid = SESSION_ID_RE
+                                .captures(&captured)
+                                .and_then(|c| c.get(1))
+                                .map(|m| m.as_str().to_string());
+                        }
+                        self.tmux_mgr.send_key(&wid, "Escape").await.ok();
+                        new_sid = sid;
+
+                        // Phase 4: update bindings with new UUID
+                        if let Some(ref sid) = new_sid {
+                            let mut rt = self.state_mgr.load_runtime().await?;
+                            if let Some(wb2) = rt.window_bindings.get_mut(&wid_str_owned) {
+                                wb2.session_id = sid.clone();
+                            }
+                            for cb in rt.chat_bindings.iter_mut() {
+                                if cb.user_id == user_id && cb.thread_id == thread_id_val {
+                                    cb.session_id = sid.clone();
+                                }
+                            }
+                            self.state_mgr.save_runtime(&rt).await?;
+                            if let Ok(mut map) = self.state_mgr.load_session_map().await {
+                                map.insert(wid_str_owned.clone(), sid.clone());
+                                let _ = self.state_mgr.save_session_map(&map).await;
+                            }
+                        }
+                    }
+
+                    let msg = if let Some(ref sid) = new_sid {
+                        format!("Sent `{trimmed}` to agent (new session: {sid}).")
+                    } else {
+                        format!("Sent `{trimmed}` to agent.")
+                    };
+                    let _ = self.im_adapter.send_message(&target, &msg).await;
                 } else {
                     // Commands that open a modal — capture output and dismiss
                     self.send_slash_and_capture(&target, &wid, trimmed).await;
