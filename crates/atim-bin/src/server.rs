@@ -780,67 +780,31 @@ impl Server {
 
                     // Phase 2: send /clear
                     self.tmux_mgr.send_line(&wid, trimmed).await?;
-                    let mut new_sid: Option<String> = None;
 
-                    // Phase 3: discover new session UUID via /status
-                    if trimmed == "/clear" && !wid_str_owned.is_empty() {
-                        tokio::time::sleep(Duration::from_secs(2)).await;
-                        let baseline_raw = self
-                            .tmux_mgr
-                            .capture_pane(&wid)
-                            .await
-                            .ok()
-                            .unwrap_or_default();
-                        let baseline = strip_ansi(&baseline_raw);
-                        let baseline_len = baseline.lines().count();
+                    // Phase 3: wait for new session to initialize, then discover UUID
+                    let new_sid: Option<String> =
+                        if trimmed == "/clear" && !wid_str_owned.is_empty() {
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                            self.discover_session_via_status(&wid_str_owned).await
+                        } else {
+                            None
+                        };
 
-                        self.tmux_mgr.send_line(&wid, "/status").await.ok();
-                        tokio::time::sleep(Duration::from_millis(2000)).await;
-
-                        let captured_raw = self
-                            .tmux_mgr
-                            .capture_pane(&wid)
-                            .await
-                            .ok()
-                            .unwrap_or_default();
-                        let captured = strip_ansi(&captured_raw);
-                        let lines: Vec<&str> = captured.lines().collect();
-                        let new_text = lines
-                            .iter()
-                            .copied()
-                            .skip(baseline_len)
-                            .collect::<Vec<_>>()
-                            .join("\n");
-
-                        let mut sid = SESSION_ID_RE
-                            .captures(&new_text)
-                            .and_then(|c| c.get(1))
-                            .map(|m| m.as_str().to_string());
-                        if sid.is_none() {
-                            sid = SESSION_ID_RE
-                                .captures(&captured)
-                                .and_then(|c| c.get(1))
-                                .map(|m| m.as_str().to_string());
+                    // Phase 4: update bindings with new UUID
+                    if let Some(ref sid) = new_sid {
+                        let mut rt = self.state_mgr.load_runtime().await?;
+                        if let Some(wb2) = rt.window_bindings.get_mut(&wid_str_owned) {
+                            wb2.session_id = sid.clone();
                         }
-                        self.tmux_mgr.send_key(&wid, "Escape").await.ok();
-                        new_sid = sid;
-
-                        // Phase 4: update bindings with new UUID
-                        if let Some(ref sid) = new_sid {
-                            let mut rt = self.state_mgr.load_runtime().await?;
-                            if let Some(wb2) = rt.window_bindings.get_mut(&wid_str_owned) {
-                                wb2.session_id = sid.clone();
+                        for cb in rt.chat_bindings.iter_mut() {
+                            if cb.user_id == user_id && cb.thread_id == thread_id_val {
+                                cb.session_id = sid.clone();
                             }
-                            for cb in rt.chat_bindings.iter_mut() {
-                                if cb.user_id == user_id && cb.thread_id == thread_id_val {
-                                    cb.session_id = sid.clone();
-                                }
-                            }
-                            self.state_mgr.save_runtime(&rt).await?;
-                            if let Ok(mut map) = self.state_mgr.load_session_map().await {
-                                map.insert(wid_str_owned.clone(), sid.clone());
-                                let _ = self.state_mgr.save_session_map(&map).await;
-                            }
+                        }
+                        self.state_mgr.save_runtime(&rt).await?;
+                        if let Ok(mut map) = self.state_mgr.load_session_map().await {
+                            map.insert(wid_str_owned.clone(), sid.clone());
+                            let _ = self.state_mgr.save_session_map(&map).await;
                         }
                     }
 
