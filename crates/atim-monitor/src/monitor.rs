@@ -292,6 +292,7 @@ impl SessionMonitor {
         }
 
         // rusqlite Connection is !Send, so run the entire query in a blocking task.
+        #[allow(clippy::type_complexity)]
         let rows = tokio::task::spawn_blocking(
             move || -> Result<Vec<(String, String, String, String, i64)>> {
                 let db = rusqlite::Connection::open_with_flags(

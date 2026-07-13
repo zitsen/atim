@@ -4,7 +4,6 @@ use super::AgentParser;
 use super::claude::ClaudeParser;
 use super::trait_def::{Agent, AgentId, OutputSource};
 use crate::error::Result;
-use crate::message::AgentKind;
 
 /// mimo code agent — Claude Code compatible CLI.
 pub struct MimoAgent;

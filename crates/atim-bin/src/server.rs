@@ -458,13 +458,12 @@ impl Server {
                                     let diff_text = build_edit_diff_card(raw, &msg.text);
                                     if let Ok(mid) =
                                         self.im_adapter.send_message(&target, &diff_text).await
+                                        && let Some(tuid) = &msg.tool_use_id
                                     {
-                                        if let Some(tuid) = &msg.tool_use_id {
-                                            self.tool_use_msg_ids.lock().await.insert(
-                                                (chat_id, thread_id_val, tuid.clone()),
-                                                mid,
-                                            );
-                                        }
+                                        self.tool_use_msg_ids
+                                            .lock()
+                                            .await
+                                            .insert((chat_id, thread_id_val, tuid.clone()), mid);
                                     }
                                     continue;
                                 }
@@ -570,22 +569,31 @@ impl Server {
                         );
                     }
                     // Also sync the chat binding's session_id so find_cb() works.
-                    // ChatBinding.display_name == WindowBinding.window_name is the stable link
-                    // between the two (session_id is empty at this point, so we can't use it).
+                    // Match by display_name == window_name (stable link across session changes).
+                    // Update when empty (first assignment) or stale (session UUID changed).
                     if let Some(wb) = rt.window_bindings.get(window_id) {
                         let window_name = wb.window_name.clone();
-                        if let Some(cb) = rt
-                            .chat_bindings
-                            .iter_mut()
-                            .find(|cb| cb.session_id.is_empty() && cb.display_name == window_name)
-                        {
+                        if let Some(cb) = rt.chat_bindings.iter_mut().find(|cb| {
+                            cb.display_name == window_name
+                                && (cb.session_id.is_empty() || cb.session_id != *session_id)
+                        }) {
+                            if cb.session_id.is_empty() {
+                                tracing::info!(
+                                    "[pipe] Assigned session {session_id} to chat binding '{}' (user={} thread={})",
+                                    cb.display_name,
+                                    cb.user_id,
+                                    cb.thread_id,
+                                );
+                            } else {
+                                tracing::info!(
+                                    "[pipe] Updated stale session {} → {session_id} for chat binding '{}' (user={} thread={})",
+                                    cb.session_id,
+                                    cb.display_name,
+                                    cb.user_id,
+                                    cb.thread_id,
+                                );
+                            }
                             cb.session_id = session_id.clone();
-                            tracing::info!(
-                                "[pipe] Assigned session {session_id} to chat binding '{}' (user={} thread={})",
-                                cb.display_name,
-                                cb.user_id,
-                                cb.thread_id,
-                            );
                         }
                     }
                 }
@@ -4056,6 +4064,27 @@ impl Server {
         let _ = self.im_adapter.send_message(&target, &display).await;
     }
 
+    /// Extract the `cwd` field from a session's JSONL file.
+    ///
+    /// Reads the first few lines looking for a message entry with a `cwd` field.
+    /// Returns `None` if the file doesn't exist or has no `cwd`.
+    async fn extract_cwd_from_jsonl(session_id: &str) -> Option<String> {
+        let path = resolve_jsonl(session_id).await?;
+        let data = tokio::fs::read(&path).await.ok()?;
+        // Only read the first 4 KB — cwd is in the first user message.
+        let chunk = &data[..data.len().min(4096)];
+        let text = std::str::from_utf8(chunk).ok()?;
+        for line in text.lines() {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(line)
+                && let Some(cwd) = val.get("cwd").and_then(|v| v.as_str())
+                && !cwd.is_empty()
+            {
+                return Some(cwd.to_string());
+            }
+        }
+        None
+    }
+
     /// Recover a session when the tmux window has died.
     ///
     /// Creates a new tmux window, (re-)launches the agent, optionally
@@ -4152,6 +4181,20 @@ impl Server {
                 cwd = wb_cwd.unwrap_or("~").to_string();
                 agent_type_name = "claude".to_string();
             }
+        }
+
+        // If cwd is stale (HOME or empty), try to extract from the session's JSONL file.
+        let home = std::env::var("HOME").unwrap_or_default();
+        if !session_id.is_empty()
+            && (cwd == "~" || cwd.is_empty() || cwd == home)
+            && let Some(jsonl_cwd) = Self::extract_cwd_from_jsonl(&session_id).await
+        {
+            tracing::info!(
+                "[recover] Overriding stale cwd {:?} with JSONL cwd {:?}",
+                cwd,
+                jsonl_cwd,
+            );
+            cwd = jsonl_cwd;
         }
 
         // Normalize ~ to actual home path
