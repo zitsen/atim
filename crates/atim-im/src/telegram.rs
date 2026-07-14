@@ -28,7 +28,7 @@ fn markdown_to_html(text: &str) -> String {
         match event {
             Event::Start(tag) => match tag {
                 Tag::Paragraph => {}
-                Tag::Heading { level: _, .. } => out.push_str("<b>"),
+                Tag::Heading { .. } => out.push_str("<b>"),
                 Tag::BlockQuote(..) => out.push_str("<blockquote>"),
                 Tag::CodeBlock(_) => out.push_str("<pre>"),
                 Tag::List(_) => {}
