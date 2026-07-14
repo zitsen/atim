@@ -105,6 +105,20 @@ impl super::Server {
             cwd = wb.cwd.clone();
             session_id = wb.session_id.clone();
             agent_type_name = wb.agent_type.clone();
+
+            // If cwd is HOME or empty and the window still exists, try tmux's pane_current_path.
+            let home = std::env::var("HOME").unwrap_or_default();
+            if cwd == home || cwd.is_empty() {
+                let wid = WindowId(old_window_id.clone());
+                if let Ok(path) = self.tmux_mgr.pane_cwd(&wid).await {
+                    tracing::info!(
+                        "[recover] Overriding stale cwd {:?} with tmux pane_cwd {:?}",
+                        cwd,
+                        path,
+                    );
+                    cwd = path;
+                }
+            }
         } else {
             // Window is dead — reconstruct from chat_binding + sessions
             old_window_id = String::new();
