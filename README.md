@@ -10,7 +10,7 @@ Atim bridges an IM chat directly to a tmux window running an AI coding agent. Ty
 
 ## Quick Install
 
-Download and install to ~/.local/bin with `installer.sh` with `curl`:
+Download and install to ~/.local/bin with `install.sh` with `curl`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zitsen/atim/main/install.sh | bash
@@ -191,6 +191,11 @@ Send these in the IM chat to control the agent session:
 | `/switch <agent>`      | Switch to a different agent (`claude`, `copilot`, `codex`)       |
 | `/esc` or `/dismiss`   | Send Escape key to dismiss modals/help screens                   |
 | `/enter`               | Send Enter key to confirm modals/selections                      |
+| `/rebind`              | Re-detect the agent session and update bindings                  |
+| `/rebind agent`        | Re-bind the agent type (e.g. `claude`, `copilot`, `codex`)      |
+| `/unbind`              | Unbind session, send `/quit` to agent, and close the tmux window |
+| `/clear`               | Clear Claude Code conversation and rebind new session UUID       |
+| `/status`              | Show Claude Code session status info                             |
 | `!<command>`           | Run a shell command in the agent's tmux window and stream output |
 
 During directory browsing, text input acts as a `zoxide` query to jump to matching directories.
