@@ -34,6 +34,7 @@ nav:
   - Getting Started:
     - Installation: install.md
     - Quick Start: quickstart.md
+    - Windows (WSL2): windows.md
   - Configuration:
     - Configuration: configuration.md
   - Usage:

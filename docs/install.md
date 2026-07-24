@@ -35,6 +35,43 @@ The installer:
 4. Creates `~/.atim/config.toml` with interactive setup
 5. Installs and enables the systemd user service
 
+## Windows (via WSL2)
+
+Atim depends on tmux, which is not available natively on Windows. The recommended approach is to run Atim inside WSL2 (Windows Subsystem for Linux).
+
+### 1. Install WSL2
+
+Open PowerShell as Administrator:
+
+```powershell
+wsl --install
+```
+
+Restart your computer when prompted. After restart, WSL2 will complete setup with Ubuntu.
+
+### 2. Install tmux in WSL2
+
+```bash
+sudo apt update && sudo apt install -y tmux
+```
+
+### 3. Install Atim in WSL2
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/zitsen/atim/main/install.sh | bash
+```
+
+### 4. Configure and start
+
+Follow the same steps as Linux. The service runs inside WSL2:
+
+```bash
+atim service --start
+```
+
+!!! note
+    Atim runs entirely within WSL2. Your Feishu/Telegram messages will work the same way — the agent sessions run in tmux inside WSL2.
+
 ## Build from Source
 
 ```bash
