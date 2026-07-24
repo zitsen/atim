@@ -12,3 +12,5 @@ monitor_state.json
 # OS
 .DS_Store
 Thumbs.db
+# mkdocs build output
+site/
