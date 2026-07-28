@@ -5,6 +5,7 @@ state.json
 session_map.json
 monitor_state.json
 *.lock
+!Cargo.lock
 *.log
 # IDE
 .vscode/
