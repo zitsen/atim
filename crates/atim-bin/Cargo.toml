@@ -24,7 +24,7 @@ atim-state = { path = "../atim-state", version = "0.3.4" }
 atim-im = { path = "../atim-im", version = "0.3.4" }
 atim-queue = { path = "../atim-queue", version = "0.3.4" }
 atim-monitor = { path = "../atim-monitor", version = "0.3.4" }
-reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 rustls = { version = "0.23", features = ["ring"] }
 dotenvy = "0.15"
 chrono = { workspace = true }
