@@ -13,7 +13,7 @@ use std::sync::Mutex;
 use atim_core::error::{Error, Result};
 use atim_core::message::WindowId;
 use atim_core::terminal::WindowInfo;
-use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtySize};
+use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
 
 /// A running agent session in a ConPTY.
 struct PtyWindow {
@@ -21,7 +21,6 @@ struct PtyWindow {
     name: String,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
-    reader: Option<std::thread::JoinHandle<()>>,
     /// Latest captured pane content (ANSI preserved).
     buffer: Arc<Mutex<String>>,
     cwd: String,
@@ -51,10 +50,11 @@ impl PtyWindow {
         // Drop the slave after spawning — the master keeps the pty alive.
         drop(pair.slave);
 
-        let mut reader = pair.master.try_clone_reader().ok();
+        // Continuously read pty output into the buffer.
+        let reader = pair.master.try_clone_reader().ok();
         let buffer = Arc::new(Mutex::new(String::new()));
         let buf = buffer.clone();
-        let handle = std::thread::spawn(move || {
+        std::thread::spawn(move || {
             use std::io::Read;
             if let Some(mut r) = reader {
                 let mut buf_inner = [0u8; 4096];
@@ -80,7 +80,6 @@ impl PtyWindow {
             name,
             master: pair.master,
             child,
-            reader: Some(handle),
             buffer,
             cwd: cwd.to_string(),
         })
@@ -193,7 +192,7 @@ impl atim_core::terminal::TerminalManager for WindowsTerminalManager {
             .windows
             .lock()
             .map_err(|_| Error::Tmux("lock poisoned".into()))?;
-        if let Some(w) = windows.remove(&window_id.0) {
+        if let Some(mut w) = windows.remove(&window_id.0) {
             w.child.kill().ok();
         }
         Ok(())
