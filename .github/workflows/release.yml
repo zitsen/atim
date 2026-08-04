@@ -18,11 +18,17 @@ jobs:
         target:
           - x86_64-unknown-linux-musl
           - aarch64-unknown-linux-musl
+          - x86_64-pc-windows-gnu
     steps:
       - uses: actions/checkout@v4
 
       - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libssl-dev perl mingw-w64
+        if: matrix.target == 'x86_64-pc-windows-gnu'
+
+      - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libssl-dev perl
+        if: matrix.target != 'x86_64-pc-windows-gnu'
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -34,12 +40,19 @@ jobs:
           curl -LO "https://ziglang.org/download/0.14.0/zig-linux-x86_64-0.14.0.tar.xz"
           tar xf "zig-linux-x86_64-0.14.0.tar.xz"
           echo "$PWD/zig-linux-x86_64-0.14.0" >> "$GITHUB_PATH"
+        if: matrix.target != 'x86_64-pc-windows-gnu'
 
       - name: Install cargo-zigbuild
         uses: taiki-e/install-action@cargo-zigbuild
+        if: matrix.target != 'x86_64-pc-windows-gnu'
 
-      - name: Build release binary
+      - name: Build release binary (zigbuild)
         run: cargo zigbuild --release --target ${{ matrix.target }}
+        if: matrix.target != 'x86_64-pc-windows-gnu'
+
+      - name: Build release binary (mingw cross)
+        run: cargo build --release --target ${{ matrix.target }}
+        if: matrix.target == 'x86_64-pc-windows-gnu'
 
       - name: Package binary
         shell: bash

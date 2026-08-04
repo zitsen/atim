@@ -14,40 +14,120 @@ pub fn run_service(
     cmds: &[ServiceCommand],
     system_level: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    for cmd in cmds {
-        match cmd {
-            ServiceCommand::Install => install_service(system_level)?,
-            ServiceCommand::Enable => enable_service(system_level)?,
-            _ => {
-                let mut base = systemctl_base(system_level);
-                let action = match cmd {
-                    ServiceCommand::Start => "start",
-                    ServiceCommand::Stop => "stop",
-                    ServiceCommand::Restart => "restart",
-                    ServiceCommand::Status => "status",
-                    _ => unreachable!(),
-                };
-                base.push(action.to_string());
-                base.push(unit_name().to_string());
-
-                let status = Command::new(&base[0])
-                    .args(&base[1..])
-                    .stdin(std::process::Stdio::inherit())
-                    .stdout(std::process::Stdio::inherit())
-                    .stderr(std::process::Stdio::inherit())
-                    .status()?;
-
-                if !status.success()
-                    && let Some(code) = status.code()
-                {
-                    std::process::exit(code);
+    #[cfg(windows)]
+    {
+        let _ = system_level; // system-level is N/A on Windows (sc.exe is always system)
+        for cmd in cmds {
+            match cmd {
+                ServiceCommand::Install => install_service_windows()?,
+                ServiceCommand::Enable => enable_service_windows()?,
+                ServiceCommand::Start => sc(&["start", "atim"])?,
+                ServiceCommand::Stop => sc(&["stop", "atim"])?,
+                ServiceCommand::Restart => {
+                    sc(&["stop", "atim"]).ok();
+                    sc(&["start", "atim"])?;
+                }
+                ServiceCommand::Status => {
+                    let _ = sc(&["query", "atim"]);
                 }
             }
         }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        for cmd in cmds {
+            match cmd {
+                ServiceCommand::Install => install_service(system_level)?,
+                ServiceCommand::Enable => enable_service(system_level)?,
+                _ => {
+                    let mut base = systemctl_base(system_level);
+                    let action = match cmd {
+                        ServiceCommand::Start => "start",
+                        ServiceCommand::Stop => "stop",
+                        ServiceCommand::Restart => "restart",
+                        ServiceCommand::Status => "status",
+                        _ => unreachable!(),
+                    };
+                    base.push(action.to_string());
+                    base.push(unit_name().to_string());
+
+                    let status = Command::new(&base[0])
+                        .args(&base[1..])
+                        .stdin(std::process::Stdio::inherit())
+                        .stdout(std::process::Stdio::inherit())
+                        .stderr(std::process::Stdio::inherit())
+                        .status()?;
+
+                    if !status.success()
+                        && let Some(code) = status.code()
+                    {
+                        std::process::exit(code);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+// ── Windows (sc.exe) ──
+
+#[cfg(windows)]
+fn sc(args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
+    let status = Command::new("sc")
+        .args(args)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()?;
+    if !status.success()
+        && let Some(code) = status.code()
+    {
+        std::process::exit(code);
     }
     Ok(())
 }
 
+#[cfg(windows)]
+fn install_service_windows() -> Result<(), Box<dyn std::error::Error>> {
+    let binary_path =
+        std::env::current_exe().map_err(|_| "Could not determine binary path".to_string())?;
+
+    // Register as a Windows service. `sc create` needs `binPath=` with a
+    // space before the value: `binPath= "C:\...\atim.exe"`.
+    let bin_path_arg = format!("binPath= \"{}\"", binary_path.display());
+    let status = Command::new("sc")
+        .args([
+            "create",
+            "atim",
+            "start=",
+            "auto",
+            &bin_path_arg,
+            "displayname=",
+            "Atim - AI Agent Through IM",
+        ])
+        .status()?;
+    if !status.success()
+        && let Some(code) = status.code()
+    {
+        std::process::exit(code);
+    }
+
+    println!("Service 'atim' installed. Start with `atim service --start`.");
+    Ok(())
+}
+
+#[cfg(windows)]
+fn enable_service_windows() -> Result<(), Box<dyn std::error::Error>> {
+    // sc create with start= auto already enables on boot.
+    println!("Service 'atim' is already enabled (start= auto).");
+    Ok(())
+}
+
+// ── Linux/macOS (systemd) ──
+
+#[cfg(not(windows))]
 fn enable_service(system_level: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mut daemon_reload_args = systemctl_base(system_level);
     daemon_reload_args.push("daemon-reload".to_string());
@@ -76,10 +156,12 @@ fn enable_service(system_level: bool) -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn unit_name() -> &'static str {
     "atim.service"
 }
 
+#[cfg(not(windows))]
 fn systemctl_base(system_level: bool) -> Vec<String> {
     let mut args = vec!["systemctl".to_string()];
     if !system_level {
@@ -88,6 +170,7 @@ fn systemctl_base(system_level: bool) -> Vec<String> {
     args
 }
 
+#[cfg(not(windows))]
 fn service_dir(system_level: bool) -> PathBuf {
     if system_level {
         PathBuf::from("/etc/systemd/system")
@@ -103,6 +186,7 @@ fn service_dir(system_level: bool) -> PathBuf {
     }
 }
 
+#[cfg(not(windows))]
 fn install_service(system_level: bool) -> Result<(), Box<dyn std::error::Error>> {
     let binary_path =
         std::env::current_exe().map_err(|_| "Could not determine binary path".to_string())?;

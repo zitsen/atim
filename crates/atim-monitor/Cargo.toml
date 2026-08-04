@@ -14,6 +14,6 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
-atim-core = { path = "../atim-core", version = "0.3.4" }
-atim-parser = { path = "../atim-parser", version = "0.3.4" }
+atim-core = { path = "../atim-core", version = "0.3" }
+atim-parser = { path = "../atim-parser", version = "0.3" }
 rusqlite = { workspace = true }
