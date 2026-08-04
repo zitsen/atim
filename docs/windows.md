@@ -1,8 +1,65 @@
-# Windows (WSL2)
+# Windows
 
-Atim depends on [tmux](https://github.com/tmux/tmux), which does not run natively on Windows. The recommended approach is to use **WSL2** (Windows Subsystem for Linux).
+Atim runs natively on Windows. There are two supported approaches:
 
-## Install WSL2
+## Option 1: Native (psmux) — Recommended
+
+[psmux](https://github.com/psmux/psmux) is a native Windows terminal multiplexer written in Rust. It speaks the tmux command language and ships a `tmux` alias, so Atim's existing tmux manager works against it directly — no WSL, Cygwin, or MSYS2 needed.
+
+### Install psmux
+
+=== "winget"
+
+    ```powershell
+    winget install psmux
+    ```
+
+=== "scoop"
+
+    ```powershell
+    scoop bucket add psmux https://github.com/psmux/scoop-psmux
+    scoop install psmux
+    ```
+
+=== "chocolatey"
+
+    ```powershell
+    choco install psmux
+    ```
+
+=== "cargo"
+
+    ```powershell
+    cargo install psmux
+    ```
+
+This installs `psmux`, `pmux`, and `tmux` binaries. Atim automatically uses psmux on Windows.
+
+### Install Atim
+
+```powershell
+powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/zitsen/atim/main/install.ps1 -useb | iex"
+```
+
+### Install the Session Hook
+
+```powershell
+atim hook --install
+```
+
+### Manage the Service
+
+```powershell
+atim service --install
+atim service --start
+atim service --status
+```
+
+## Option 2: WSL2
+
+Use this if you prefer the classic tmux environment.
+
+### Install WSL2
 
 Open PowerShell as Administrator and run:
 

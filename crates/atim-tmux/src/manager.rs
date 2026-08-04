@@ -12,9 +12,15 @@ pub use atim_core::terminal::WindowInfo as TmuxWindowInfo;
 /// Manages tmux windows for agent sessions.
 ///
 /// All operations shell out to the `tmux` CLI via `tokio::process::Command`.
+/// The binary name is configurable so Windows users can point Atim at
+/// psmux (a native Windows tmux-compatible multiplexer that ships a
+/// `tmux` alias — `winget install psmux`).
 #[derive(Clone)]
 pub struct TmuxManager {
     pub session_name: String,
+    /// The tmux-compatible binary to invoke ("tmux" on Linux/macOS,
+    /// "psmux" or its "tmux" alias on Windows).
+    pub binary: String,
     send_delay: Duration,
 }
 
@@ -26,8 +32,15 @@ impl TmuxManager {
     pub fn new(session_name: &str) -> Self {
         Self {
             session_name: session_name.to_string(),
+            binary: "tmux".to_string(),
             send_delay: Duration::from_millis(100),
         }
+    }
+
+    /// Use a custom binary instead of `tmux` (e.g. `psmux` on Windows).
+    pub fn with_binary(mut self, binary: &str) -> Self {
+        self.binary = binary.to_string();
+        self
     }
 
     /// Set the delay between typing text and pressing Enter.
@@ -41,11 +54,11 @@ impl TmuxManager {
     /// Automatically recovers from a dead tmux server: if the server socket
     /// is stale ("no server running"), creates a new session and retries.
     async fn tmux(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("tmux")
+        let output = Command::new(&self.binary)
             .args(args)
             .output()
             .await
-            .map_err(|e| Error::Tmux(format!("failed to execute tmux: {e}")))?;
+            .map_err(|e| Error::Tmux(format!("failed to execute {}: {e}", self.binary)))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -57,16 +70,16 @@ impl TmuxManager {
                     "tmux server not running, re-creating session \"{}\"",
                     self.session_name
                 );
-                let _ = Command::new("tmux")
+                let _ = Command::new(&self.binary)
                     .args(["new-session", "-d", "-s", &self.session_name])
                     .output()
                     .await;
                 // Retry the original command
-                let retry = Command::new("tmux")
+                let retry = Command::new(&self.binary)
                     .args(args)
                     .output()
                     .await
-                    .map_err(|e| Error::Tmux(format!("failed to execute tmux: {e}")))?;
+                    .map_err(|e| Error::Tmux(format!("failed to execute {}: {e}", self.binary)))?;
                 if retry.status.success() {
                     return Ok(String::from_utf8_lossy(&retry.stdout).to_string());
                 }

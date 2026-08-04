@@ -66,7 +66,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn get_tmux_window_id() -> Result<String, Box<dyn std::error::Error>> {
-    let output = std::process::Command::new("tmux")
+    // psmux ships a `tmux` alias on Windows, so "tmux" works on both
+    // platforms. ATIM_TMUX_BINARY overrides for custom installs.
+    let binary = std::env::var("ATIM_TMUX_BINARY").unwrap_or_else(|_| "tmux".to_string());
+    let output = std::process::Command::new(&binary)
         .args(["display-message", "-p", "#{window_id}"])
         .output()?;
 

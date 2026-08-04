@@ -118,7 +118,7 @@ Then run `atim`.
 | **tmux**    | Atim manages agent windows through tmux |
 | **zoxide**  | Optional. For fast directory search     |
 
-**Windows users**: Atim runs via WSL2. See the [Windows installation guide](https://zitsen.github.io/atim/windows/).
+**Windows users**: Atim runs natively via [psmux](https://github.com/psmux/psmux) (a Windows tmux replacement). See the [Windows installation guide](https://zitsen.github.io/atim/windows/).
 
 ## Configuration
 

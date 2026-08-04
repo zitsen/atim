@@ -148,11 +148,13 @@ async fn main() -> anyhow::Result<()> {
     let byte_offsets = Arc::new(Mutex::new(byte_offsets));
 
     // 4. Ensure terminal session exists, then rebuild window bindings.
-    //    On Linux/macOS this is tmux; on Windows it's the ConPTY manager.
+    //    Linux/macOS: tmux CLI. Windows: psmux (native Windows tmux
+    //    replacement, tmux-command-compatible — `winget install psmux`).
     use atim_core::terminal::TerminalManager;
     #[cfg(windows)]
-    let tmux_mgr: std::sync::Arc<dyn TerminalManager> =
-        std::sync::Arc::new(atim_tmux::windows::WindowsTerminalManager::new());
+    let tmux_mgr: std::sync::Arc<dyn TerminalManager> = std::sync::Arc::new(
+        atim_tmux::manager::TmuxManager::new(&config.tmux_session_name).with_binary("psmux"),
+    );
     #[cfg(not(windows))]
     let tmux_mgr: std::sync::Arc<dyn TerminalManager> = std::sync::Arc::new(
         atim_tmux::manager::TmuxManager::new(&config.tmux_session_name),

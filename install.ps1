@@ -23,6 +23,32 @@ $ATIM_HOME = if ($env:ATIM_DIR) { $env:ATIM_DIR } else { Join-Path $HOME ".atim"
 function Write-Info($msg) { Write-Host "[*] $msg" -ForegroundColor Cyan }
 function Write-Err($msg) { Write-Host "[!] $msg" -ForegroundColor Red; exit 1 }
 
+# ── Install psmux (Windows tmux replacement) ──
+
+function Install-Psmux {
+    if (Get-Command psmux -ErrorAction SilentlyContinue) {
+        Write-Info "psmux already installed."
+        return
+    }
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        Write-Info "Installing psmux via winget..."
+        winget install psmux --accept-package-agreements --accept-source-agreements
+        return
+    }
+    if (Get-Command scoop -ErrorAction SilentlyContinue) {
+        Write-Info "Installing psmux via scoop..."
+        scoop bucket add psmux https://github.com/psmux/scoop-psmux
+        scoop install psmux
+        return
+    }
+    if (Get-Command choco -ErrorAction SilentlyContinue) {
+        Write-Info "Installing psmux via choco..."
+        choco install psmux -y
+        return
+    }
+    Write-Err "psmux is required (tmux replacement). Install with: winget install psmux"
+}
+
 # ── Platform detection ──
 
 function Get-Target {
@@ -130,6 +156,7 @@ function Install-Service {
 # ── Main ──
 
 Write-Info "Atim installer for Windows"
+Install-Psmux
 Install-Atim
 Write-Config
 Install-Service

@@ -1,5 +1,7 @@
-use std::path::PathBuf;
 use std::process::Command;
+
+#[cfg(not(windows))]
+use std::path::PathBuf;
 
 pub enum ServiceCommand {
     Install,
