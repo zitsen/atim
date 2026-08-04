@@ -74,7 +74,7 @@ function Install-Atim {
     }
 
     # Windows binaries are packaged as tar.gz with the .exe inside.
-    $url = "https://github.com/$ATIM_REPO/releases/download/v$version/atim-$target-pc-windows-gnu.tar.gz"
+    $url = "https://github.com/$ATIM_REPO/releases/download/v$version/atim-$target-pc-windows-msvc.tar.gz"
     Write-Info "Downloading atim $version from $url"
     $archivePath = Join-Path $env:TEMP "atim-$version.tar.gz"
 

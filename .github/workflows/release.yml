@@ -11,24 +11,23 @@ permissions:
 jobs:
   build:
     name: Build ${{ matrix.target }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - x86_64-unknown-linux-musl
-          - aarch64-unknown-linux-musl
-          - x86_64-pc-windows-gnu
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libssl-dev perl mingw-w64
-        if: matrix.target == 'x86_64-pc-windows-gnu'
-
-      - name: Install system dependencies
+      - name: Install system dependencies (Linux)
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libssl-dev perl
-        if: matrix.target != 'x86_64-pc-windows-gnu'
+        if: runner.os == 'Linux'
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -40,19 +39,23 @@ jobs:
           curl -LO "https://ziglang.org/download/0.14.0/zig-linux-x86_64-0.14.0.tar.xz"
           tar xf "zig-linux-x86_64-0.14.0.tar.xz"
           echo "$PWD/zig-linux-x86_64-0.14.0" >> "$GITHUB_PATH"
-        if: matrix.target != 'x86_64-pc-windows-gnu'
+        if: runner.os == 'Linux'
 
       - name: Install cargo-zigbuild
         uses: taiki-e/install-action@cargo-zigbuild
-        if: matrix.target != 'x86_64-pc-windows-gnu'
+        if: runner.os == 'Linux'
 
-      - name: Build release binary (zigbuild)
+      - name: Install protoc (Windows)
+        run: choco install protoc -y
+        if: runner.os == 'Windows'
+
+      - name: Build release binary (zigbuild, Linux)
         run: cargo zigbuild --release --target ${{ matrix.target }}
-        if: matrix.target != 'x86_64-pc-windows-gnu'
+        if: runner.os == 'Linux'
 
-      - name: Build release binary (mingw cross)
+      - name: Build release binary (MSVC, Windows)
         run: cargo build --release --target ${{ matrix.target }}
-        if: matrix.target == 'x86_64-pc-windows-gnu'
+        if: runner.os == 'Windows'
 
       - name: Package binary
         shell: bash
