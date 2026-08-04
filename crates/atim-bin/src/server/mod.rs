@@ -1327,6 +1327,18 @@ impl Server {
                         ));
                         wb.session_id = sid.clone();
                     }
+                    // Re-bind the current working directory from the live pane.
+                    if let Ok(pane_path) = self.tmux_mgr.pane_cwd(&window_id).await
+                        && !pane_path.is_empty()
+                        && wb.cwd != pane_path
+                    {
+                        changes.push(format!(
+                            "cwd: {} → {}",
+                            if wb.cwd.is_empty() { "none" } else { &wb.cwd },
+                            pane_path,
+                        ));
+                        wb.cwd = pane_path;
+                    }
                 }
 
                 // Sync display_name and window_name when chat_name differs.
