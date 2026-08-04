@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::io::Read;
-use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
+
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
 
 /// Run the Atim Hook — Claude Code SessionStart hook.
 ///
@@ -105,11 +107,18 @@ fn atomic_write_json(path: &PathBuf, data: &HashMap<String, String>) -> std::io:
 
     let tmp_path = path.with_extension("tmp");
     let file = std::fs::File::create(&tmp_path)?;
-    let fd = file.as_raw_fd();
-    unsafe { libc::flock(fd, libc::LOCK_EX) };
-    std::fs::write(&tmp_path, &json)?;
-    file.sync_all()?;
-    unsafe { libc::flock(fd, libc::LOCK_UN) };
+    #[cfg(unix)]
+    {
+        let fd = file.as_raw_fd();
+        unsafe { libc::flock(fd, libc::LOCK_EX) };
+        std::fs::write(&tmp_path, &json)?;
+        file.sync_all()?;
+        unsafe { libc::flock(fd, libc::LOCK_UN) };
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&tmp_path, &json)?;
+    }
     drop(file);
 
     std::fs::rename(&tmp_path, path)?;

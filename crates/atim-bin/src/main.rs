@@ -147,7 +147,11 @@ async fn main() -> anyhow::Result<()> {
     let byte_offsets = state_mgr.load_monitor_offsets().await?;
     let byte_offsets = Arc::new(Mutex::new(byte_offsets));
 
-    // 4. Ensure tmux session exists, then rebuild window bindings
+    // 4. Ensure terminal session exists, then rebuild window bindings.
+    //    On Linux/macOS this is tmux; on Windows it's the ConPTY manager.
+    #[cfg(windows)]
+    let tmux_mgr = atim_tmux::windows::WindowsTerminalManager::new();
+    #[cfg(not(windows))]
     let tmux_mgr = atim_tmux::manager::TmuxManager::new(&config.tmux_session_name);
 
     tmux_mgr.ensure_session().await?;
