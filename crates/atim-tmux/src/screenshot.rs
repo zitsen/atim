@@ -9,6 +9,7 @@ use atim_core::error::{Error, Result};
 ///
 /// Order: Nerd Font variants first (richer glyph coverage), then
 /// DejaVu Sans Mono, then Adwaita Mono as a last resort.
+/// Windows paths are checked too (`C:\Windows\Fonts\consola.ttf`).
 const LATIN_FONT_PATHS: &[&str] = &[
     // Meslo Nerd Font (most popular, ships with many dev setups)
     "/usr/share/fonts/TTF/MesloLGMNerdFontMono-Regular.ttf",
@@ -20,6 +21,9 @@ const LATIN_FONT_PATHS: &[&str] = &[
     "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",
     // Last resort
     "/usr/share/fonts/Adwaita/AdwaitaMono-Regular.ttf",
+    // Windows fonts
+    "C:\\Windows\\Fonts\\consola.ttf",
+    "C:\\Windows\\Fonts\\cour.ttf",
 ];
 
 /// CJK fallback font paths.
@@ -27,6 +31,10 @@ const CJK_FONT_PATHS: &[&str] = &[
     "/usr/share/fonts/wenquanyi/wqy-zenhei/wqy-zenhei.ttc",
     "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/noto-cjk/NotoSansCJK-SC-Regular.otf",
+    // Windows fonts
+    "C:\\Windows\\Fonts\\msyh.ttc",
+    "C:\\Windows\\Fonts\\simhei.ttf",
+    "C:\\Windows\\Fonts\\simsun.ttc",
 ];
 
 // ── ANSI color mapping ──

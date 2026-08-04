@@ -3,15 +3,11 @@ use std::time::Duration;
 
 use atim_core::error::{Error, Result};
 use atim_core::message::WindowId;
+use atim_core::terminal::WindowInfo;
 use tokio::process::Command;
 
-/// Info about a single tmux window.
-#[derive(Debug, Clone)]
-pub struct WindowInfo {
-    pub window_id: WindowId,
-    pub name: String,
-    pub current_command: String,
-}
+/// Alias for the shared WindowInfo type (defined in atim-core).
+pub use atim_core::terminal::WindowInfo as TmuxWindowInfo;
 
 /// Manages tmux windows for agent sessions.
 ///
@@ -392,5 +388,103 @@ impl TmuxManager {
             ])
             .await?;
         Ok(out.trim().to_string())
+    }
+}
+
+// ── TerminalManager trait implementation ──
+
+#[async_trait::async_trait]
+impl atim_core::terminal::TerminalManager for TmuxManager {
+    fn session_name(&self) -> &str {
+        &self.session_name
+    }
+
+    async fn list_windows(&self) -> Result<Vec<WindowInfo>> {
+        TmuxManager::list_windows(self).await
+    }
+
+    async fn window_map(&self) -> Result<HashMap<String, WindowInfo>> {
+        TmuxManager::window_map(self).await
+    }
+
+    async fn find_window(&self, window_id: &WindowId) -> Result<WindowInfo> {
+        TmuxManager::find_window(self, window_id).await
+    }
+
+    async fn window_exists(&self, window_id: &WindowId) -> bool {
+        TmuxManager::window_exists(self, window_id).await
+    }
+
+    async fn list_all_windows(&self) -> Result<Vec<(WindowInfo, String)>> {
+        TmuxManager::list_all_windows(self).await
+    }
+
+    async fn new_window(&self, name: &str, cwd: &str) -> Result<WindowId> {
+        TmuxManager::new_window(self, name, cwd).await
+    }
+
+    async fn kill_window(&self, window_id: &WindowId) -> Result<()> {
+        TmuxManager::kill_window(self, window_id).await
+    }
+
+    async fn rename_window(&self, window_id: &WindowId, name: &str) -> Result<()> {
+        TmuxManager::rename_window(self, window_id, name).await
+    }
+
+    async fn capture_pane(&self, window_id: &WindowId) -> Result<String> {
+        TmuxManager::capture_pane(self, window_id).await
+    }
+
+    async fn send_text(&self, window_id: &WindowId, text: &str) -> Result<()> {
+        TmuxManager::send_text(self, window_id, text).await
+    }
+
+    async fn send_key(&self, window_id: &WindowId, key: &str) -> Result<()> {
+        TmuxManager::send_key(self, window_id, key).await
+    }
+
+    async fn send_line(&self, window_id: &WindowId, text: &str) -> Result<()> {
+        TmuxManager::send_line(self, window_id, text).await
+    }
+
+    async fn send_line_chars(
+        &self,
+        window_id: &WindowId,
+        text: &str,
+        char_delay_ms: u64,
+    ) -> Result<()> {
+        TmuxManager::send_line_chars(self, window_id, text, char_delay_ms).await
+    }
+
+    async fn interrupt(&self, window_id: &WindowId) -> Result<()> {
+        TmuxManager::interrupt(self, window_id).await
+    }
+
+    async fn session_exists(&self) -> bool {
+        TmuxManager::session_exists(self).await
+    }
+
+    async fn create_session(&self) -> Result<()> {
+        TmuxManager::create_session(self).await
+    }
+
+    async fn ensure_session(&self) -> Result<()> {
+        TmuxManager::ensure_session(self).await
+    }
+
+    async fn pane_cwd(&self, window_id: &WindowId) -> Result<String> {
+        TmuxManager::pane_cwd(self, window_id).await
+    }
+
+    async fn move_window_into_session(
+        &self,
+        src_session: &str,
+        window_id: &WindowId,
+    ) -> Result<()> {
+        TmuxManager::move_window_into_session(self, src_session, window_id).await
+    }
+
+    async fn screenshot(&self, window_id: &WindowId) -> Result<Vec<u8>> {
+        TmuxManager::screenshot(self, window_id).await
     }
 }

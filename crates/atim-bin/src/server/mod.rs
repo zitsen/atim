@@ -14,10 +14,10 @@ use atim_core::message::{
 };
 use atim_core::message::{InteractiveUi, UiKind};
 use atim_core::session::{ChatBinding, RuntimeState, SessionInfo, WindowBinding};
+use atim_core::terminal::TerminalManager;
 use atim_monitor::monitor::{MonitorEvent, resolve_jsonl};
 use atim_queue::message_queue::MessageQueue;
 use atim_state::persistence::StateManager;
-use atim_tmux::manager::TmuxManager;
 use tokio::sync::Mutex;
 
 use crate::browser;
@@ -31,12 +31,18 @@ type UserTriple = (i64, i64);
 /// Key type for tool_use message tracking: (chat_id, thread_id, tool_use_id).
 type ToolUseMsgKey = (i64, i64, String);
 
+/// Terminal manager type used by the server.
+///
+/// On Linux/macOS this is `TmuxManager` (tmux CLI). On Windows it is
+/// the ConPTY-based `WindowsTerminalManager`.
+pub type TerminalMgr = Arc<dyn TerminalManager>;
+
 /// The main application server — routes IM events to tmux and monitor
 /// events back to IM.
 pub struct Server {
     pub config: Config,
     pub state_mgr: StateManager,
-    pub tmux_mgr: TmuxManager,
+    pub tmux_mgr: TerminalMgr,
     /// Message queue for IM message ordering (reserved for future use).
     #[allow(dead_code)]
     pub queue: Arc<Mutex<MessageQueue>>,
@@ -4219,7 +4225,7 @@ impl Server {
 /// Sends/edits a message in the chat with the accumulated output.
 /// Stops when a shell prompt is detected or 30s timeout.
 async fn run_capture_loop(
-    tmux: TmuxManager,
+    tmux: TerminalMgr,
     im: Arc<dyn ImAdapter>,
     window_id: String,
     target: MessageTarget,
@@ -4823,7 +4829,7 @@ fn ui_to_buttons(ui: &InteractiveUi) -> Vec<Vec<Button>> {
 
 /// Handle a UI navigation callback by sending the corresponding key to the session.
 async fn handle_ui_callback(
-    tmux: &TmuxManager,
+    tmux: &TerminalMgr,
     window_id: &str,
     callback_data: &str,
 ) -> Result<()> {

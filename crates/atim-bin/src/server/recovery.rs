@@ -456,7 +456,7 @@ impl super::Server {
         for (w, session) in &all_windows {
             if w.name == name {
                 // Move into atim session so future lookups work directly
-                if session != &self.tmux_mgr.session_name {
+                if session != self.tmux_mgr.session_name() {
                     self.tmux_mgr
                         .move_window_into_session(session, &w.window_id)
                         .await
@@ -468,7 +468,7 @@ impl super::Server {
         // Try contains match across all sessions
         for (w, session) in &all_windows {
             if w.name.contains(name) || name.contains(&w.name) {
-                if session != &self.tmux_mgr.session_name {
+                if session != self.tmux_mgr.session_name() {
                     self.tmux_mgr
                         .move_window_into_session(session, &w.window_id)
                         .await
