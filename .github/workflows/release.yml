@@ -60,8 +60,14 @@ jobs:
           BIN_NAME="atim"
           TARGET_DIR="target/${{ matrix.target }}/release"
           ARCHIVE_NAME="atim-${{ matrix.target }}.tar.gz"
-          cp "$TARGET_DIR/$BIN_NAME" "$BIN_NAME"
-          tar czf "$ARCHIVE_NAME" "$BIN_NAME"
+          # Windows produces atim.exe; Linux produces atim
+          if [ -f "$TARGET_DIR/$BIN_NAME.exe" ]; then
+            cp "$TARGET_DIR/$BIN_NAME.exe" "$BIN_NAME.exe"
+            tar czf "$ARCHIVE_NAME" "$BIN_NAME.exe"
+          else
+            cp "$TARGET_DIR/$BIN_NAME" "$BIN_NAME"
+            tar czf "$ARCHIVE_NAME" "$BIN_NAME"
+          fi
           echo "archive=$ARCHIVE_NAME" >> $GITHUB_ENV
 
       - name: Generate checksum
