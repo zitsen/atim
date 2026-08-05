@@ -60,7 +60,8 @@ function Get-Target {
 
 function Get-LatestVersion($repo) {
     $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest" -Headers @{ "User-Agent" = "atim-installer" }
-    return $release.tag_name.TrimStart("v")
+    # PS 5.1: TrimStart with a string arg fails (string→char[] conversion) — use -replace
+    return $release.tag_name -replace '^v', ''
 }
 
 # ── Download and install ──
@@ -81,8 +82,9 @@ function Install-Atim {
     Invoke-WebRequest -Uri $url -OutFile $archivePath
 
     # Verify checksum
+    # PS 5.1: Split with string arg is unreliable — use -split ' '
     $shaUrl = "$url.sha256"
-    $expected = (Invoke-WebRequest -Uri $shaUrl).Content.Trim().Split(" ")[0]
+    $expected = ((Invoke-WebRequest -Uri $shaUrl).Content.Trim() -split ' ')[0]
     $actual = (Get-FileHash -Path $archivePath -Algorithm SHA256).Hash.ToLower()
     if ($actual -ne $expected) {
         Write-Err "Checksum verification failed: expected $expected, got $actual"
