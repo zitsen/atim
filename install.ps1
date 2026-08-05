@@ -81,10 +81,11 @@ function Install-Atim {
 
     Invoke-WebRequest -Uri $url -OutFile $archivePath
 
-    # Verify checksum
-    # PS 5.1: Split with string arg is unreliable — use -split ' '
+    # Verify checksum — handle PowerShell 5.1 byte[] response
     $shaUrl = "$url.sha256"
-    $expected = ((Invoke-WebRequest -Uri $shaUrl).Content.Trim() -split ' ')[0]
+    $shaResp = Invoke-WebRequest -Uri $shaUrl
+    $shaText = [System.Text.Encoding]::UTF8.GetString($shaResp.Content)
+    $expected = $shaText.Trim().Split(" ")[0]
     $actual = (Get-FileHash -Path $archivePath -Algorithm SHA256).Hash.ToLower()
     if ($actual -ne $expected) {
         Write-Err "Checksum verification failed: expected $expected, got $actual"
