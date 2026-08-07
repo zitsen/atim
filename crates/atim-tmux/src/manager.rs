@@ -243,8 +243,9 @@ impl TmuxManager {
     /// Send literal text to a pane.
     ///
     /// Uses `-l` (literal) to avoid interpreting special characters.
+    /// Uses `--` to prevent tmux from parsing text starting with `--` as flags.
     pub async fn send_text(&self, window_id: &WindowId, text: &str) -> Result<()> {
-        self.tmux(&["send-keys", "-t", &window_id.0, "-l", text])
+        self.tmux(&["send-keys", "-t", &window_id.0, "-l", "--", text])
             .await?;
         Ok(())
     }

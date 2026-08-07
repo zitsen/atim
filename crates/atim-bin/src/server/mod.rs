@@ -2120,10 +2120,16 @@ impl Server {
                                 let _ = self.im_adapter.add_reaction(&target, mid, "DONE").await;
                             }
                         }
-                        Err(e) => tracing::error!(
-                            "[handle_text_message] window={} send_line failed: {e}",
-                            window_id_str,
-                        ),
+                        Err(e) => {
+                            tracing::error!(
+                                "[handle_text_message] window={} send_line failed: {e}",
+                                window_id_str,
+                            );
+                            let _ = self
+                                .im_adapter
+                                .send_message(&target, &format!("❌ 发送失败: {e}"))
+                                .await;
+                        }
                     }
                     result?;
                     let sc_chat_id = binding.group_chat_id.unwrap_or(binding.chat_id);
