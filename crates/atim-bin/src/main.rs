@@ -134,10 +134,12 @@ async fn main() -> anyhow::Result<()> {
     let _ = atim_state::persistence::StateManager::ensure_config_toml(&config.atim_dir)?;
 
     // 2. Setup logging
+    // Default: info level, hyper_util suppressed to WARN (noisy connection pool logs).
+    // RUST_LOG overrides everything when set by the user.
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,hyper_util=warn")),
         )
         .init();
 
