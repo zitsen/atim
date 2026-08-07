@@ -1051,15 +1051,14 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
     let chat_id_atim = adapter.register_chat(chat_id).await;
 
     // For topic/thread messages, use root_id as thread_id (consistent per-topic routing).
-    // For non-topic group chats, use a thread_id derived from chat_id but
-    // distinct from it, so the binding model has a unique (chat_id, thread_id)
-    // pair per group without conflating the two dimensions.
+    // For non-topic chats (both p2p and group), use a thread_id derived from chat_id.
+    // This keeps text messages consistent with card actions, which derive
+    // thread_id from chat_id when no thread/root_id is present (Feishu card
+    // events don't include chat_type, so we can't distinguish p2p from group).
     let thread_id = if let Some(root_id) = root_id {
         Some(adapter.register_thread(root_id).await)
-    } else if chat_type == "group" {
-        Some(adapter.register_chat_thread(chat_id).await)
     } else {
-        None
+        Some(adapter.register_chat_thread(chat_id).await)
     };
 
     let chat_name = if chat_type == "group" {
@@ -1302,7 +1301,9 @@ async fn handle_card_action(adapter: &FeishuAdapter, payload: &serde_json::Value
         // Always derive a thread_id from chat_id for card actions.
         // Feishu doesn't include chat_type in card events, so we can't
         // distinguish p2p from group. Using the chat-derived thread_id
-        // ensures the binding lookup works for both.
+        // keeps card actions consistent with text messages, which now
+        // also use register_chat_thread for non-topic chats (both p2p
+        // and group).
         Some(adapter.register_chat_thread(chat_id).await)
     };
 
