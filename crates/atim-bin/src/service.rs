@@ -237,7 +237,7 @@ fn install_service_windows() -> Result<(), Box<dyn std::error::Error>> {
         // Use Windows-style path separators for Task Scheduler XML
         let log_path = format!("{}\\.atim\\atim-service.log", home);
         let xml = format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
+            r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
     <Description>Atim - AI Agent Through IM</Description>
@@ -283,9 +283,15 @@ fn install_service_windows() -> Result<(), Box<dyn std::error::Error>> {
             log_path,
         );
 
-        // Write temp XML file
+        // Write temp XML file. schtasks /xml requires UTF-16 LE with BOM
+        // (declared encoding="UTF-16"); a plain UTF-8 write causes
+        // "无法切换编码 / cannot switch encoding" at the encoding declaration.
         let tmp_xml = std::env::temp_dir().join("atim-task.xml");
-        std::fs::write(&tmp_xml, &xml)?;
+        let mut utf16: Vec<u8> = vec![0xFF, 0xFE]; // UTF-16 LE BOM
+        for unit in xml.encode_utf16() {
+            utf16.extend_from_slice(&unit.to_le_bytes());
+        }
+        std::fs::write(&tmp_xml, &utf16)?;
 
         // Create the scheduled task
         let output = Command::new("schtasks")
