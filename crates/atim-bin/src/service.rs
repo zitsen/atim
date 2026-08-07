@@ -33,6 +33,11 @@ pub fn run_service(
                 ServiceCommand::Uninstall => {
                     // Stop first
                     if system_level {
+                        if !is_elevated() {
+                            println!("Requesting administrator privileges (UAC)...");
+                            elevate_self(&["service", "--system", "--uninstall"])?;
+                            return Ok(());
+                        }
                         sc(&["stop", "atim"]).ok();
                     } else {
                         let _ = Command::new("taskkill")
@@ -61,6 +66,11 @@ pub fn run_service(
                 ServiceCommand::Enable => enable_service_windows()?,
                 ServiceCommand::Start => {
                     if system_level {
+                        if !is_elevated() {
+                            println!("Requesting administrator privileges (UAC)...");
+                            elevate_self(&["service", "--system", "--start"])?;
+                            return Ok(());
+                        }
                         sc(&["start", "atim"])?;
                     } else {
                         let status = Command::new("schtasks")
@@ -80,6 +90,11 @@ pub fn run_service(
                 }
                 ServiceCommand::Stop => {
                     if system_level {
+                        if !is_elevated() {
+                            println!("Requesting administrator privileges (UAC)...");
+                            elevate_self(&["service", "--system", "--stop"])?;
+                            return Ok(());
+                        }
                         sc(&["stop", "atim"])?;
                     } else {
                         let _ = Command::new("taskkill")
@@ -91,6 +106,11 @@ pub fn run_service(
                 }
                 ServiceCommand::Restart => {
                     if system_level {
+                        if !is_elevated() {
+                            println!("Requesting administrator privileges (UAC)...");
+                            elevate_self(&["service", "--system", "--restart"])?;
+                            return Ok(());
+                        }
                         sc(&["stop", "atim"]).ok();
                         std::thread::sleep(std::time::Duration::from_millis(1000));
                         sc(&["start", "atim"])?;
@@ -357,6 +377,16 @@ fn install_service_windows() -> Result<(), Box<dyn std::error::Error>> {
 fn install_service_sc() -> Result<(), Box<dyn std::error::Error>> {
     let binary_path =
         std::env::current_exe().map_err(|_| "Could not determine binary path".to_string())?;
+
+    // If not elevated, re-launch ourselves with UAC to get admin rights.
+    if !is_elevated() {
+        println!("Requesting administrator privileges (UAC)...");
+        elevate_self(&["service", "--system", "--install"])?;
+        // The elevated process handles the install; report as pending.
+        println!("Elevated process launched. Check the UAC prompt.");
+        return Ok(());
+    }
+
     // sc.exe requires "KEY= VALUE" as single args (space after = is part of the syntax).
     let bin_path_arg = format!("binPath= \"{}\"", binary_path.display());
     let start_arg = "start= auto".to_string();
@@ -377,11 +407,40 @@ fn install_service_sc() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("[debug] sc create stdout: {stdout}");
         eprintln!("[debug] sc create stderr: {stderr}");
         eprintln!("Failed to install service. This requires administrator privileges.");
-        eprintln!("Right-click your terminal and select 'Run as administrator', then retry.");
         std::process::exit(1);
     }
 
     println!("Service 'atim' installed. Start with `atim service --start`.");
+    Ok(())
+}
+
+#[cfg(windows)]
+fn is_elevated() -> bool {
+    // whoami /groups prints integrity level SID; S-1-16-12288 = high (elevated),
+    // S-1-16-8192 = medium (not elevated).
+    if let Ok(out) = Command::new("whoami").args(["/groups"]).output() {
+        let text = String::from_utf8_lossy(&out.stdout);
+        return text.contains("S-1-16-12288");
+    }
+    false
+}
+
+#[cfg(windows)]
+fn elevate_self(args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
+    let exe = std::env::current_exe().map_err(|_| "Could not determine binary path".to_string())?;
+    let args_str = args.join(" ");
+    // Start-Process -Verb RunAs triggers the UAC elevation prompt.
+    let ps = format!(
+        "Start-Process -FilePath '{}' -ArgumentList '{}' -Verb RunAs",
+        exe.display(),
+        args_str.replace('\'', "''"),
+    );
+    let status = Command::new("powershell")
+        .args(["-NoProfile", "-Command", &ps])
+        .status()?;
+    if !status.success() {
+        return Err("UAC elevation was declined or failed".into());
+    }
     Ok(())
 }
 
