@@ -234,9 +234,10 @@ fn install_service_windows() -> Result<(), Box<dyn std::error::Error>> {
         .status()
         .is_ok()
     {
-        let log_path = format!("{}/.atim/atim-service.log", home);
+        // Use Windows-style path separators for Task Scheduler XML
+        let log_path = format!("{}\\.atim\\atim-service.log", home);
         let xml = format!(
-            r#"<?xml version="1.0" encoding="UTF-16"?>
+            r#"<?xml version="1.0" encoding="UTF-8"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
     <Description>Atim - AI Agent Through IM</Description>
@@ -287,7 +288,7 @@ fn install_service_windows() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::write(&tmp_xml, &xml)?;
 
         // Create the scheduled task
-        let status = Command::new("schtasks")
+        let output = Command::new("schtasks")
             .args([
                 "/create",
                 "/tn",
@@ -296,15 +297,15 @@ fn install_service_windows() -> Result<(), Box<dyn std::error::Error>> {
                 tmp_xml.to_str().unwrap_or(""),
                 "/f",
             ])
-            .stdout(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .status()?;
+            .output()?;
 
         let _ = std::fs::remove_file(&tmp_xml);
 
-        if !status.success() {
-            eprintln!("Failed to create scheduled task. Try running as administrator:");
-            eprintln!("  atim service --install  (in an elevated terminal)");
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!("Failed to create scheduled task: {}", stderr.trim());
             // Fall back to sc.exe
             return install_service_sc();
         }
