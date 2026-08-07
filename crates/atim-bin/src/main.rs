@@ -14,7 +14,7 @@ mod server;
 mod service;
 
 #[derive(Parser)]
-#[command(name = "atim", about = "IM-to-Claude-Code bridge via tmux")]
+#[command(name = "atim", about = "IM-to-Claude-Code bridge via tmux", version)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,

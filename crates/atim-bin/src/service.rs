@@ -321,17 +321,12 @@ fn install_service_windows() -> Result<(), Box<dyn std::error::Error>> {
 fn install_service_sc() -> Result<(), Box<dyn std::error::Error>> {
     let binary_path =
         std::env::current_exe().map_err(|_| "Could not determine binary path".to_string())?;
+    // sc.exe requires "KEY= VALUE" as single args (space after = is part of the syntax).
     let bin_path_arg = format!("binPath= \"{}\"", binary_path.display());
+    let start_arg = "start= auto".to_string();
+    let display_arg = "displayname= Atim - AI Agent Through IM".to_string();
     let status = Command::new("sc")
-        .args([
-            "create",
-            "atim",
-            "start=",
-            "auto",
-            &bin_path_arg,
-            "displayname=",
-            "Atim - AI Agent Through IM",
-        ])
+        .args(["create", "atim", &start_arg, &bin_path_arg, &display_arg])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .status()?;
