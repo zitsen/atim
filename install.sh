@@ -344,6 +344,13 @@ escape_toml_string() {
 }
 
 write_config_toml() {
+  # Skip if config already exists (preserve user's existing configuration)
+  if [ -f "$ATIM_CONFIG_FILE" ]; then
+    info "Config file already exists at ${ATIM_CONFIG_FILE} — skipping."
+    info "To regenerate, delete it and re-run the installer."
+    return 0
+  fi
+
   local backend token users app_id app_secret
 
   backend="$(escape_toml_string "$IM_BACKEND")"

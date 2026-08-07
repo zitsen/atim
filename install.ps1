@@ -108,6 +108,13 @@ function Install-Atim {
 # ── Config ──
 
 function Write-Config {
+    $configPath = Join-Path $ATIM_HOME "config.toml"
+    # Skip if config already exists (preserve user's existing configuration)
+    if (Test-Path $configPath) {
+        Write-Info "Config file already exists at $configPath — skipping."
+        Write-Info "To regenerate, delete it and re-run the installer."
+        return
+    }
     New-Item -ItemType Directory -Force -Path $ATIM_HOME | Out-Null
     $backend = if ($env:ATIM_IM_BACKEND) { $env:ATIM_IM_BACKEND } else { "telegram" }
     $token = if ($env:ATIM_TELEGRAM_TOKEN) { $env:ATIM_TELEGRAM_TOKEN } else { "" }
