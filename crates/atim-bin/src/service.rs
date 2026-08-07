@@ -1,6 +1,5 @@
 use std::process::Command;
 
-#[cfg(not(windows))]
 use std::path::PathBuf;
 
 pub enum ServiceCommand {
@@ -45,11 +44,26 @@ pub fn run_service(
                             .stdout(std::process::Stdio::null())
                             .status();
                     }
-                    // Remove the task/service
+                    // Remove the task/service/startup script
                     if system_level {
                         sc(&["delete", "atim"])?;
                         println!("Service 'atim' removed.");
                     } else {
+                        // Remove Startup folder script
+                        if let Some(appdata) = std::env::var_os("APPDATA") {
+                            let script_path = PathBuf::from(appdata)
+                                .join("Microsoft")
+                                .join("Windows")
+                                .join("Start Menu")
+                                .join("Programs")
+                                .join("Startup")
+                                .join("atim.cmd");
+                            if script_path.exists() {
+                                let _ = std::fs::remove_file(&script_path);
+                                println!("Removed startup script {}", script_path.display());
+                            }
+                        }
+                        // Remove schtasks task (if present from older installs)
                         let status = Command::new("schtasks")
                             .args(["/delete", "/tn", "Atim", "/f"])
                             .stdout(std::process::Stdio::piped())
@@ -57,10 +71,8 @@ pub fn run_service(
                             .status()?;
                         if status.success() {
                             println!("Atim task removed.");
-                        } else {
-                            eprintln!("Failed to remove task.");
-                            std::process::exit(1);
                         }
+                        println!("Atim uninstalled.");
                     }
                 }
                 ServiceCommand::Enable => enable_service_windows()?,
@@ -73,18 +85,15 @@ pub fn run_service(
                         }
                         sc(&["start", "atim"])?;
                     } else {
-                        let status = Command::new("schtasks")
-                            .args(["/run", "/tn", "Atim"])
-                            .stdout(std::process::Stdio::piped())
-                            .stderr(std::process::Stdio::piped())
-                            .status()?;
-                        if status.success() {
-                            println!("Atim task started.");
+                        // Check if already running; if not, launch the process.
+                        let running = is_atim_running();
+                        if running {
+                            println!("Atim is already running.");
                         } else {
-                            eprintln!(
-                                "Task Scheduler start failed. Is the task registered? Run `atim service --install` first."
-                            );
-                            std::process::exit(1);
+                            let exe = std::env::current_exe()
+                                .map_err(|_| "Could not determine binary path".to_string())?;
+                            let _ = Command::new(exe).spawn();
+                            println!("Atim started.");
                         }
                     }
                 }
@@ -120,41 +129,49 @@ pub fn run_service(
                             .stdout(std::process::Stdio::null())
                             .status();
                         std::thread::sleep(std::time::Duration::from_millis(1000));
-                        let status = Command::new("schtasks")
-                            .args(["/run", "/tn", "Atim"])
-                            .stdout(std::process::Stdio::piped())
-                            .status()?;
-                        if status.success() {
-                            println!("Atim task restarted.");
-                        } else {
-                            eprintln!("Restart failed. Is the task registered?");
-                            std::process::exit(1);
-                        }
+                        let exe = std::env::current_exe()
+                            .map_err(|_| "Could not determine binary path".to_string())?;
+                        let _ = Command::new(exe).spawn();
+                        println!("Atim restarted.");
                     }
                 }
                 ServiceCommand::Status => {
                     if system_level {
                         let _ = sc(&["query", "atim"]);
                     } else {
+                        // Check startup registration + running state
+                        let mut registered = false;
+                        if let Some(appdata) = std::env::var_os("APPDATA") {
+                            let script_path = PathBuf::from(appdata)
+                                .join("Microsoft")
+                                .join("Windows")
+                                .join("Start Menu")
+                                .join("Programs")
+                                .join("Startup")
+                                .join("atim.cmd");
+                            registered = script_path.exists();
+                        }
+                        // Also check schtasks (older installs)
                         let output = Command::new("schtasks")
                             .args(["/query", "/tn", "Atim", "/fo", "list"])
                             .output()?;
                         let text = String::from_utf8_lossy(&output.stdout);
-                        if text.contains("Atim") {
-                            println!("Atim task: registered.");
-                            let ps = Command::new("tasklist")
-                                .args(["/fi", "imagename eq atim.exe", "/fo", "csv"])
-                                .output()?;
-                            let ps_text = String::from_utf8_lossy(&ps.stdout);
-                            if ps_text.contains("atim.exe") {
-                                println!("Status: running");
+                        let task_registered = text.contains("Atim");
+                        let running = is_atim_running();
+                        println!(
+                            "Registered: {}",
+                            if registered || task_registered {
+                                "yes"
                             } else {
-                                println!("Status: not running");
+                                "no"
                             }
-                        } else {
-                            println!(
-                                "Atim task: not registered (run `atim service --install` first)"
-                            );
+                        );
+                        println!(
+                            "Status: {}",
+                            if running { "running" } else { "not running" }
+                        );
+                        if !registered && !task_registered {
+                            println!("Not installed. Run `atim service --install`.");
                         }
                     }
                 }
@@ -244,20 +261,37 @@ fn install_service_windows() -> Result<(), Box<dyn std::error::Error>> {
     let home = home::home_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
+    let log_path = format!("{home}\\.atim\\atim-service.log");
 
-    // schtasks available?
-    let schtasks_ok = Command::new("schtasks")
-        .args(["/?"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok();
-    if !schtasks_ok {
-        eprintln!("[debug] schtasks not available, falling back to sc.exe");
-        return install_service_sc();
+    // ── Path 1: Startup folder (most reliable, no admin, no Task Scheduler) ──
+    // %APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\atim.cmd
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        let startup_dir = PathBuf::from(appdata)
+            .join("Microsoft")
+            .join("Windows")
+            .join("Start Menu")
+            .join("Programs")
+            .join("Startup");
+        if let Ok(()) = std::fs::create_dir_all(&startup_dir) {
+            let script = format!(
+                "@echo off\r\n\"{}\" >> \"{}\" 2>&1\r\n",
+                binary_path.display(),
+                log_path
+            );
+            let script_path = startup_dir.join("atim.cmd");
+            if std::fs::write(&script_path, &script).is_ok() {
+                println!("Atim added to Startup folder. Starts on login.");
+                println!("Logs: {}", log_path);
+                return Ok(());
+            }
+            eprintln!(
+                "[debug] failed to write startup script {}",
+                script_path.display()
+            );
+        }
     }
 
-    // ── Path 1: simple schtasks /create (no XML → no encoding issues) ──
+    // ── Path 2: simple schtasks /create (no XML → no encoding issues) ──
     let task_name = "Atim";
     // Remove any existing task first — an existing "Atim" task (e.g. created
     // by a prior elevated run) makes /create fail with "Access is denied".
@@ -289,12 +323,11 @@ fn install_service_windows() -> Result<(), Box<dyn std::error::Error>> {
     let simple_err = String::from_utf8_lossy(&output.stderr).trim().to_string();
     eprintln!("[debug] schtasks simple create failed: {simple_err}");
 
-    // ── Path 2: schtasks /create /xml (UTF-16 LE BOM) ──
-    let log_path = format!("{}\\.atim\\atim-service.log", home);
-    // RedirectStdout is NOT a valid Task Scheduler XML node — wrap the command
-    // in cmd.exe /c with explicit redirect instead.
+    // ── Path 3: schtasks /create /xml (UTF-16 LE BOM) ──
+    // Wrap in cmd.exe /c with explicit redirect. NOTE: XML requires & to be
+    // escaped as &amp; (the `2>&1` redirect contains &).
     let cmd_arg = format!(
-        "/c \"\"{}\" >> \"{}\" 2>&1\"",
+        "/c \"\"{}\" >> \"{}\" 2&gt;&amp;1\"",
         binary_path.display(),
         log_path
     );
@@ -379,9 +412,9 @@ fn install_service_windows() -> Result<(), Box<dyn std::error::Error>> {
     let xml_err = String::from_utf8_lossy(&output.stderr).trim().to_string();
     eprintln!("[debug] schtasks xml create failed: {xml_err}");
 
-    // ── Path 3: sc.exe fallback (requires admin) ──
+    // ── Path 4: sc.exe fallback (requires admin) ──
     eprintln!(
-        "[debug] both schtasks paths failed (simple: '{simple_err}', xml: '{xml_err}'), falling back to sc.exe"
+        "[debug] startup + schtasks failed (simple: '{simple_err}', xml: '{xml_err}'), falling back to sc.exe"
     );
     install_service_sc()
 }
@@ -434,6 +467,18 @@ fn is_elevated() -> bool {
     if let Ok(out) = Command::new("whoami").args(["/groups"]).output() {
         let text = String::from_utf8_lossy(&out.stdout);
         return text.contains("S-1-16-12288");
+    }
+    false
+}
+
+#[cfg(windows)]
+fn is_atim_running() -> bool {
+    if let Ok(out) = Command::new("tasklist")
+        .args(["/fi", "imagename eq atim.exe", "/fo", "csv"])
+        .output()
+    {
+        let text = String::from_utf8_lossy(&out.stdout);
+        return text.contains("atim.exe");
     }
     false
 }
