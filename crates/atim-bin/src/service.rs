@@ -225,19 +225,46 @@ fn install_service_windows() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_default();
 
-    // Use Task Scheduler (no admin required). Falls back to sc.exe if
-    // schtasks is unavailable.
-    if Command::new("schtasks")
+    // schtasks available?
+    let schtasks_ok = Command::new("schtasks")
         .args(["/?"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .is_ok()
-    {
-        // Use Windows-style path separators for Task Scheduler XML
-        let log_path = format!("{}\\.atim\\atim-service.log", home);
-        let xml = format!(
-            r#"<?xml version="1.0" encoding="UTF-16"?>
+        .is_ok();
+    if !schtasks_ok {
+        eprintln!("[debug] schtasks not available, falling back to sc.exe");
+        return install_service_sc();
+    }
+
+    // ── Path 1: simple schtasks /create (no XML → no encoding issues) ──
+    let task_name = "Atim";
+    // Quote the binary path for /tr. /sc onlogon runs at logon.
+    let tr_arg = format!("\"{}\"", binary_path.display());
+    eprintln!(
+        "[debug] schtasks /create /tn {} /tr {} /sc onlogon /rl limited /f",
+        task_name, tr_arg
+    );
+    let output = Command::new("schtasks")
+        .args([
+            "/create", "/tn", task_name, "/tr", &tr_arg, "/sc", "onlogon", "/rl", "limited", "/f",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()?;
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        eprintln!("[debug] schtasks simple create stdout: {stdout}");
+        println!("Scheduled task 'Atim' created. Starts on login.");
+        return Ok(());
+    }
+    let simple_err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    eprintln!("[debug] schtasks simple create failed: {simple_err}");
+
+    // ── Path 2: schtasks /create /xml (UTF-16 LE BOM) ──
+    let log_path = format!("{}\\.atim\\atim-service.log", home);
+    let xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
     <Description>Atim - AI Agent Through IM</Description>
@@ -278,50 +305,52 @@ fn install_service_windows() -> Result<(), Box<dyn std::error::Error>> {
     </Exec>
   </Actions>
 </Task>"#,
-            binary_path.display(),
-            home,
-            log_path,
-        );
+        binary_path.display(),
+        home,
+        log_path,
+    );
 
-        // Write temp XML file. schtasks /xml requires UTF-16 LE with BOM
-        // (declared encoding="UTF-16"); a plain UTF-8 write causes
-        // "无法切换编码 / cannot switch encoding" at the encoding declaration.
-        let tmp_xml = std::env::temp_dir().join("atim-task.xml");
-        let mut utf16: Vec<u8> = vec![0xFF, 0xFE]; // UTF-16 LE BOM
-        for unit in xml.encode_utf16() {
-            utf16.extend_from_slice(&unit.to_le_bytes());
-        }
-        std::fs::write(&tmp_xml, &utf16)?;
+    let tmp_xml = std::env::temp_dir().join("atim-task.xml");
+    let mut utf16: Vec<u8> = vec![0xFF, 0xFE]; // UTF-16 LE BOM
+    for unit in xml.encode_utf16() {
+        utf16.extend_from_slice(&unit.to_le_bytes());
+    }
+    std::fs::write(&tmp_xml, &utf16)?;
 
-        // Create the scheduled task
-        let output = Command::new("schtasks")
-            .args([
-                "/create",
-                "/tn",
-                "Atim",
-                "/xml",
-                tmp_xml.to_str().unwrap_or(""),
-                "/f",
-            ])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()?;
+    eprintln!(
+        "[debug] schtasks /create /tn {task_name} /xml {} /f",
+        tmp_xml.display()
+    );
+    let output = Command::new("schtasks")
+        .args([
+            "/create",
+            "/tn",
+            task_name,
+            "/xml",
+            tmp_xml.to_str().unwrap_or(""),
+            "/f",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()?;
 
-        let _ = std::fs::remove_file(&tmp_xml);
+    let _ = std::fs::remove_file(&tmp_xml);
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!("Failed to create scheduled task: {}", stderr.trim());
-            // Fall back to sc.exe
-            return install_service_sc();
-        }
-
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        eprintln!("[debug] schtasks xml create stdout: {stdout}");
         println!("Scheduled task 'Atim' created. Starts on login, auto-restarts on failure.");
         println!("Logs: {}", log_path);
-        Ok(())
-    } else {
-        install_service_sc()
+        return Ok(());
     }
+    let xml_err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    eprintln!("[debug] schtasks xml create failed: {xml_err}");
+
+    // ── Path 3: sc.exe fallback (requires admin) ──
+    eprintln!(
+        "[debug] both schtasks paths failed (simple: '{simple_err}', xml: '{xml_err}'), falling back to sc.exe"
+    );
+    install_service_sc()
 }
 
 #[cfg(windows)]
@@ -332,13 +361,21 @@ fn install_service_sc() -> Result<(), Box<dyn std::error::Error>> {
     let bin_path_arg = format!("binPath= \"{}\"", binary_path.display());
     let start_arg = "start= auto".to_string();
     let display_arg = "displayname= Atim - AI Agent Through IM".to_string();
-    let status = Command::new("sc")
+    eprintln!(
+        "[debug] sc create atim {} {} {}",
+        start_arg, bin_path_arg, display_arg
+    );
+    let output = Command::new("sc")
         .args(["create", "atim", &start_arg, &bin_path_arg, &display_arg])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .status()?;
+        .output()?;
 
-    if !status.success() {
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        eprintln!("[debug] sc create stdout: {stdout}");
+        eprintln!("[debug] sc create stderr: {stderr}");
         eprintln!("Failed to install service. This requires administrator privileges.");
         eprintln!("Right-click your terminal and select 'Run as administrator', then retry.");
         std::process::exit(1);
