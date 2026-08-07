@@ -107,7 +107,9 @@ impl super::Server {
             agent_type_name = wb.agent_type.clone();
 
             // If cwd is HOME or empty and the window still exists, try tmux's pane_current_path.
-            let home = std::env::var("HOME").unwrap_or_default();
+            let home = home::home_dir()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
             if cwd == home || cwd.is_empty() {
                 let wid = WindowId(old_window_id.clone());
                 if let Ok(path) = self.tmux_mgr.pane_cwd(&wid).await {
@@ -145,7 +147,9 @@ impl super::Server {
         }
 
         // If cwd is stale (HOME or empty), try to extract from the session's JSONL file.
-        let home = std::env::var("HOME").unwrap_or_default();
+        let home = home::home_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
         if !session_id.is_empty()
             && (cwd == "~" || cwd.is_empty() || cwd == home)
             && let Some(jsonl_cwd) = Self::extract_cwd_from_jsonl(&session_id).await
@@ -160,7 +164,9 @@ impl super::Server {
 
         // Normalize ~ to actual home path
         if cwd == "~" || cwd.is_empty() {
-            cwd = std::env::var("HOME").unwrap_or_default();
+            cwd = home::home_dir()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
             if !session_id.is_empty() {
                 let _ = self
                     .im_adapter

@@ -132,7 +132,7 @@ dependencies = [
 
 [[package]]
 name = "atim"
-version = "0.4.5"
+version = "0.4.6"
 dependencies = [
  "anyhow",
  "atim-core",
@@ -145,6 +145,7 @@ dependencies = [
  "chrono",
  "clap",
  "dotenvy",
+ "home",
  "libc",
  "regex",
  "reqwest 0.12.28",
@@ -158,10 +159,11 @@ dependencies = [
 
 [[package]]
 name = "atim-core"
-version = "0.4.5"
+version = "0.4.6"
 dependencies = [
  "async-trait",
  "chrono",
+ "home",
  "regex",
  "rusqlite",
  "serde",
@@ -174,7 +176,7 @@ dependencies = [
 
 [[package]]
 name = "atim-im"
-version = "0.4.5"
+version = "0.4.6"
 dependencies = [
  "async-trait",
  "atim-core",
@@ -193,11 +195,12 @@ dependencies = [
 
 [[package]]
 name = "atim-monitor"
-version = "0.4.5"
+version = "0.4.6"
 dependencies = [
  "atim-core",
  "atim-parser",
  "chrono",
+ "home",
  "rusqlite",
  "serde",
  "serde_json",
@@ -208,7 +211,7 @@ dependencies = [
 
 [[package]]
 name = "atim-parser"
-version = "0.4.5"
+version = "0.4.6"
 dependencies = [
  "atim-core",
  "base64",
@@ -223,7 +226,7 @@ dependencies = [
 
 [[package]]
 name = "atim-queue"
-version = "0.4.5"
+version = "0.4.6"
 dependencies = [
  "async-trait",
  "atim-core",
@@ -236,7 +239,7 @@ dependencies = [
 
 [[package]]
 name = "atim-state"
-version = "0.4.5"
+version = "0.4.6"
 dependencies = [
  "atim-core",
  "chrono",
@@ -252,7 +255,7 @@ dependencies = [
 
 [[package]]
 name = "atim-tmux"
-version = "0.4.5"
+version = "0.4.6"
 dependencies = [
  "ab_glyph",
  "async-trait",
@@ -918,6 +921,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
 dependencies = [
  "digest",
+]
+
+[[package]]
+name = "home"
+version = "0.5.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc627f471c528ff0c4a49e1d5e60450c8f6461dd6d10ba9dcd3a61d3dff7728d"
+dependencies = [
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

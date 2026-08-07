@@ -9,8 +9,8 @@ use tokio::sync::{Mutex, mpsc};
 
 /// Path to the mimo SQLite database (if it exists).
 fn mimo_db_path() -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    let p = PathBuf::from(home).join(".local/share/mimocode/mimocode.db");
+    let home = home::home_dir()?;
+    let p = home.join(".local/share/mimocode/mimocode.db");
     if p.exists() { Some(p) } else { None }
 }
 
@@ -59,7 +59,7 @@ pub struct SessionMonitor {
 /// 1. `~/.claude/projects/<slug>/<session_id>.jsonl` (Claude Code)
 /// 2. `~/.copilot/session-state/<session_id>/events.jsonl` (Copilot CLI)
 pub async fn resolve_jsonl(session_id: &str) -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
+    let home = home::home_dir()?;
 
     // 1. Check Claude Code paths
     let claude_dir = Path::new(&home).join(".claude").join("projects");
@@ -436,7 +436,7 @@ impl SessionMonitor {
 
         // Phase 3: Scan filesystem for untracked JSONL files.
         // 3a: Claude Code sessions — ~/.claude/projects/<slug>/<session_id>.jsonl.
-        if let Ok(home) = std::env::var("HOME") {
+        if let Some(home) = home::home_dir() {
             let claude_dir = Path::new(&home).join(".claude").join("projects");
             if claude_dir.exists()
                 && let Ok(mut dir) = tokio::fs::read_dir(&claude_dir).await
@@ -499,7 +499,7 @@ impl SessionMonitor {
         }
 
         // 3b: Copilot CLI sessions — ~/.copilot/session-state/<uuid>/events.jsonl.
-        if let Ok(home) = std::env::var("HOME") {
+        if let Some(home) = home::home_dir() {
             let copilot_dir = Path::new(&home).join(".copilot").join("session-state");
             if copilot_dir.is_dir()
                 && let Ok(mut dir) = tokio::fs::read_dir(&copilot_dir).await

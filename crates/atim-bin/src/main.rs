@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use atim_core::agent::Agent;
@@ -121,8 +120,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // 0. Load legacy .env (if present) for backward compatibility.
-    if let Ok(home) = std::env::var("HOME") {
-        let env_path = PathBuf::from(home).join(".atim").join(".env");
+    if let Some(home) = home::home_dir() {
+        let env_path = home.join(".atim").join(".env");
         if env_path.exists() {
             dotenvy::from_filename(&env_path).ok();
         }

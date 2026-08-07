@@ -510,12 +510,13 @@ pub fn claude_projects_dir() -> Option<PathBuf> {
     let base = std::env::var("CLAUDE_DIR")
         .ok()
         .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var("HOME")
-                .ok()
-                .map(|h| PathBuf::from(h).join(".claude"))
-        })?;
+        .or_else(|| home_dir().map(|h| PathBuf::from(h).join(".claude")))?;
     Some(base)
+}
+
+/// Cross-platform home directory (HOME on Unix, USERPROFILE on Windows).
+fn home_dir() -> Option<String> {
+    home::home_dir().map(|p| p.to_string_lossy().into_owned())
 }
 
 /// Extract the first user text from JSONL content as a summary.

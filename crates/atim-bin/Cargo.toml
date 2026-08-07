@@ -17,6 +17,7 @@ anyhow = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 libc = { workspace = true }
 regex = { workspace = true }
+home = { workspace = true }
 atim-core = { path = "../atim-core", version = "0.4" }
 atim-tmux = { path = "../atim-tmux", version = "0.4" }
 atim-parser = { path = "../atim-parser", version = "0.4" }

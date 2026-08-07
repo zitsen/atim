@@ -217,9 +217,12 @@ impl Agent for CopilotAgent {
 
 /// Resolve the Copilot session-state directory: `~/.copilot/session-state/`.
 fn copilot_sessions_dir() -> Option<PathBuf> {
-    std::env::var("HOME")
-        .ok()
-        .map(|h| PathBuf::from(h).join(".copilot").join("session-state"))
+    home_dir().map(|h| PathBuf::from(h).join(".copilot").join("session-state"))
+}
+
+/// Cross-platform home directory (HOME on Unix, USERPROFILE on Windows).
+fn home_dir() -> Option<String> {
+    home::home_dir().map(|p| p.to_string_lossy().into_owned())
 }
 
 // ── Session discovery implementation ──

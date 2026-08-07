@@ -138,9 +138,14 @@ impl Agent for MimoAgent {
     }
 }
 
+/// Cross-platform home directory (HOME on Unix, USERPROFILE on Windows).
+fn home_dir() -> Option<String> {
+    home::home_dir().map(|p| p.to_string_lossy().into_owned())
+}
+
 /// Path to the mimo SQLite database.
 fn mimo_db_path() -> Option<std::path::PathBuf> {
-    let home = std::env::var("HOME").ok()?;
+    let home = home_dir()?;
     let p = std::path::PathBuf::from(home).join(".local/share/mimocode/mimocode.db");
     if p.exists() { Some(p) } else { None }
 }
@@ -161,7 +166,7 @@ fn mimo_bin() -> String {
         return cmd;
     }
     // Default: ~/.mimocode/bin/mimo
-    if let Ok(home) = std::env::var("HOME") {
+    if let Some(home) = home_dir() {
         let p = format!("{home}/.mimocode/bin/mimo");
         if std::path::Path::new(&p).exists() {
             return p;

@@ -241,8 +241,8 @@ fn sc(args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
 fn install_service_windows() -> Result<(), Box<dyn std::error::Error>> {
     let binary_path =
         std::env::current_exe().map_err(|_| "Could not determine binary path".to_string())?;
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
+    let home = home::home_dir()
+        .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
 
     // schtasks available?

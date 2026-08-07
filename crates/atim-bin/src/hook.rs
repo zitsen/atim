@@ -86,8 +86,8 @@ fn session_map_path() -> PathBuf {
     if let Ok(dir) = std::env::var("ATIM_DIR") {
         PathBuf::from(dir).join("session_map.json")
     } else {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        PathBuf::from(home).join(".atim").join("session_map.json")
+        let home = home::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+        home.join(".atim").join("session_map.json")
     }
 }
 
@@ -168,9 +168,5 @@ fn config_dir() -> Option<PathBuf> {
     std::env::var("XDG_CONFIG_HOME")
         .ok()
         .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var("HOME")
-                .ok()
-                .map(|h| PathBuf::from(h).join(".config"))
-        })
+        .or_else(|| home::home_dir().map(|h| h.join(".config")))
 }

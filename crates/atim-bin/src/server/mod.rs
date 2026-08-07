@@ -5536,7 +5536,9 @@ mod tests {
     fn test_recover_cwd_fallback_to_jsonl_stale_home() {
         let mut rt = make_test_runtime();
         // Simulate a dead window where cwd equals HOME (stale)
-        let home = std::env::var("HOME").unwrap_or_default();
+        let home = home::home_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
         rt.window_bindings.insert(
             "@dead".into(),
             WindowBinding {
