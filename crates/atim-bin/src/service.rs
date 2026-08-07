@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 pub enum ServiceCommand {
     Install,
+    Uninstall,
     Enable,
     Start,
     Stop,
@@ -18,65 +19,123 @@ pub fn run_service(
 ) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(windows)]
     {
-        let _ = system_level; // system-level is N/A on Windows
+        // --system: use sc.exe (Windows Service Control Manager, requires admin)
+        // default:   use Task Scheduler (user-level, no admin)
         for cmd in cmds {
             match cmd {
-                ServiceCommand::Install => install_service_windows()?,
+                ServiceCommand::Install => {
+                    if system_level {
+                        install_service_sc()?
+                    } else {
+                        install_service_windows()?
+                    }
+                }
+                ServiceCommand::Uninstall => {
+                    // Stop first
+                    if system_level {
+                        sc(&["stop", "atim"]).ok();
+                    } else {
+                        let _ = Command::new("taskkill")
+                            .args(["/im", "atim.exe", "/f"])
+                            .stdout(std::process::Stdio::null())
+                            .status();
+                    }
+                    // Remove the task/service
+                    if system_level {
+                        sc(&["delete", "atim"])?;
+                        println!("Service 'atim' removed.");
+                    } else {
+                        let status = Command::new("schtasks")
+                            .args(["/delete", "/tn", "Atim", "/f"])
+                            .stdout(std::process::Stdio::piped())
+                            .stderr(std::process::Stdio::piped())
+                            .status()?;
+                        if status.success() {
+                            println!("Atim task removed.");
+                        } else {
+                            eprintln!("Failed to remove task.");
+                            std::process::exit(1);
+                        }
+                    }
+                }
                 ServiceCommand::Enable => enable_service_windows()?,
                 ServiceCommand::Start => {
-                    let status = Command::new("schtasks")
-                        .args(["/run", "/tn", "Atim"])
-                        .stdout(std::process::Stdio::piped())
-                        .stderr(std::process::Stdio::piped())
-                        .status()?;
-                    if status.success() {
-                        println!("Atim task started.");
-                    } else {
-                        // Fall back to sc.exe
-                        eprintln!("Task Scheduler start failed, trying sc.exe...");
+                    if system_level {
                         sc(&["start", "atim"])?;
+                    } else {
+                        let status = Command::new("schtasks")
+                            .args(["/run", "/tn", "Atim"])
+                            .stdout(std::process::Stdio::piped())
+                            .stderr(std::process::Stdio::piped())
+                            .status()?;
+                        if status.success() {
+                            println!("Atim task started.");
+                        } else {
+                            eprintln!(
+                                "Task Scheduler start failed. Is the task registered? Run `atim service --install` first."
+                            );
+                            std::process::exit(1);
+                        }
                     }
                 }
                 ServiceCommand::Stop => {
-                    // Task Scheduler has no native "stop" — use taskkill
-                    let _ = Command::new("taskkill")
-                        .args(["/im", "atim.exe", "/f"])
-                        .stdout(std::process::Stdio::null())
-                        .status();
-                    // Also try sc.exe as fallback
-                    sc(&["stop", "atim"]).ok();
+                    if system_level {
+                        sc(&["stop", "atim"])?;
+                    } else {
+                        let _ = Command::new("taskkill")
+                            .args(["/im", "atim.exe", "/f"])
+                            .stdout(std::process::Stdio::null())
+                            .status();
+                        println!("Atim task stopped.");
+                    }
                 }
                 ServiceCommand::Restart => {
-                    let _ = Command::new("taskkill")
-                        .args(["/im", "atim.exe", "/f"])
-                        .stdout(std::process::Stdio::null())
-                        .status();
-                    sc(&["stop", "atim"]).ok();
-                    std::thread::sleep(std::time::Duration::from_millis(1000));
-                    Command::new("schtasks")
-                        .args(["/run", "/tn", "Atim"])
-                        .stdout(std::process::Stdio::piped())
-                        .status()?;
+                    if system_level {
+                        sc(&["stop", "atim"]).ok();
+                        std::thread::sleep(std::time::Duration::from_millis(1000));
+                        sc(&["start", "atim"])?;
+                    } else {
+                        let _ = Command::new("taskkill")
+                            .args(["/im", "atim.exe", "/f"])
+                            .stdout(std::process::Stdio::null())
+                            .status();
+                        std::thread::sleep(std::time::Duration::from_millis(1000));
+                        let status = Command::new("schtasks")
+                            .args(["/run", "/tn", "Atim"])
+                            .stdout(std::process::Stdio::piped())
+                            .status()?;
+                        if status.success() {
+                            println!("Atim task restarted.");
+                        } else {
+                            eprintln!("Restart failed. Is the task registered?");
+                            std::process::exit(1);
+                        }
+                    }
                 }
                 ServiceCommand::Status => {
-                    let output = Command::new("schtasks")
-                        .args(["/query", "/tn", "Atim", "/fo", "list"])
-                        .output()?;
-                    let text = String::from_utf8_lossy(&output.stdout);
-                    if text.contains("Atim") {
-                        println!("Atim task: registered.");
-                        // Check if process is running
-                        let ps = Command::new("tasklist")
-                            .args(["/fi", "imagename eq atim.exe", "/fo", "csv"])
-                            .output()?;
-                        let ps_text = String::from_utf8_lossy(&ps.stdout);
-                        if ps_text.contains("atim.exe") {
-                            println!("Status: running");
-                        } else {
-                            println!("Status: not running");
-                        }
+                    if system_level {
+                        let _ = sc(&["query", "atim"]);
                     } else {
-                        println!("Atim task: not registered (run `atim service --install` first)");
+                        let output = Command::new("schtasks")
+                            .args(["/query", "/tn", "Atim", "/fo", "list"])
+                            .output()?;
+                        let text = String::from_utf8_lossy(&output.stdout);
+                        if text.contains("Atim") {
+                            println!("Atim task: registered.");
+                            let ps = Command::new("tasklist")
+                                .args(["/fi", "imagename eq atim.exe", "/fo", "csv"])
+                                .output()?;
+                            let ps_text = String::from_utf8_lossy(&ps.stdout);
+                            if ps_text.contains("atim.exe") {
+                                println!("Status: running");
+                            } else {
+                                println!("Status: not running");
+                            }
+                        } else {
+                            println!(
+                                "Atim task: not registered (run `atim service --install` first)"
+                            );
+                        }
                     }
                 }
             }
@@ -88,6 +147,26 @@ pub fn run_service(
         for cmd in cmds {
             match cmd {
                 ServiceCommand::Install => install_service(system_level)?,
+                ServiceCommand::Uninstall => {
+                    // Stop first
+                    let mut base = systemctl_base(system_level);
+                    base.push("stop".to_string());
+                    base.push(unit_name().to_string());
+                    let _ = Command::new(&base[0]).args(&base[1..]).status();
+                    // Remove unit file
+                    let dir = service_dir(system_level);
+                    let unit_path = dir.join(unit_name());
+                    if unit_path.exists() {
+                        std::fs::remove_file(&unit_path)?;
+                        println!("Removed {}", unit_path.display());
+                        // Reload
+                        let mut reload = systemctl_base(system_level);
+                        reload.push("daemon-reload".to_string());
+                        let _ = Command::new(&reload[0]).args(&reload[1..]).status();
+                    } else {
+                        println!("Service unit not found at {}", unit_path.display());
+                    }
+                }
                 ServiceCommand::Enable => enable_service(system_level)?,
                 _ => {
                     let mut base = systemctl_base(system_level);

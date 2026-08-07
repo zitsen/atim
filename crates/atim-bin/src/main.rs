@@ -33,6 +33,9 @@ enum Command {
         /// Install the systemd service unit
         #[arg(long)]
         install: bool,
+        /// Uninstall/remove the service
+        #[arg(long)]
+        uninstall: bool,
         /// Enable the service (daemon-reload + enable)
         #[arg(long)]
         enable: bool,
@@ -76,6 +79,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Command::Service {
             install,
+            uninstall,
             enable,
             start,
             stop,
@@ -86,6 +90,9 @@ async fn main() -> anyhow::Result<()> {
             let mut cmds = Vec::new();
             if install {
                 cmds.push(service::ServiceCommand::Install);
+            }
+            if uninstall {
+                cmds.push(service::ServiceCommand::Uninstall);
             }
             if enable {
                 cmds.push(service::ServiceCommand::Enable);
