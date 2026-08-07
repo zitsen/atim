@@ -1242,6 +1242,92 @@ impl Server {
             return Ok(());
         }
 
+        // Handle /new — quit the current agent, then start a fresh agent
+        // session in the same window (same cwd, same agent type, no resume).
+        if text.trim() == "/new" {
+            if let Some((binding, wb)) = find_cb() {
+                let wid_str = wb.map(|w| &w.window_id).map(|s| s.as_str()).unwrap_or("");
+                let window_id = atim_core::message::WindowId(wid_str.to_string());
+                if wid_str.is_empty() || !self.tmux_mgr.window_exists(&window_id).await {
+                    let _ = self
+                        .im_adapter
+                        .send_message(&target, "No active session window found.")
+                        .await;
+                    return Ok(());
+                }
+
+                // 1. Send /quit to exit the agent gracefully
+                self.tmux_mgr.send_line(&window_id, "/quit").await.ok();
+                let mut exited = false;
+                for _ in 0..10 {
+                    if let Ok(info) = self.tmux_mgr.find_window(&window_id).await
+                        && is_shell_process(&info.current_command)
+                    {
+                        exited = true;
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+                if !exited {
+                    // Force kill + recreate window in same cwd
+                    self.tmux_mgr.kill_window(&window_id).await.ok();
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    let cwd = wb.map(|w| w.cwd.clone()).unwrap_or_default();
+                    let _ = self.tmux_mgr.new_window(&binding.display_name, &cwd).await;
+                }
+
+                // 2. Launch a FRESH agent (no resume — new session)
+                let agent_type = wb.map(|w| w.agent_type.clone()).unwrap_or_default();
+                let agent = self
+                    .config
+                    .agent_registry
+                    .get(&agent_type)
+                    .cloned()
+                    .unwrap_or_else(|| self.config.agent_registry.default().clone());
+                let launch_cmd = agent_launch_cmd(&agent);
+
+                let result = self.tmux_mgr.send_line(&window_id, &launch_cmd).await;
+                match result {
+                    Ok(()) => {
+                        // Wait for agent process to start
+                        let mut started = false;
+                        for _ in 0..10 {
+                            if let Ok(info) = self.tmux_mgr.find_window(&window_id).await
+                                && !is_shell_process(&info.current_command)
+                            {
+                                started = true;
+                                break;
+                            }
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                        }
+                        if started {
+                            let _ = self
+                                .im_adapter
+                                .send_message(&target, "✅ New session started.")
+                                .await;
+                        } else {
+                            let _ = self
+                                .im_adapter
+                                .send_message(&target, "⚠️ Agent did not start.")
+                                .await;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = self
+                            .im_adapter
+                            .send_message(&target, &format!("❌ Failed: {e}"))
+                            .await;
+                    }
+                }
+            } else {
+                let _ = self
+                    .im_adapter
+                    .send_message(&target, "No active session.")
+                    .await;
+            }
+            return Ok(());
+        }
+
         // Handle /rebind — detect running agent and session, then (re)bind exclusively
         if text.trim() == "/rebind" {
             if let Some((binding, _wb_opt)) = find_cb() {
