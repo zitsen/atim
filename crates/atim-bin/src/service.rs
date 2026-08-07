@@ -18,19 +18,66 @@ pub fn run_service(
 ) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(windows)]
     {
-        let _ = system_level; // system-level is N/A on Windows (sc.exe is always system)
+        let _ = system_level; // system-level is N/A on Windows
         for cmd in cmds {
             match cmd {
                 ServiceCommand::Install => install_service_windows()?,
                 ServiceCommand::Enable => enable_service_windows()?,
-                ServiceCommand::Start => sc(&["start", "atim"])?,
-                ServiceCommand::Stop => sc(&["stop", "atim"])?,
-                ServiceCommand::Restart => {
+                ServiceCommand::Start => {
+                    let status = Command::new("schtasks")
+                        .args(["/run", "/tn", "Atim"])
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::piped())
+                        .status()?;
+                    if status.success() {
+                        println!("Atim task started.");
+                    } else {
+                        // Fall back to sc.exe
+                        eprintln!("Task Scheduler start failed, trying sc.exe...");
+                        sc(&["start", "atim"])?;
+                    }
+                }
+                ServiceCommand::Stop => {
+                    // Task Scheduler has no native "stop" — use taskkill
+                    let _ = Command::new("taskkill")
+                        .args(["/im", "atim.exe", "/f"])
+                        .stdout(std::process::Stdio::null())
+                        .status();
+                    // Also try sc.exe as fallback
                     sc(&["stop", "atim"]).ok();
-                    sc(&["start", "atim"])?;
+                }
+                ServiceCommand::Restart => {
+                    let _ = Command::new("taskkill")
+                        .args(["/im", "atim.exe", "/f"])
+                        .stdout(std::process::Stdio::null())
+                        .status();
+                    sc(&["stop", "atim"]).ok();
+                    std::thread::sleep(std::time::Duration::from_millis(1000));
+                    Command::new("schtasks")
+                        .args(["/run", "/tn", "Atim"])
+                        .stdout(std::process::Stdio::piped())
+                        .status()?;
                 }
                 ServiceCommand::Status => {
-                    let _ = sc(&["query", "atim"]);
+                    let output = Command::new("schtasks")
+                        .args(["/query", "/tn", "Atim", "/fo", "list"])
+                        .output()?;
+                    let text = String::from_utf8_lossy(&output.stdout);
+                    if text.contains("Atim") {
+                        println!("Atim task: registered.");
+                        // Check if process is running
+                        let ps = Command::new("tasklist")
+                            .args(["/fi", "imagename eq atim.exe", "/fo", "csv"])
+                            .output()?;
+                        let ps_text = String::from_utf8_lossy(&ps.stdout);
+                        if ps_text.contains("atim.exe") {
+                            println!("Status: running");
+                        } else {
+                            println!("Status: not running");
+                        }
+                    } else {
+                        println!("Atim task: not registered (run `atim service --install` first)");
+                    }
                 }
             }
         }
@@ -73,7 +120,7 @@ pub fn run_service(
     }
 }
 
-// ── Windows (sc.exe) ──
+// ── Windows ──
 
 #[cfg(windows)]
 fn sc(args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
@@ -95,9 +142,106 @@ fn sc(args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
 fn install_service_windows() -> Result<(), Box<dyn std::error::Error>> {
     let binary_path =
         std::env::current_exe().map_err(|_| "Could not determine binary path".to_string())?;
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
 
-    // Register as a Windows service. `sc create` needs `binPath=` with a
-    // space before the value: `binPath= "C:\...\atim.exe"`.
+    // Use Task Scheduler (no admin required). Falls back to sc.exe if
+    // schtasks is unavailable.
+    if Command::new("schtasks")
+        .args(["/?"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
+    {
+        let log_path = format!("{}/.atim/atim-service.log", home);
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Atim - AI Agent Through IM</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{}</Command>
+      <WorkingDirectory>{}</WorkingDirectory>
+      <RedirectStdout>{}</RedirectStdout>
+    </Exec>
+  </Actions>
+</Task>"#,
+            binary_path.display(),
+            home,
+            log_path,
+        );
+
+        // Write temp XML file
+        let tmp_xml = std::env::temp_dir().join("atim-task.xml");
+        std::fs::write(&tmp_xml, &xml)?;
+
+        // Create the scheduled task
+        let status = Command::new("schtasks")
+            .args([
+                "/create",
+                "/tn",
+                "Atim",
+                "/xml",
+                tmp_xml.to_str().unwrap_or(""),
+                "/f",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .status()?;
+
+        let _ = std::fs::remove_file(&tmp_xml);
+
+        if !status.success() {
+            eprintln!("Failed to create scheduled task. Try running as administrator:");
+            eprintln!("  atim service --install  (in an elevated terminal)");
+            // Fall back to sc.exe
+            return install_service_sc();
+        }
+
+        println!("Scheduled task 'Atim' created. Starts on login, auto-restarts on failure.");
+        println!("Logs: {}", log_path);
+        Ok(())
+    } else {
+        install_service_sc()
+    }
+}
+
+#[cfg(windows)]
+fn install_service_sc() -> Result<(), Box<dyn std::error::Error>> {
+    let binary_path =
+        std::env::current_exe().map_err(|_| "Could not determine binary path".to_string())?;
     let bin_path_arg = format!("binPath= \"{}\"", binary_path.display());
     let status = Command::new("sc")
         .args([
@@ -109,11 +253,14 @@ fn install_service_windows() -> Result<(), Box<dyn std::error::Error>> {
             "displayname=",
             "Atim - AI Agent Through IM",
         ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .status()?;
-    if !status.success()
-        && let Some(code) = status.code()
-    {
-        std::process::exit(code);
+
+    if !status.success() {
+        eprintln!("Failed to install service. This requires administrator privileges.");
+        eprintln!("Right-click your terminal and select 'Run as administrator', then retry.");
+        std::process::exit(1);
     }
 
     println!("Service 'atim' installed. Start with `atim service --start`.");
@@ -122,8 +269,7 @@ fn install_service_windows() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(windows)]
 fn enable_service_windows() -> Result<(), Box<dyn std::error::Error>> {
-    // sc create with start= auto already enables on boot.
-    println!("Service 'atim' is already enabled (start= auto).");
+    println!("Service 'atim' is already enabled (starts on login).");
     Ok(())
 }
 
