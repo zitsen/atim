@@ -259,6 +259,14 @@ fn install_service_windows() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Path 1: simple schtasks /create (no XML → no encoding issues) ──
     let task_name = "Atim";
+    // Remove any existing task first — an existing "Atim" task (e.g. created
+    // by a prior elevated run) makes /create fail with "Access is denied".
+    let _ = Command::new("schtasks")
+        .args(["/delete", "/tn", task_name, "/f"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
     // Quote the binary path for /tr. /sc onlogon runs at logon.
     let tr_arg = format!("\"{}\"", binary_path.display());
     eprintln!(
@@ -283,6 +291,13 @@ fn install_service_windows() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Path 2: schtasks /create /xml (UTF-16 LE BOM) ──
     let log_path = format!("{}\\.atim\\atim-service.log", home);
+    // RedirectStdout is NOT a valid Task Scheduler XML node — wrap the command
+    // in cmd.exe /c with explicit redirect instead.
+    let cmd_arg = format!(
+        "/c \"\"{}\" >> \"{}\" 2>&1\"",
+        binary_path.display(),
+        log_path
+    );
     let xml = format!(
         r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -319,15 +334,13 @@ fn install_service_windows() -> Result<(), Box<dyn std::error::Error>> {
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>{}</Command>
+      <Command>cmd.exe</Command>
+      <Arguments>{}</Arguments>
       <WorkingDirectory>{}</WorkingDirectory>
-      <RedirectStdout>{}</RedirectStdout>
     </Exec>
   </Actions>
 </Task>"#,
-        binary_path.display(),
-        home,
-        log_path,
+        cmd_arg, home,
     );
 
     let tmp_xml = std::env::temp_dir().join("atim-task.xml");
