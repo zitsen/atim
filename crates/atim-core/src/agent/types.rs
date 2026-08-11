@@ -117,9 +117,14 @@ impl AgentRegistry {
     }
 
     /// Return the default agent (fallback when window state is empty).
+    ///
+    /// Gracefully falls back to the first registered agent if the configured
+    /// default name isn't registered (e.g. a stale ATIM_DEFAULT_AGENT env
+    /// value), rather than panicking and taking down the whole process.
     pub fn default(&self) -> &AgentHandle {
         self.get(&self.default_name)
-            .expect("default agent not registered")
+            .or_else(|| self.agents.first())
+            .unwrap_or_else(|| panic!("no agents registered in AgentRegistry"))
     }
 
     /// Set the default agent name.

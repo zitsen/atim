@@ -37,6 +37,10 @@ type ToolUseMsgKey = (i64, i64, String);
 /// the ConPTY-based `WindowsTerminalManager`.
 pub type TerminalMgr = Arc<dyn TerminalManager>;
 
+/// Callback context stored for each inline-keyboard token:
+/// (user_id, thread_id, created_at). Created_at enables stale-token cleanup.
+type CallbackCtx = (i64, i64, std::time::Instant);
+
 /// The main application server — routes IM events to tmux and monitor
 /// events back to IM.
 pub struct Server {
@@ -76,8 +80,8 @@ pub struct Server {
     /// Set when the rename prompt is shown; consumed by the rename callback.
     pub pending_rename_names: Arc<Mutex<HashMap<UserTriple, String>>>,
     /// Callback context tokens for validating inline keyboard callbacks.
-    /// Stores (user_id, thread_id) for each callback token.
-    pub callback_contexts: Arc<Mutex<HashMap<String, (i64, i64)>>>,
+    /// Stores (user_id, thread_id, created_at) for each callback token.
+    pub callback_contexts: Arc<Mutex<HashMap<String, CallbackCtx>>>,
     /// Track which chat_ids have received the welcome message (in-memory, resets on restart).
     pub welcome_sent: Arc<Mutex<HashSet<i64>>>,
 }
@@ -98,8 +102,9 @@ impl Server {
     ///
     /// Returns a hex token that can be embedded in callback_data.
     /// thread_id is the sole chat identifier — for Feishu, thread_id == chat_id.
+    /// Each token records its creation time so stale tokens can be cleaned up.
     fn make_callback_token(
-        contexts: &mut HashMap<String, (i64, i64)>,
+        contexts: &mut HashMap<String, CallbackCtx>,
         user_id: i64,
         thread_id: i64,
     ) -> String {
@@ -110,18 +115,33 @@ impl Server {
         thread_id.hash(&mut hasher);
         counter.hash(&mut hasher);
         let token = format!("{:x}", hasher.finish());
-        contexts.insert(token.clone(), (user_id, thread_id));
+        contexts.insert(
+            token.clone(),
+            (user_id, thread_id, std::time::Instant::now()),
+        );
         token
     }
 
     /// Validate a callback context token and extract the stored context.
     /// Returns (user_id, thread_id).
     fn validate_callback_token(
-        contexts: &mut HashMap<String, (i64, i64)>,
+        contexts: &mut HashMap<String, CallbackCtx>,
         token: &str,
     ) -> Option<(i64, i64)> {
-        let ctx = contexts.remove(token)?;
-        Some(ctx)
+        let (user_id, thread_id, _created) = contexts.remove(token)?;
+        Some((user_id, thread_id))
+    }
+
+    /// Remove callback tokens older than `max_age`, preventing unbounded growth
+    /// when users never tap the inline keyboard buttons.
+    fn cleanup_stale_callback_tokens(
+        contexts: &mut HashMap<String, CallbackCtx>,
+        max_age: std::time::Duration,
+    ) -> usize {
+        let cutoff = std::time::Instant::now() - max_age;
+        let before = contexts.len();
+        contexts.retain(|_, (_, _, created)| *created >= cutoff);
+        before - contexts.len()
     }
 
     /// Run the main event loop, processing IM and monitor events.
@@ -136,6 +156,10 @@ impl Server {
         // Periodically check for interactive UIs (every 5s)
         let mut ui_interval = tokio::time::interval(std::time::Duration::from_secs(5));
         ui_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Periodically clean up stale callback tokens (every 10 min) to prevent
+        // unbounded growth when users never tap the inline keyboard buttons.
+        let mut cleanup_interval = tokio::time::interval(std::time::Duration::from_secs(600));
+        cleanup_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
             tokio::select! {
@@ -157,6 +181,16 @@ impl Server {
                 _ = ui_interval.tick() => {
                     if let Err(e) = self.probe_interactive_uis().await {
                         tracing::error!("probe_interactive_uis error: {e}");
+                    }
+                }
+                _ = cleanup_interval.tick() => {
+                    let mut guard = self.callback_contexts.lock().await;
+                    let removed = Self::cleanup_stale_callback_tokens(
+                        &mut guard,
+                        std::time::Duration::from_secs(600),
+                    );
+                    if removed > 0 {
+                        tracing::info!("Cleaned up {removed} stale callback tokens");
                     }
                 }
                 else => break,
@@ -3720,8 +3754,8 @@ impl Server {
                     .lock()
                     .await
                     .get(token)
-                    .filter(|(uid, _)| *uid == user_id)
-                    .map(|(_, tid)| *tid)
+                    .filter(|(uid, _, _)| *uid == user_id)
+                    .map(|(_, tid, _)| *tid)
                     .unwrap_or(0)
             } else {
                 thread_id
@@ -4233,6 +4267,29 @@ impl Server {
         let rt = self.state_mgr.load_runtime().await?;
         let mut ui_states = self.last_ui_states.lock().await;
         let mut pane_outputs = self.last_pane_output.lock().await;
+
+        // Clean up UI/pane state for windows that no longer exist, preventing
+        // unbounded growth across window kills/rebinds.
+        let live_windows: HashSet<String> = rt
+            .window_bindings
+            .values()
+            .map(|wb| wb.window_id.clone())
+            .collect();
+        ui_states.retain(|wid, _| live_windows.contains(wid));
+        pane_outputs.retain(|wid, _| live_windows.contains(wid));
+
+        // Clean up tool_use message tracking for bindings that are gone
+        // (e.g. session unbound), preventing unbounded growth when an agent
+        // is interrupted before a ToolResult arrives.
+        let live_chats: HashSet<(i64, i64)> = rt
+            .chat_bindings
+            .iter()
+            .map(|cb| (cb.group_chat_id.unwrap_or(cb.chat_id), cb.thread_id))
+            .collect();
+        self.tool_use_msg_ids
+            .lock()
+            .await
+            .retain(|(chat_id, tid, _), _| live_chats.contains(&(*chat_id, *tid)));
 
         for (cb, wb) in rt.resolved_bindings() {
             let wid = WindowId(wb.window_id.clone());
