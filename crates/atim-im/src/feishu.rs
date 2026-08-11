@@ -7,6 +7,7 @@
 //!   - String IDs (open_id, chat_id) hashed to i64 for Atim's core types
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -97,7 +98,20 @@ impl FeishuAdapter {
     // ── Token management (via openlark AuthService) ──
 
     /// Get a valid tenant_access_token, refreshing if needed.
+    ///
+    /// Fast path uses a read lock so concurrent requests aren't serialized on
+    /// the write lock. Only when the token is missing/expired do we take the
+    /// write lock (and re-check, so only one refresh happens under contention).
     async fn get_token(&self) -> Result<String> {
+        // Fast path: valid token → concurrent reads, no blocking.
+        {
+            let cache = self.token_cache.read().await;
+            if !cache.token.is_empty() && Instant::now() < cache.expires_at {
+                return Ok(cache.token.clone());
+            }
+        }
+        // Slow path: refresh under the write lock. Re-check so a concurrent
+        // refresh that already succeeded is not repeated.
         let mut cache = self.token_cache.write().await;
         if cache.token.is_empty() || Instant::now() >= cache.expires_at {
             cache.refresh().await?;
@@ -248,39 +262,57 @@ impl FeishuAdapter {
     /// Register a Feishu open_id and return its stable i64 UserId.
     async fn register_user(&self, open_id: &str) -> UserId {
         let uid = Self::hash_id(open_id);
-        {
+        let changed = {
             let mut map = self.id_map.write().await;
-            map.user_ids
-                .entry(uid)
-                .or_insert_with(|| open_id.to_string());
+            match map.user_ids.entry(uid) {
+                Entry::Occupied(_) => false,
+                Entry::Vacant(v) => {
+                    v.insert(open_id.to_string());
+                    true
+                }
+            }
+        };
+        if changed {
+            self.save_id_map().await;
         }
-        self.save_id_map().await;
         UserId(uid)
     }
 
     /// Register a Feishu chat_id and return its stable i64 ChatId.
     async fn register_chat(&self, chat_id: &str) -> ChatId {
         let cid = Self::hash_id(chat_id);
-        {
+        let changed = {
             let mut map = self.id_map.write().await;
-            map.chat_ids
-                .entry(cid)
-                .or_insert_with(|| chat_id.to_string());
+            match map.chat_ids.entry(cid) {
+                Entry::Occupied(_) => false,
+                Entry::Vacant(v) => {
+                    v.insert(chat_id.to_string());
+                    true
+                }
+            }
+        };
+        if changed {
+            self.save_id_map().await;
         }
-        self.save_id_map().await;
         ChatId(cid)
     }
 
     /// Register a Feishu topic root_id and return its stable i64 thread_id.
     async fn register_thread(&self, root_id: &str) -> ThreadId {
         let tid = Self::hash_id(root_id);
-        {
+        let changed = {
             let mut map = self.id_map.write().await;
-            map.thread_ids
-                .entry(tid)
-                .or_insert_with(|| root_id.to_string());
+            match map.thread_ids.entry(tid) {
+                Entry::Occupied(_) => false,
+                Entry::Vacant(v) => {
+                    v.insert(root_id.to_string());
+                    true
+                }
+            }
+        };
+        if changed {
+            self.save_id_map().await;
         }
-        self.save_id_map().await;
         ThreadId(tid)
     }
 
@@ -289,13 +321,19 @@ impl FeishuAdapter {
     async fn register_chat_thread(&self, chat_id: &str) -> ThreadId {
         let threaded_id = format!("\0thread\0{chat_id}");
         let tid = Self::hash_id(&threaded_id);
-        {
+        let changed = {
             let mut map = self.id_map.write().await;
-            map.thread_ids
-                .entry(tid)
-                .or_insert_with(|| chat_id.to_string());
+            match map.thread_ids.entry(tid) {
+                Entry::Occupied(_) => false,
+                Entry::Vacant(v) => {
+                    v.insert(chat_id.to_string());
+                    true
+                }
+            }
+        };
+        if changed {
+            self.save_id_map().await;
         }
-        self.save_id_map().await;
         ThreadId(tid)
     }
 
@@ -354,16 +392,21 @@ impl FeishuAdapter {
 
     /// Persist the current id_map to disk.
     async fn save_id_map(&self) {
-        let map = self.id_map.read().await;
-        let data = serde_json::json!({
-            "user_ids": map.user_ids,
-            "chat_ids": map.chat_ids,
-            "thread_ids": map.thread_ids,
-        });
-        let json = serde_json::to_string_pretty(&data).unwrap_or_default();
-        // Use std::fs for simplicity (called infrequently)
-        let _ = std::fs::create_dir_all(self.id_map_file.parent().unwrap_or(&self.id_map_file));
-        let _ = std::fs::write(&self.id_map_file, &json);
+        // Serialize under a short read lock, then write asynchronously outside
+        // the lock so a slow/flaky disk doesn't block concurrent lookups.
+        let json = {
+            let map = self.id_map.read().await;
+            let data = serde_json::json!({
+                "user_ids": map.user_ids,
+                "chat_ids": map.chat_ids,
+                "thread_ids": map.thread_ids,
+            });
+            serde_json::to_string_pretty(&data).unwrap_or_default()
+        };
+        if let Some(parent) = self.id_map_file.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        let _ = tokio::fs::write(&self.id_map_file, json).await;
     }
 
     /// Load id_map from disk synchronously (called once at construction).
