@@ -522,25 +522,28 @@ impl Server {
                             }
                             ContentType::ToolResult => {
                                 flush!();
-                                if let Some(tuid) = &msg.tool_use_id {
-                                    let mut map = self.tool_use_msg_ids.lock().await;
-                                    if let Some(mid) =
-                                        map.remove(&(chat_id, thread_id_val, tuid.clone()))
-                                    {
-                                        // Edit tool: diff card already sent, just append result
-                                        let is_edit = matches!(
-                                            msg.tool_name.as_deref(),
-                                            Some("Edit" | "EditTool" | "TextEditTool")
-                                        );
-                                        if !is_edit {
-                                            let _ = self
-                                                .im_adapter
-                                                .edit_message(&target, &mid, &msg.text)
-                                                .await;
-                                        }
-                                    } else {
-                                        let _ =
-                                            self.im_adapter.send_message(&target, &msg.text).await;
+                                // Take the tracked message id out of the map BEFORE awaiting,
+                                // so we don't hold the lock across network I/O.
+                                let tracked_mid = if let Some(tuid) = &msg.tool_use_id {
+                                    self.tool_use_msg_ids.lock().await.remove(&(
+                                        chat_id,
+                                        thread_id_val,
+                                        tuid.clone(),
+                                    ))
+                                } else {
+                                    None
+                                };
+                                if let Some(mid) = tracked_mid {
+                                    // Edit tool: diff card already sent, just append result
+                                    let is_edit = matches!(
+                                        msg.tool_name.as_deref(),
+                                        Some("Edit" | "EditTool" | "TextEditTool")
+                                    );
+                                    if !is_edit {
+                                        let _ = self
+                                            .im_adapter
+                                            .edit_message(&target, &mid, &msg.text)
+                                            .await;
                                     }
                                 } else {
                                     let _ = self.im_adapter.send_message(&target, &msg.text).await;
@@ -4265,18 +4268,22 @@ impl Server {
     /// write JSONL session logs.
     async fn probe_interactive_uis(&self) -> Result<()> {
         let rt = self.state_mgr.load_runtime().await?;
-        let mut ui_states = self.last_ui_states.lock().await;
-        let mut pane_outputs = self.last_pane_output.lock().await;
 
         // Clean up UI/pane state for windows that no longer exist, preventing
-        // unbounded growth across window kills/rebinds.
+        // unbounded growth across window kills/rebinds. Lock is short-lived.
         let live_windows: HashSet<String> = rt
             .window_bindings
             .values()
             .map(|wb| wb.window_id.clone())
             .collect();
-        ui_states.retain(|wid, _| live_windows.contains(wid));
-        pane_outputs.retain(|wid, _| live_windows.contains(wid));
+        self.last_ui_states
+            .lock()
+            .await
+            .retain(|wid, _| live_windows.contains(wid));
+        self.last_pane_output
+            .lock()
+            .await
+            .retain(|wid, _| live_windows.contains(wid));
 
         // Clean up tool_use message tracking for bindings that are gone
         // (e.g. session unbound), preventing unbounded growth when an agent
@@ -4319,16 +4326,25 @@ impl Server {
                 .map(|u| format!("{:?}:{}", u.kind, u.content.len()))
                 .unwrap_or_default();
 
-            let prev = ui_states.get(&wb.window_id);
-            if prev == Some(&content_hash) {
+            // Check whether UI hash changed — short lock around the read/update.
+            let hash_changed = {
+                let mut ui_states = self.last_ui_states.lock().await;
+                let prev = ui_states.get(&wb.window_id);
+                if prev == Some(&content_hash) {
+                    false
+                } else {
+                    ui_states.insert(wb.window_id.clone(), content_hash);
+                    true
+                }
+            };
+
+            if !hash_changed {
                 // UI unchanged — still forward pane output if agent uses PaneCapture
                 if agent.output_source() == OutputSource::PaneCapture {
-                    self.forward_new_pane_output(wb, cb, &clean, &mut pane_outputs)
-                        .await;
+                    self.forward_new_pane_output(wb, cb, &clean).await;
                 }
                 continue;
             }
-            ui_states.insert(wb.window_id.clone(), content_hash);
 
             // New or changed UI — send keyboard
             if let Some(interactive) = ui {
@@ -4355,8 +4371,7 @@ impl Server {
 
             // Forward terminal output for PaneCapture agents
             if agent.output_source() == OutputSource::PaneCapture {
-                self.forward_new_pane_output(wb, cb, &clean, &mut pane_outputs)
-                    .await;
+                self.forward_new_pane_output(wb, cb, &clean).await;
             }
         }
 
@@ -4369,18 +4384,19 @@ impl Server {
     /// rather than appending lines, so line-count-based diffing doesn't work.
     /// Instead, compares the full pane content hash and forwards any
     /// newly-appeared lines that aren't TUI chrome (borders, prompts, etc.).
-    async fn forward_new_pane_output(
-        &self,
-        wb: &WindowBinding,
-        cb: &ChatBinding,
-        clean: &str,
-        pane_outputs: &mut HashMap<String, String>,
-    ) {
-        let last = pane_outputs.get(&wb.window_id);
-
-        // First call: establish baseline
-        let Some(prev) = last else {
+    async fn forward_new_pane_output(&self, wb: &WindowBinding, cb: &ChatBinding, clean: &str) {
+        // Only hold the lock for the map read + baseline update. The diff and
+        // the send_message await happen outside the lock to avoid blocking
+        // other pane-output updates on network I/O.
+        let prev = {
+            let mut pane_outputs = self.last_pane_output.lock().await;
+            let last = pane_outputs.get(&wb.window_id).cloned();
             pane_outputs.insert(wb.window_id.clone(), clean.to_string());
+            last
+        };
+
+        // First call: establish baseline only
+        let Some(prev) = prev else {
             return;
         };
 
@@ -4401,9 +4417,6 @@ impl Server {
             .copied()
             .filter(|l| !old_set.contains(l))
             .collect();
-
-        // Update baseline even if we don't forward (so future diffs are accurate)
-        pane_outputs.insert(wb.window_id.clone(), clean.to_string());
 
         if added.is_empty() {
             return;
