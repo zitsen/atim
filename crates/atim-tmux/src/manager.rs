@@ -53,7 +53,35 @@ impl TmuxManager {
     ///
     /// Automatically recovers from a dead tmux server: if the server socket
     /// is stale ("no server running"), creates a new session and retries.
+    /// Also retries transient EIO errors (e.g. an underlying disk hiccup on
+    /// a mounted filesystem) so a single glitch doesn't fail the operation.
     async fn tmux(&self, args: &[&str]) -> Result<String> {
+        const MAX_EIO_RETRIES: u32 = 3;
+        let mut eio_attempt = 0u32;
+
+        loop {
+            match self.tmux_once(args).await {
+                Ok(out) => return Ok(out),
+                Err(Error::Tmux(msg)) if is_eio_error(&msg) && eio_attempt < MAX_EIO_RETRIES => {
+                    eio_attempt += 1;
+                    tracing::warn!(
+                        "tmux {} transient I/O error (attempt {}/{}): {}",
+                        args.join(" "),
+                        eio_attempt,
+                        MAX_EIO_RETRIES,
+                        msg
+                    );
+                    tokio::time::sleep(Duration::from_millis(500 * eio_attempt as u64)).await;
+                    // Skip the dead-server recovery path for EIO — just retry.
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Execute one tmux command, including the dead-server recovery path.
+    async fn tmux_once(&self, args: &[&str]) -> Result<String> {
         let output = Command::new(&self.binary)
             .args(args)
             .output()
@@ -403,6 +431,13 @@ impl TmuxManager {
             .await?;
         Ok(out.trim().to_string())
     }
+}
+
+/// Detect a transient I/O error (os error 5 / EIO) in a tmux error message.
+/// These can come from an underlying mounted filesystem hiccup and are worth
+/// retrying rather than failing the whole operation.
+fn is_eio_error(msg: &str) -> bool {
+    msg.contains("os error 5") || msg.contains("Input/output error") || msg.contains("EIO")
 }
 
 // ── TerminalManager trait implementation ──

@@ -588,7 +588,19 @@ impl SessionMonitor {
                 offsets.get(session_id).copied().unwrap_or(0)
             };
 
-            let (entries, new_offset) = atim_parser::read_jsonl(&path, offset).await?;
+            let (entries, new_offset) = match atim_parser::read_jsonl(&path, offset).await {
+                Ok(v) => v,
+                Err(e) => {
+                    // Isolate per-session failures (e.g. transient EIO on a
+                    // mounted filesystem) so one bad session doesn't drop all
+                    // others in this poll cycle. Re-queue the session for the
+                    // next poll instead of advancing its offset.
+                    tracing::warn!(
+                        "[monitor] Failed to read {session_id}.jsonl: {e} (will retry next poll)"
+                    );
+                    continue;
+                }
+            };
 
             // Always advance the byte offset past processed data, even when
             // entries is empty (e.g. thinking-only or metadata-only lines).
