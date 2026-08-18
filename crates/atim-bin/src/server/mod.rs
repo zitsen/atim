@@ -3268,6 +3268,14 @@ impl Server {
             return Ok(());
         }
 
+        // Wait for the agent's TUI to finish rendering before forwarding
+        // the first message, otherwise the text lands in the input box but
+        // Enter gets consumed by an animation/transition rather than submitting.
+        let _ = self
+            .tmux_mgr
+            .wait_for_agent_ready(&window_id, Duration::from_secs(4))
+            .await;
+
         // Notify user the session is ready
         let _ = self
             .im_adapter
@@ -3622,6 +3630,14 @@ impl Server {
             let _ = self.im_adapter.send_message(target, &err_msg).await;
             return Ok(());
         }
+
+        // Wait for the agent's TUI to finish rendering before forwarding
+        // the first message, otherwise the text lands in the input box but
+        // Enter gets consumed by an animation/transition rather than submitting.
+        let _ = self
+            .tmux_mgr
+            .wait_for_agent_ready(&window_id, Duration::from_secs(4))
+            .await;
 
         // Notify user the session is ready
         let _ = self

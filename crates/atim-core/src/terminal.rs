@@ -113,4 +113,15 @@ pub trait TerminalManager: Send + Sync {
     /// Capture the pane content and render it as a PNG screenshot.
     /// Returns the PNG bytes.
     async fn screenshot(&self, window_id: &WindowId) -> Result<Vec<u8>>;
+
+    /// Wait for the pane content to stabilize after agent startup.
+    ///
+    /// Polls the pane and returns once the visible content has been
+    /// unchanged for consecutive checks (TUI finished rendering).
+    /// Gives up after `timeout`.
+    async fn wait_for_agent_ready(
+        &self,
+        window_id: &WindowId,
+        timeout: std::time::Duration,
+    ) -> Result<()>;
 }

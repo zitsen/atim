@@ -330,11 +330,36 @@ impl TmuxManager {
         self.send_key(window_id, "C-c").await
     }
 
-    // ── Utility ──
-
-    /// List windows across all tmux sessions.
+    /// Wait for the pane content to stabilize after agent startup.
     ///
-    /// Each result includes the session name in the format:
+    /// Polls the pane every 500ms and returns once the visible content has
+    /// been unchanged for two consecutive checks (suggesting the TUI has
+    /// finished rendering and is ready for input). Gives up after `timeout`.
+    pub async fn wait_for_agent_ready(
+        &self,
+        window_id: &WindowId,
+        timeout: Duration,
+    ) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut last = String::new();
+        let mut stable_count = 0u32;
+
+        while stable_count < 3 {
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let current = self.capture_pane(window_id).await.unwrap_or_default();
+            if current == last {
+                stable_count += 1;
+            } else {
+                stable_count = 0;
+            }
+            last = current;
+        }
+        Ok(())
+    }
+
     /// `window_id|window_name|pane_command|session_name`.
     pub async fn list_all_windows(&self) -> Result<Vec<(WindowInfo, String)>> {
         let out = self
@@ -535,5 +560,9 @@ impl atim_core::terminal::TerminalManager for TmuxManager {
 
     async fn screenshot(&self, window_id: &WindowId) -> Result<Vec<u8>> {
         TmuxManager::screenshot(self, window_id).await
+    }
+
+    async fn wait_for_agent_ready(&self, window_id: &WindowId, timeout: Duration) -> Result<()> {
+        TmuxManager::wait_for_agent_ready(self, window_id, timeout).await
     }
 }
