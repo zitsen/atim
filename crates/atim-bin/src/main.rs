@@ -15,6 +15,11 @@ mod service;
 #[derive(Parser)]
 #[command(name = "atim", about = "IM-to-Claude-Code bridge via tmux", version)]
 struct Cli {
+    /// Set the log level (trace, debug, info, warn, error).
+    /// RUST_LOG takes precedence if set; otherwise this controls the level.
+    /// Also reads ATIM_LOG_LEVEL env var.
+    #[arg(long = "log-level", short = 'l', default_value = "info")]
+    log_level: String,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -133,12 +138,16 @@ async fn main() -> anyhow::Result<()> {
     let _ = atim_state::persistence::StateManager::ensure_config_toml(&config.atim_dir)?;
 
     // 2. Setup logging
-    // Default: info level, hyper_util suppressed to WARN (noisy connection pool logs).
-    // RUST_LOG overrides everything when set by the user.
+    // RUST_LOG takes precedence when set (per-module granularity via EnvFilter).
+    // Otherwise --log-level / ATIM_LOG_LEVEL env controls the base level.
+    // hyper_util is always suppressed to WARN unless explicitly overridden.
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,hyper_util=warn")),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                let level =
+                    std::env::var("ATIM_LOG_LEVEL").unwrap_or_else(|_| cli.log_level.clone());
+                tracing_subscriber::EnvFilter::new(format!("{},hyper_util=warn", level))
+            }),
         )
         .init();
 
