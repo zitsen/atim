@@ -132,7 +132,7 @@ dependencies = [
 
 [[package]]
 name = "atim"
-version = "0.4.12"
+version = "0.4.13"
 dependencies = [
  "anyhow",
  "atim-core",
@@ -159,7 +159,7 @@ dependencies = [
 
 [[package]]
 name = "atim-core"
-version = "0.4.12"
+version = "0.4.13"
 dependencies = [
  "async-trait",
  "chrono",
@@ -176,7 +176,7 @@ dependencies = [
 
 [[package]]
 name = "atim-im"
-version = "0.4.12"
+version = "0.4.13"
 dependencies = [
  "async-trait",
  "atim-core",
@@ -195,7 +195,7 @@ dependencies = [
 
 [[package]]
 name = "atim-monitor"
-version = "0.4.12"
+version = "0.4.13"
 dependencies = [
  "atim-core",
  "atim-parser",
@@ -211,7 +211,7 @@ dependencies = [
 
 [[package]]
 name = "atim-parser"
-version = "0.4.12"
+version = "0.4.13"
 dependencies = [
  "atim-core",
  "base64",
@@ -226,7 +226,7 @@ dependencies = [
 
 [[package]]
 name = "atim-queue"
-version = "0.4.12"
+version = "0.4.13"
 dependencies = [
  "async-trait",
  "atim-core",
@@ -239,7 +239,7 @@ dependencies = [
 
 [[package]]
 name = "atim-state"
-version = "0.4.12"
+version = "0.4.13"
 dependencies = [
  "atim-core",
  "chrono",
@@ -255,7 +255,7 @@ dependencies = [
 
 [[package]]
 name = "atim-tmux"
-version = "0.4.12"
+version = "0.4.13"
 dependencies = [
  "ab_glyph",
  "async-trait",
