@@ -278,23 +278,40 @@ impl TmuxManager {
         Ok(())
     }
 
-    /// Send a key press (e.g. "Enter", "Escape", "C-c").
+    /// Send a key press (e.g. "Escape", "C-c").
+    ///
+    /// "Enter" is special-cased to send literal `\r` via `-l` so that
+    /// psmux on Windows always interprets it as carriage-return (submit),
+    /// not newline (next-line-in-input).  Other key names are sent via
+    /// tmux's named-key protocol (`send-keys <key>`).
     pub async fn send_key(&self, window_id: &WindowId, key: &str) -> Result<()> {
-        self.tmux(&["send-keys", "-t", &window_id.0, key]).await?;
+        if key == "Enter" {
+            // Literal CR (\r) — always "submit" regardless of terminal.
+            self.tmux(&["send-keys", "-t", &window_id.0, "-l", "--", "\r"])
+                .await?;
+        } else {
+            self.tmux(&["send-keys", "-t", &window_id.0, key]).await?;
+        }
         Ok(())
     }
 
-    /// Send text followed by Enter.
+    /// Send text followed by Enter (carriage return `\r`).
     ///
-    /// The optional `send_delay` (set via `with_send_delay`) pauses between
-    /// typing the text and pressing Enter, giving the agent time to show
-    /// its input prompt before receiving the newline.
+    /// Uses literal `-l \r` instead of the named `Enter` key so the behavior
+    /// is identical on tmux (Linux/macOS) and psmux (Windows) — psmux may
+    /// interpret named keys differently than tmux, but `\r` is always a
+    /// carriage return.
     pub async fn send_line(&self, window_id: &WindowId, text: &str) -> Result<()> {
         self.send_text(window_id, text).await?;
         if !self.send_delay.is_zero() {
             tokio::time::sleep(self.send_delay).await;
         }
-        self.send_key(window_id, "Enter").await?;
+        // Send literal CR (\r) — always "submit" regardless of terminal.
+        // Named key "Enter" on psmux may be interpreted as \n ("newline")
+        // rather than \r ("submit"), which moves the cursor down in Claude
+        // Code's TUI instead of submitting the message.
+        self.tmux(&["send-keys", "-t", &window_id.0, "-l", "--", "\r"])
+            .await?;
         Ok(())
     }
 
@@ -321,7 +338,9 @@ impl TmuxManager {
         if !self.send_delay.is_zero() {
             tokio::time::sleep(self.send_delay).await;
         }
-        self.send_key(window_id, "Enter").await?;
+        // Same literal \r fix as send_line (see comment there).
+        self.tmux(&["send-keys", "-t", &window_id.0, "-l", "--", "\r"])
+            .await?;
         Ok(())
     }
 
