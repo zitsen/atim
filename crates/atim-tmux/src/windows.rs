@@ -331,4 +331,29 @@ impl atim_core::terminal::TerminalManager for WindowsTerminalManager {
         let text = self.capture_pane(window_id).await?;
         crate::screenshot::render_ansi_to_png(&text)
     }
+
+    async fn wait_for_agent_ready(
+        &self,
+        window_id: &WindowId,
+        timeout: std::time::Duration,
+    ) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut last = String::new();
+        let mut stable = 0u32;
+
+        while stable < 3 {
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let current = self.capture_pane(window_id).await.unwrap_or_default();
+            if current == last {
+                stable += 1;
+            } else {
+                stable = 0;
+            }
+            last = current;
+        }
+        Ok(())
+    }
 }
