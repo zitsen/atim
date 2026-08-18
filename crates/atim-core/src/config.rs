@@ -438,7 +438,7 @@ fn resolve_atim_dir() -> PathBuf {
         PathBuf::from(dir)
     } else {
         // home::home_dir() handles HOME (Unix) and USERPROFILE (Windows).
-        let home = home::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+        let home = home::home_dir().unwrap_or_else(std::env::temp_dir);
         home.join(".atim")
     }
 }

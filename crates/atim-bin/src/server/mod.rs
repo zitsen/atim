@@ -4639,7 +4639,10 @@ fn format_delta(delta: chrono::TimeDelta) -> String {
 }
 
 fn is_shell_process(process: &str) -> bool {
-    matches!(process, "zsh" | "bash" | "sh" | "fish" | "dash" | "ksh")
+    matches!(
+        process,
+        "zsh" | "bash" | "sh" | "fish" | "dash" | "ksh" | "powershell" | "pwsh" | "cmd" // Windows shells
+    )
 }
 
 /// Build a markdown card showing Edit tool diff content.
