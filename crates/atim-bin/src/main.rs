@@ -414,7 +414,18 @@ async fn main() -> anyhow::Result<()> {
         welcome_sent: Arc::new(Mutex::new(std::collections::HashSet::new())),
     };
 
-    server.run(im_rx, &mut monitor_rx).await?;
+    // 8. Enter main event loop — wait for Ctrl+C (SIGINT/CTRL_C_EVENT)
+    // to gracefully shut down, regardless of platform.
+    tokio::select! {
+        result = server.run(im_rx, &mut monitor_rx) => {
+            if let Err(e) = result {
+                tracing::error!("Server exited with error: {e}");
+            }
+        }
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("Received interrupt signal, shutting down...");
+        }
+    }
 
     // 9. Graceful shutdown
     tracing::info!("Shutting down...");
