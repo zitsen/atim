@@ -155,7 +155,6 @@ jobs:
   upload-x86_64-linux:
     name: Upload x86_64-linux
     needs: [build, release]
-    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -169,7 +168,6 @@ jobs:
   upload-aarch64-linux:
     name: Upload aarch64-linux
     needs: [build, release]
-    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -183,7 +181,6 @@ jobs:
   upload-windows:
     name: Upload windows
     needs: [build, release]
-    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -197,7 +194,6 @@ jobs:
   packaging:
     name: Generate Homebrew/AUR
     needs: build
-    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
