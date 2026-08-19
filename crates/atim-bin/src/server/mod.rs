@@ -1505,10 +1505,20 @@ impl Server {
                             .map(|m| m.as_str().to_string());
                     }
 
-                    // Dismiss /status modal — send Escape multiple times
-                    for _ in 0..3 {
-                        self.tmux_mgr.send_key(&window_id, "Escape").await.ok();
-                        tokio::time::sleep(Duration::from_millis(300)).await;
+                    // Dismiss /status modal — send Escape, verify, retry once
+                    self.tmux_mgr.send_key(&window_id, "Escape").await.ok();
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    {
+                        let pane = self
+                            .tmux_mgr
+                            .capture_pane(&window_id)
+                            .await
+                            .unwrap_or_default();
+                        let lower = strip_ansi(&pane).to_lowercase();
+                        if lower.contains("session id") || lower.contains("/status") {
+                            self.tmux_mgr.send_key(&window_id, "Escape").await.ok();
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                        }
                     }
 
                     sid
@@ -3120,11 +3130,18 @@ impl Server {
                 .map(|m| m.as_str().to_string());
         }
 
-        // Dismiss /status modal — send Escape multiple times to ensure the
-        // modal is fully closed (some TUI layers need repeated Esc presses).
-        for _ in 0..3 {
-            self.tmux_mgr.send_key(&wid, "Escape").await.ok();
-            tokio::time::sleep(Duration::from_millis(300)).await;
+        // Dismiss /status modal — send Escape, then verify it closed.
+        // Retry once if the modal is still visible (but don't send more
+        // than 2 total — extra Escapes trigger Claude Code's "rewind" prompt).
+        self.tmux_mgr.send_key(&wid, "Escape").await.ok();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        {
+            let pane = self.tmux_mgr.capture_pane(&wid).await.unwrap_or_default();
+            let lower = strip_ansi(&pane).to_lowercase();
+            if lower.contains("session id") || lower.contains("/status") {
+                self.tmux_mgr.send_key(&wid, "Escape").await.ok();
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
         }
 
         if sid.is_some() {
