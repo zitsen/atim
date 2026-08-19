@@ -3318,17 +3318,11 @@ impl Server {
             })
             .await?;
 
-        // Forward the user's pending message to the agent FIRST.
-        // Some agents (Copilot) need the message to create a session.
-        if !_initial_text.is_empty() {
-            let is_copilot = agent.name() == "copilot";
-            self.send_text_to_agent(&window_id, _initial_text, is_copilot)
-                .await?;
-        }
-
-        // Then resolve session_id so the monitor can track responses.
-        // resolve_session_id actively polls /status + PID discovery until
-        // the agent creates its session, so no fixed sleep is needed.
+        // Resolve session_id FIRST via /status so the monitor can track
+        // responses. Sending /status before the user's message avoids the
+        // case where the message lands in the input box while the /status
+        // modal is still open (which would consume Enter as "dismiss" rather
+        // than "submit").
         if let Some(sid) = self
             .resolve_session_id(
                 &wid,
@@ -3357,6 +3351,14 @@ impl Server {
                     topic_name: topic_name.map(String::from),
                     session_id: sid,
                 })
+                .await?;
+        }
+
+        // Forward the user's pending message to the agent.
+        // Some agents (Copilot) need the message to create a session.
+        if !_initial_text.is_empty() {
+            let is_copilot = agent.name() == "copilot";
+            self.send_text_to_agent(&window_id, _initial_text, is_copilot)
                 .await?;
         }
 
@@ -3539,15 +3541,9 @@ impl Server {
             })
             .await?;
 
-        // Forward the user's pending message to the agent FIRST.
-        // Some agents need the message to create a session file.
-        if !_text.is_empty() {
-            let is_copilot = agent.name() == "copilot";
-            self.send_text_to_agent(&wid, _text, is_copilot).await?;
-        }
-
-        // Then resolve session_id so the monitor can track responses and
-        // so commands like /ss, /usage, /esc can find the window binding.
+        // Resolve session_id FIRST via /status so the monitor can track
+        // responses. Sending /status before the user's message avoids
+        // the modal being open when the message's Enter is sent.
         if let Some(sid) = self
             .resolve_session_id(window_id, Duration::from_secs(15), Some(&cwd))
             .await
@@ -3572,6 +3568,13 @@ impl Server {
                     session_id: sid,
                 })
                 .await?;
+        }
+
+        // Forward the user's pending message to the agent.
+        // Some agents need the message to create a session file.
+        if !_text.is_empty() {
+            let is_copilot = agent.name() == "copilot";
+            self.send_text_to_agent(&wid, _text, is_copilot).await?;
         }
 
         Ok(())
