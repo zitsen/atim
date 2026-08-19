@@ -3026,8 +3026,9 @@ impl Server {
 
     /// If the pane shows a "trust this folder" confirmation dialog (first
     /// run of Claude Code in a new directory), auto-confirm it by sending
-    /// Enter.  Waits for the TUI to stabilize after the dialog closes.
-    async fn auto_confirm_trust_dialog(&self, window_id: &WindowId) {
+    /// Enter.  Waits for the dialog to disappear before returning.
+    /// Returns `true` if a trust dialog was detected and (attempted) dismissed.
+    async fn auto_confirm_trust_dialog(&self, window_id: &WindowId) -> bool {
         let pane = self
             .tmux_mgr
             .capture_pane(window_id)
@@ -3035,18 +3036,34 @@ impl Server {
             .unwrap_or_default();
         let clean = strip_ansi(&pane);
         let lower = clean.to_lowercase();
-        if !lower.contains("trust") {
-            return;
+        if !lower.contains("trust") && !lower.contains("safety") {
+            return false;
         }
         tracing::info!(
             "Detected trust folder dialog in window {}, auto-confirming",
             window_id.0
         );
+        // Send Enter to confirm "Yes, I trust this folder"
         self.tmux_mgr.send_key(window_id, "Enter").await.ok();
+        // Wait for the dialog to disappear
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        // Verify the dialog is gone; retry once if still present
+        let pane = self
+            .tmux_mgr
+            .capture_pane(window_id)
+            .await
+            .unwrap_or_default();
+        let clean = strip_ansi(&pane).to_lowercase();
+        if clean.contains("trust") || clean.contains("safety") {
+            tracing::warn!("Trust dialog still present after Enter, retrying");
+            self.tmux_mgr.send_key(window_id, "Enter").await.ok();
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+        }
         let _ = self
             .tmux_mgr
             .wait_for_agent_ready(window_id, Duration::from_secs(4))
             .await;
+        true
     }
 
     /// Actively discover the session_id by sending `/status` to the agent
@@ -3302,7 +3319,26 @@ impl Server {
             .await;
 
         // Auto-confirm trust folder dialog if present (first run in a new dir)
-        self.auto_confirm_trust_dialog(&window_id).await;
+        if self.auto_confirm_trust_dialog(&window_id).await {
+            // Verify the agent is still running after trust confirmation.
+            // If the agent exited (back to shell), report failure.
+            if let Ok(info) = self.tmux_mgr.find_window(&window_id).await
+                && is_shell_process(&info.current_command)
+            {
+                let pane = self
+                    .tmux_mgr
+                    .capture_pane(&window_id)
+                    .await
+                    .unwrap_or_default();
+                let clean = atim_parser::terminal::TerminalParser::strip_ansi(&pane);
+                let err_msg = format!(
+                    "❌ Agent exited after trust dialog:\n```\n{}```",
+                    clean.trim()
+                );
+                let _ = self.im_adapter.send_message(target, &err_msg).await;
+                return Ok(());
+            }
+        }
 
         // Notify user the session is ready
         let _ = self
@@ -3535,7 +3571,21 @@ impl Server {
         }
 
         // Auto-confirm trust folder dialog if present (first run in a new dir)
-        self.auto_confirm_trust_dialog(&wid).await;
+        if self.auto_confirm_trust_dialog(&wid).await {
+            // Verify the agent is still running after trust confirmation
+            if let Ok(info) = self.tmux_mgr.find_window(&wid).await
+                && is_shell_process(&info.current_command)
+            {
+                let pane = self.tmux_mgr.capture_pane(&wid).await.unwrap_or_default();
+                let clean = atim_parser::terminal::TerminalParser::strip_ansi(&pane);
+                let err_msg = format!(
+                    "❌ Agent exited after trust dialog:\n```\n{}```",
+                    clean.trim()
+                );
+                let _ = self.im_adapter.send_message(target, &err_msg).await;
+                return Ok(());
+            }
+        }
 
         // Notify user the session is ready
         let _ = self
