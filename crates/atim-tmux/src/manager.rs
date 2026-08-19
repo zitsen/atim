@@ -281,11 +281,19 @@ impl TmuxManager {
     /// Send a key press (e.g. "Escape", "C-c").
     ///
     /// "Enter" is sent as the named key "Enter" — psmux maps this to 0x0D (CR),
-    /// which is what Claude Code's TUI treats as "submit".  Previous attempts
-    /// using `C-m` printed literal `^M` on some psmux versions, and `-l \r`
-    /// sent `\n` instead.
+    /// which is what Claude Code's TUI treats as "submit".
+    /// "Escape" is sent as the literal byte 0x1B — psmux sometimes renders the
+    /// named key "Escape" as visible text instead of sending the actual key.
+    /// All other key names are sent via tmux's named-key protocol.
     pub async fn send_key(&self, window_id: &WindowId, key: &str) -> Result<()> {
-        self.tmux(&["send-keys", "-t", &window_id.0, key]).await?;
+        if key == "Escape" {
+            // Send literal ESC byte (0x1B) via send-keys -l to avoid
+            // psmux rendering "Escape" as visible text.
+            self.tmux(&["send-keys", "-t", &window_id.0, "-l", "\x1b"])
+                .await?;
+        } else {
+            self.tmux(&["send-keys", "-t", &window_id.0, key]).await?;
+        }
         Ok(())
     }
 
