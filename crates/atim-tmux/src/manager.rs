@@ -280,25 +280,18 @@ impl TmuxManager {
 
     /// Send a key press (e.g. "Escape", "C-c").
     ///
-    /// "Enter" is special-cased to use `C-m` (Ctrl+M = carriage return = 0x0D)
-    /// which psmux on Windows interprets as "submit" (not `\n`/newline).
-    /// Other key names are sent via tmux's named-key protocol (`send-keys <key>`).
+    /// "Enter" is sent as the named key "Enter" — psmux maps this to 0x0D (CR),
+    /// which is what Claude Code's TUI treats as "submit".  Previous attempts
+    /// using `C-m` printed literal `^M` on some psmux versions, and `-l \r`
+    /// sent `\n` instead.
     pub async fn send_key(&self, window_id: &WindowId, key: &str) -> Result<()> {
-        if key == "Enter" {
-            // C-m is the tmux control sequence for CR (0x0D) — identical
-            // behavior to literal `\r` but uses named-key syntax, so it
-            // works on psmux without any arg-separator issues.
-            self.tmux(&["send-keys", "-t", &window_id.0, "C-m"]).await?;
-        } else {
-            self.tmux(&["send-keys", "-t", &window_id.0, key]).await?;
-        }
+        self.tmux(&["send-keys", "-t", &window_id.0, key]).await?;
         Ok(())
     }
 
     /// Send text followed by Enter (carriage return).
     ///
-    /// Uses `C-m` (Ctrl+M = CR = 0x0D) instead of named `Enter` key
-    /// so that psmux on Windows interprets it as "submit" (not `\n`).
+    /// The trailing "Enter" is sent as a named key — psmux maps it to 0x0D (CR).
     pub async fn send_line(&self, window_id: &WindowId, text: &str) -> Result<()> {
         self.send_text(window_id, text).await?;
         if !self.send_delay.is_zero() {
