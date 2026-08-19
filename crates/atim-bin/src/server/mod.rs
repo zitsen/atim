@@ -3024,6 +3024,31 @@ impl Server {
         Ok(())
     }
 
+    /// If the pane shows a "trust this folder" confirmation dialog (first
+    /// run of Claude Code in a new directory), auto-confirm it by sending
+    /// Enter.  Waits for the TUI to stabilize after the dialog closes.
+    async fn auto_confirm_trust_dialog(&self, window_id: &WindowId) {
+        let pane = self
+            .tmux_mgr
+            .capture_pane(window_id)
+            .await
+            .unwrap_or_default();
+        let clean = strip_ansi(&pane);
+        let lower = clean.to_lowercase();
+        if !lower.contains("trust") {
+            return;
+        }
+        tracing::info!(
+            "Detected trust folder dialog in window {}, auto-confirming",
+            window_id.0
+        );
+        self.tmux_mgr.send_key(window_id, "Enter").await.ok();
+        let _ = self
+            .tmux_mgr
+            .wait_for_agent_ready(window_id, Duration::from_secs(4))
+            .await;
+    }
+
     /// Actively discover the session_id by sending `/status` to the agent
     /// in the given window and parsing the Session ID from the response.
     ///
@@ -3276,6 +3301,9 @@ impl Server {
             .wait_for_agent_ready(&window_id, Duration::from_secs(4))
             .await;
 
+        // Auto-confirm trust folder dialog if present (first run in a new dir)
+        self.auto_confirm_trust_dialog(&window_id).await;
+
         // Notify user the session is ready
         let _ = self
             .im_adapter
@@ -3505,6 +3533,9 @@ impl Server {
                 return Ok(());
             }
         }
+
+        // Auto-confirm trust folder dialog if present (first run in a new dir)
+        self.auto_confirm_trust_dialog(&wid).await;
 
         // Notify user the session is ready
         let _ = self
