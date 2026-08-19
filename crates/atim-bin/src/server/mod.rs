@@ -1505,8 +1505,11 @@ impl Server {
                             .map(|m| m.as_str().to_string());
                     }
 
-                    // Dismiss /status modal
-                    self.tmux_mgr.send_key(&window_id, "Escape").await.ok();
+                    // Dismiss /status modal — send Escape multiple times
+                    for _ in 0..3 {
+                        self.tmux_mgr.send_key(&window_id, "Escape").await.ok();
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                    }
 
                     sid
                 } else {
@@ -3117,8 +3120,12 @@ impl Server {
                 .map(|m| m.as_str().to_string());
         }
 
-        // Dismiss /status modal
-        self.tmux_mgr.send_key(&wid, "Escape").await.ok();
+        // Dismiss /status modal — send Escape multiple times to ensure the
+        // modal is fully closed (some TUI layers need repeated Esc presses).
+        for _ in 0..3 {
+            self.tmux_mgr.send_key(&wid, "Escape").await.ok();
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
 
         if sid.is_some() {
             tracing::info!("Found session {:?} for window {window_id} via /status", sid);
