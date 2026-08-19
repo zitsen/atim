@@ -12,6 +12,7 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -28,6 +29,7 @@ jobs:
       - name: Install system dependencies (Linux)
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libssl-dev perl
         if: runner.os == 'Linux'
+        timeout-minutes: 5
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -63,7 +65,6 @@ jobs:
           BIN_NAME="atim"
           TARGET_DIR="target/${{ matrix.target }}/release"
           ARCHIVE_NAME="atim-${{ matrix.target }}.tar.gz"
-          # Windows produces atim.exe; Linux produces atim
           if [ -f "$TARGET_DIR/$BIN_NAME.exe" ]; then
             cp "$TARGET_DIR/$BIN_NAME.exe" "$BIN_NAME.exe"
             tar czf "$ARCHIVE_NAME" "$BIN_NAME.exe"
@@ -86,11 +87,7 @@ jobs:
 
   release:
     name: Create release
-    needs: build
     runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-      changelog: ${{ steps.changelog.outputs.changelog }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -110,7 +107,6 @@ jobs:
             RANGE="${PREV_TAG}.."
           fi
 
-          # Build changelog sections from conventional commits
           CHANGELOG=""
           add_section() {
             local label="$1"
@@ -120,7 +116,6 @@ jobs:
               CHANGELOG+="## ${emoji} ${label}\n"
               while IFS= read -r line; do
                 [ -z "$line" ] && continue
-                # Strip the type prefix and format as list item
                 msg=$(echo "$line" | sed -E 's/^(feat|fix|docs|refactor|test|chore|perf|style)\(?[^)]*\)?:\s*//')
                 CHANGELOG+="- ${msg}\n"
               done <<< "$commits"
@@ -144,7 +139,6 @@ jobs:
           add_section "Chores" "🔧" "$CHORES"
           add_section "Tests" "✅" "$TESTS"
 
-          # Escape for JSON
           CHANGELOG="${CHANGELOG//'%'/'%25'}"
           CHANGELOG="${CHANGELOG//$'\n'/'%0A'}"
           CHANGELOG="${CHANGELOG//$'\r'/'%0D'}"
@@ -158,29 +152,61 @@ jobs:
           draft: false
           prerelease: false
 
-  upload:
-    name: Upload assets
+  upload-x86_64-linux:
+    name: Upload x86_64-linux
     needs: [build, release]
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: atim-x86_64-unknown-linux-musl
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.ref_name }}" atim-x86_64-unknown-linux-musl.tar.gz atim-x86_64-unknown-linux-musl.tar.gz.sha256 --clobber
+
+  upload-aarch64-linux:
+    name: Upload aarch64-linux
+    needs: [build, release]
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: atim-aarch64-unknown-linux-musl
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.ref_name }}" atim-aarch64-unknown-linux-musl.tar.gz atim-aarch64-unknown-linux-musl.tar.gz.sha256 --clobber
+
+  upload-windows:
+    name: Upload windows
+    needs: [build, release]
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: atim-x86_64-pc-windows-msvc
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.ref_name }}" atim-x86_64-pc-windows-msvc.tar.gz atim-x86_64-pc-windows-msvc.tar.gz.sha256 --clobber
+
+  packaging:
+    name: Generate Homebrew/AUR
+    needs: build
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/download-artifact@v4
+
       - name: Get version
         id: version
         run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
-
-      - name: Download all build artifacts
-        uses: actions/download-artifact@v4
-
-      - name: Upload binaries to release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          for dir in atim-*/; do
-            for file in "$dir"*; do
-              gh release upload "${{ github.ref_name }}" "$file" --clobber
-            done
-          done
 
       - name: Generate Homebrew formula
         run: |
