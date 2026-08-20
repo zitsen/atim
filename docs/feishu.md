@@ -126,4 +126,5 @@ atim service --start
 
 - `im:message` — 接收和发送消息
 - `im:message.group_at_msg` — 接收群聊 @ 消息
+- `im:message.group_msg.include_bot:read` — 接收群聊中所有消息（含未 @机器人 的消息，需在飞书后台开启「接收群聊中所有消息」）
 - `im:resource` — 发送图片/文件

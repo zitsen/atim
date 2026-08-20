@@ -35,6 +35,9 @@ pub struct ChatBinding {
     pub group_chat_id: Option<i64>,
     pub topic_name: Option<String>,
     pub session_id: String,
+    /// When true, only respond to @-mentions in group chats (default: false).
+    #[serde(default)]
+    pub reply_at_only: bool,
 }
 
 /// Server runtime state — all in-memory mappings derived from the DB.

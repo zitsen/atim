@@ -60,6 +60,7 @@ mod tests {
                 group_chat_id: None,
                 topic_name: None,
                 session_id: "sess-abc".into(),
+                reply_at_only: false,
             }],
             windows,
         );
@@ -98,6 +99,7 @@ mod tests {
                 group_chat_id: None,
                 topic_name: None,
                 session_id: "sess-orphan".into(),
+                reply_at_only: false,
             }],
             HashMap::new(),
         );

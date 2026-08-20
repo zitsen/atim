@@ -11,7 +11,7 @@ use atim_core::session::{ChatBinding, RuntimeState, SessionInfo, WindowBinding};
 
 // ── Schema (self-describing — SQLite stores its own version) ──
 
-const SCHEMA_VERSION: i32 = 2;
+const SCHEMA_VERSION: i32 = 3;
 
 const CREATE_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS chat_bindings (
     group_chat_id  INTEGER,
     topic_name     TEXT,
     session_id     TEXT NOT NULL,
+    reply_at_only  INTEGER NOT NULL DEFAULT 0,
     UNIQUE(user_id, thread_id, chat_id)
 );
 CREATE INDEX IF NOT EXISTS idx_chat_bindings_session
@@ -130,6 +131,22 @@ impl Store {
             connection
                 .execute(
                     "INSERT INTO schema_version (version) VALUES (?1)",
+                    params![SCHEMA_VERSION],
+                )
+                .ok();
+        }
+
+        // V2 → V3: add reply_at_only column to chat_bindings
+        if version > 0 && version < 3 {
+            connection
+                .execute(
+                    "ALTER TABLE chat_bindings ADD COLUMN reply_at_only INTEGER NOT NULL DEFAULT 0",
+                    [],
+                )
+                .ok();
+            connection
+                .execute(
+                    "UPDATE schema_version SET version = ?1",
                     params![SCHEMA_VERSION],
                 )
                 .ok();
@@ -602,7 +619,7 @@ impl Store {
         // Chat bindings
         let mut stmt = db
             .prepare_cached(
-                "SELECT user_id, thread_id, chat_id, display_name, group_chat_id, topic_name, session_id
+                "SELECT user_id, thread_id, chat_id, display_name, group_chat_id, topic_name, session_id, reply_at_only
                  FROM chat_bindings ORDER BY id",
             )
             .map_err(|e| Error::State(format!("prepare load chat_bindings: {e}")))?;
@@ -616,6 +633,7 @@ impl Store {
                     group_chat_id: row.get(4)?,
                     topic_name: row.get(5)?,
                     session_id: row.get(6)?,
+                    reply_at_only: row.get::<_, i32>(7).unwrap_or(0) != 0,
                 })
             })
             .map_err(|e| Error::State(format!("query chat_bindings: {e}")))?
@@ -672,8 +690,8 @@ impl Store {
             {
                 let mut stmt = db.prepare_cached(
                     "INSERT INTO chat_bindings
-                        (user_id, thread_id, chat_id, display_name, group_chat_id, topic_name, session_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        (user_id, thread_id, chat_id, display_name, group_chat_id, topic_name, session_id, reply_at_only)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 )?;
                 for cb in &rt.chat_bindings {
                     stmt.execute(params![
@@ -684,6 +702,7 @@ impl Store {
                         cb.group_chat_id,
                         cb.topic_name,
                         &cb.session_id,
+                        cb.reply_at_only as i32,
                     ])?;
                 }
             }
@@ -794,8 +813,8 @@ impl Store {
             // Upsert the target binding
             db.execute(
                 "INSERT INTO chat_bindings
-                    (user_id, thread_id, chat_id, display_name, group_chat_id, topic_name, session_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                    (user_id, thread_id, chat_id, display_name, group_chat_id, topic_name, session_id, reply_at_only)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT(user_id, thread_id, chat_id) DO UPDATE
                      SET display_name=excluded.display_name,
                          group_chat_id=excluded.group_chat_id,
@@ -803,8 +822,8 @@ impl Store {
                          session_id=excluded.session_id",
                 params![
                     cb.user_id, cb.thread_id, cb.chat_id,
-                    &cb.display_name, cb.group_chat_id, cb.topic_name,
-                    &cb.session_id,
+                    &cb.display_name, cb.group_chat_id, &cb.topic_name,
+                    &cb.session_id, cb.reply_at_only as i32,
                 ],
             )?;
 
@@ -1117,6 +1136,7 @@ mod tests {
             group_chat_id: None,
             topic_name: None,
             session_id: "sess-1".into(),
+            reply_at_only: false,
         }];
 
         let rt = RuntimeState {

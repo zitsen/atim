@@ -665,17 +665,30 @@ impl Server {
         // ── /atim command (meta-commands, no binding needed) ──
         if let Some(atim_cmd) = text.trim().strip_prefix("/atim ") {
             let subcommand = atim_cmd.trim();
-            return self.handle_atim_command(&target, subcommand).await;
+            return self.handle_atim_command(&target, user_id, subcommand).await;
         }
         if text.trim() == "/atim" {
             let _ = self
                 .im_adapter
-                .send_message(
-                    &target,
-                    "Available subcommands: `/atim status`, `/atim help`",
-                )
+                .send_message(&target, "Available subcommands: `/atim help`")
                 .await;
             return Ok(());
+        }
+
+        // ── replyAtOnly filter: skip non-@mention messages in group chats ──
+        if is_group && !is_mention {
+            let thread_id_val = target.thread_id.map(|t| t.0).unwrap_or(0);
+            let should_skip = rt
+                .chat_bindings
+                .iter()
+                .find(|b| b.user_id == user_id && b.thread_id == thread_id_val)
+                .is_some_and(|b| b.reply_at_only);
+            if should_skip {
+                tracing::debug!(
+                    "[handle_text_message] replyAtOnly=true, skipping non-mention message from user {user_id} in group"
+                );
+                return Ok(());
+            }
         }
 
         // Helper: find chat_binding by (user_id, thread_id)
@@ -3403,6 +3416,7 @@ impl Server {
                 group_chat_id: None,
                 topic_name: topic_name.map(String::from),
                 session_id: String::new(),
+                reply_at_only: false,
             })
             .await?;
 
@@ -3438,6 +3452,7 @@ impl Server {
                     group_chat_id: None,
                     topic_name: topic_name.map(String::from),
                     session_id: sid,
+                    reply_at_only: false,
                 })
                 .await?;
         }
@@ -3526,6 +3541,7 @@ impl Server {
                 group_chat_id: None,
                 topic_name: topic_name.map(String::from),
                 session_id: session_id.to_string(),
+                reply_at_only: false,
             })
             .await?;
 
@@ -3643,6 +3659,7 @@ impl Server {
                 group_chat_id: None,
                 topic_name: topic_name.map(String::from),
                 session_id: String::new(),
+                reply_at_only: false,
             })
             .await?;
 
@@ -3671,6 +3688,7 @@ impl Server {
                     group_chat_id: None,
                     topic_name: topic_name.map(String::from),
                     session_id: sid,
+                    reply_at_only: false,
                 })
                 .await?;
         }
@@ -3778,6 +3796,7 @@ impl Server {
                 group_chat_id: None,
                 topic_name: topic_name.map(String::from),
                 session_id: String::new(),
+                reply_at_only: false,
             })
             .await?;
 
@@ -3805,6 +3824,7 @@ impl Server {
                     group_chat_id: None,
                     topic_name: topic_name.map(String::from),
                     session_id: sid,
+                    reply_at_only: false,
                 })
                 .await?;
         }
@@ -4422,7 +4442,18 @@ impl Server {
             .await
             .retain(|(chat_id, tid, _), _| live_chats.contains(&(*chat_id, *tid)));
 
-        for (cb, wb) in rt.resolved_bindings() {
+        // Deduplicate by window_id: when multiple chat bindings share the same
+        // session, only probe the last binding per window to avoid sending
+        // interactive UI (e.g. permission requests) to all groups.
+        let mut seen_windows = HashSet::new();
+        let bindings: Vec<_> = rt
+            .resolved_bindings()
+            .into_iter()
+            .rev()
+            .filter(|(_cb, wb)| seen_windows.insert(wb.window_id.clone()))
+            .collect();
+
+        for (cb, wb) in bindings.into_iter().rev() {
             let wid = WindowId(wb.window_id.clone());
             let pane_text = match self.tmux_mgr.capture_pane(&wid).await {
                 Ok(t) => t,
@@ -5532,6 +5563,7 @@ mod tests {
                 group_chat_id: None,
                 topic_name: None,
                 session_id: "ses_test".into(),
+                reply_at_only: false,
             },
             ChatBinding {
                 user_id: 100,
@@ -5541,6 +5573,7 @@ mod tests {
                 group_chat_id: None,
                 topic_name: None,
                 session_id: "ses_other".into(),
+                reply_at_only: false,
             },
         ];
         rt.sessions.insert(
@@ -5587,6 +5620,7 @@ mod tests {
             group_chat_id: None,
             topic_name: None,
             session_id: String::new(),
+            reply_at_only: false,
         });
         assert!(rt.resolve_window_binding(200, 400).is_none());
     }
@@ -5602,6 +5636,7 @@ mod tests {
             group_chat_id: None,
             topic_name: None,
             session_id: "ses_test".into(),
+            reply_at_only: false,
         });
         // Both chat bindings should resolve to the same window
         let wb1 = rt.resolve_window_binding(100, 200).unwrap();
@@ -5622,6 +5657,7 @@ mod tests {
             group_chat_id: None,
             topic_name: None,
             session_id: "ses_old".into(),
+            reply_at_only: false,
         });
         rt.window_bindings.insert(
             "@3".into(),
@@ -5926,6 +5962,7 @@ mod tests {
             group_chat_id: None,
             topic_name: None,
             session_id: "ses_old".into(),
+            reply_at_only: false,
         });
 
         // Apply SessionMapChanged logic

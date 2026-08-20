@@ -332,6 +332,7 @@ impl super::Server {
                         group_chat_id: cb.group_chat_id,
                         topic_name: cb.topic_name.clone(),
                         session_id: sid.clone(),
+                        reply_at_only: false,
                     })
                     .await?;
                 let mut map = self.state_mgr.load_session_map().await.unwrap_or_default();
@@ -635,13 +636,15 @@ impl super::Server {
         }
     }
 
-    /// Handle `/atim status` and `/atim help` commands.
+    /// Handle `/atim` subcommands.
     pub(super) async fn handle_atim_command(
         &self,
         target: &MessageTarget,
+        user_id: i64,
         cmd: &str,
     ) -> Result<()> {
         match cmd {
+            // ── Session commands ──
             "status" | "st" => {
                 let _ = self
                     .im_adapter
@@ -723,7 +726,7 @@ impl super::Server {
                     .send_message(target, &lines.join("\n"))
                     .await;
             }
-            cmd if cmd.starts_with("ls") => {
+            "ls" => {
                 let rt = self.state_mgr.load_runtime().await?;
                 let mut lines = vec!["| Name | Window | CWD | Agent | Session ID |".to_string()];
                 lines.push("|------|--------|-----|-------|------------|".to_string());
@@ -886,26 +889,80 @@ impl super::Server {
                     }
                 }
             }
+            // ── Config commands (also accessible via /atim config) ──
+            "show" | "sh" => {
+                self.handle_config_show(target, user_id).await;
+            }
+            cmd if cmd.starts_with("set ") || cmd.starts_with("s ") => {
+                let args = if cmd.starts_with("set ") {
+                    cmd.strip_prefix("set ")
+                } else {
+                    cmd.strip_prefix("s ")
+                }
+                .expect("guarded by starts_with")
+                .trim();
+                self.handle_config_set(target, user_id, args).await;
+            }
+            // /atim config [show|set ...] — canonical config subcommand
+            cmd if cmd == "config" || cmd == "c" => {
+                self.handle_config_show(target, user_id).await;
+            }
+            cmd if cmd.starts_with("config ") || cmd.starts_with("c ") => {
+                let rest = if cmd.starts_with("config ") {
+                    cmd.strip_prefix("config ")
+                } else {
+                    cmd.strip_prefix("c ")
+                }
+                .expect("guarded by starts_with")
+                .trim();
+                match rest {
+                    "show" | "sh" | "" => {
+                        self.handle_config_show(target, user_id).await;
+                    }
+                    _ if rest.starts_with("set ") || rest.starts_with("s ") => {
+                        let args = if rest.starts_with("set ") {
+                            rest.strip_prefix("set ")
+                        } else {
+                            rest.strip_prefix("s ")
+                        }
+                        .expect("guarded by starts_with")
+                        .trim();
+                        self.handle_config_set(target, user_id, args).await;
+                    }
+                    _ => {
+                        let _ = self
+                            .im_adapter
+                            .send_message(target, "Usage: `/atim config [show|set <key> <value>]`")
+                            .await;
+                    }
+                }
+            }
             "help" | "h" | "-h" | "--help" => {
                 let help = concat!(
-                    "**Available commands**\n\n",
-                    "`/atim status` — System CPU/mem/disk status\n",
-                    "`/atim ls`     — List sessions (name, window, cwd, agent, session-id)\n",
+                    "**atim Commands**\n\n",
+                    "**Session**\n",
+                    "`/atim status` (`st`) — System CPU/mem/disk\n",
+                    "`/atim ls` — List sessions\n",
                     "`/atim chdir <name> <dir>` — Update session cwd\n",
-                    "`/atim rm <name>` — Remove session and close tmux window\n",
-                    "`/atim help`   — This help\n",
-                    "`/ss` / `/screenshot` — Capture terminal screenshot\n",
-                    "`/usage` — Show Claude Code API usage\n",
-                    "`/status` — Show Claude Code session info\n",
-                    "`/doctor` — Claude Code diagnostics\n",
-                    "`/compact` — Compact Claude Code conversation\n",
-                    "`/clear` — Clear Claude Code conversation\n",
+                    "`/atim rm <name>` — Remove session\n\n",
+                    "**Config**\n",
+                    "`/atim config` (`c`) — Show chat config\n",
+                    "`/atim config set <key> <value>` — Set config\n\n",
+                    "**Session control**\n",
                     "`/switch <agent>` — Switch running agent\n",
-                    "`/esc` / `/dismiss` — Send Escape key\n",
-                    "`/enter` — Send Enter key\n",
                     "`/rebind` — Re-detect agent & session\n",
+                    "`/reload` — Restart agent in same window\n",
+                    "`/new` — New agent session\n",
+                    "`/unbind` — Remove binding & close window\n",
                     "`/check` — Health check\n\n",
-                    "Send any text to forward it to the agent.",
+                    "**Claude Code**\n",
+                    "`/status` `/doctor` `/help` `/compact` `/clear`\n\n",
+                    "**Tools**\n",
+                    "`/ss` `/screenshot` — Terminal screenshot\n",
+                    "`/usage` — API usage\n",
+                    "`/esc` `/dismiss` — Send Escape\n",
+                    "`/enter` — Send Enter\n",
+                    "`!cmd` — Run shell command\n",
                 );
                 let _ = self.im_adapter.send_message(target, help).await;
             }
@@ -920,5 +977,125 @@ impl super::Server {
             }
         }
         Ok(())
+    }
+
+    /// Show config for the current chat.
+    async fn handle_config_show(&self, target: &MessageTarget, user_id: i64) {
+        let rt = match self.state_mgr.load_runtime().await {
+            Ok(rt) => rt,
+            Err(e) => {
+                let _ = self
+                    .im_adapter
+                    .send_message(target, &format!("Failed to load config: {e}"))
+                    .await;
+                return;
+            }
+        };
+        let thread_id = target.thread_id.map(|t| t.0).unwrap_or(0);
+        let cb = rt
+            .chat_bindings
+            .iter()
+            .find(|b| b.user_id == user_id && b.thread_id == thread_id);
+        match cb {
+            Some(cb) => {
+                let msg = format!(
+                    "**Chat Config**\n\n`replyAtOnly`: {}",
+                    if cb.reply_at_only { "true" } else { "false" },
+                );
+                let _ = self.im_adapter.send_message(target, &msg).await;
+            }
+            None => {
+                let _ = self
+                    .im_adapter
+                    .send_message(
+                        target,
+                        "No chat binding yet. Start a session first with `/atim help`.",
+                    )
+                    .await;
+            }
+        }
+    }
+
+    /// Set a config value for the current chat.
+    async fn handle_config_set(&self, target: &MessageTarget, user_id: i64, args: &str) {
+        let mut parts = args.splitn(2, ' ');
+        let key = parts.next().unwrap_or("").trim();
+        let value = parts.next().unwrap_or("").trim();
+        match key {
+            "replyAtOnly" => {
+                let val = match value {
+                    "true" | "1" | "on" => true,
+                    "false" | "0" | "off" => false,
+                    _ => {
+                        let _ = self
+                            .im_adapter
+                            .send_message(
+                                target,
+                                "Usage: `/atim config set replyAtOnly [true|false]`",
+                            )
+                            .await;
+                        return;
+                    }
+                };
+                let thread_id = target.thread_id.map(|t| t.0).unwrap_or(0);
+                let mut rt = match self.state_mgr.load_runtime().await {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        let _ = self
+                            .im_adapter
+                            .send_message(target, &format!("Failed to load config: {e}"))
+                            .await;
+                        return;
+                    }
+                };
+                if let Some(cb) = rt
+                    .chat_bindings
+                    .iter_mut()
+                    .find(|b| b.user_id == user_id && b.thread_id == thread_id)
+                {
+                    cb.reply_at_only = val;
+                    if let Err(e) = self.state_mgr.save_runtime(&rt).await {
+                        let _ = self
+                            .im_adapter
+                            .send_message(target, &format!("Failed to save config: {e}"))
+                            .await;
+                        return;
+                    }
+                    let _ = self
+                        .im_adapter
+                        .send_message(
+                            target,
+                            &format!(
+                                "`replyAtOnly` set to **{}**",
+                                if val { "true" } else { "false" },
+                            ),
+                        )
+                        .await;
+                } else {
+                    let _ = self
+                        .im_adapter
+                        .send_message(target, "No chat binding found. Start a session first.")
+                        .await;
+                }
+            }
+            "" => {
+                let _ = self
+                    .im_adapter
+                    .send_message(
+                        target,
+                        "Usage: `/atim config set <key> <value>`\nAvailable keys: `replyAtOnly`",
+                    )
+                    .await;
+            }
+            _ => {
+                let _ = self
+                    .im_adapter
+                    .send_message(
+                        target,
+                        &format!("Unknown config key: `{}`. Available: `replyAtOnly`", key),
+                    )
+                    .await;
+            }
+        }
     }
 }
