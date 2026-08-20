@@ -12,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.21"
+version = "0.4.22"
 edition = "2024"
 license = "MIT"
 description = "AI Agent Through IM"
