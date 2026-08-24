@@ -174,10 +174,28 @@ impl Agent for ClaudeAgent {
     }
 
     fn resume_command(&self, session_id: &str) -> Option<String> {
-        Some(format!(
-            "{} --resume {session_id}",
-            self.new_session_command()
-        ))
+        let args = self.extra_args();
+        if args.is_empty() {
+            Some(format!(
+                "{} --resume {session_id}",
+                self.new_session_command()
+            ))
+        } else {
+            Some(format!(
+                "{} --resume {session_id} {}",
+                self.new_session_command(),
+                args.join(" ")
+            ))
+        }
+    }
+
+    fn extra_args(&self) -> Vec<String> {
+        vec![
+            "--dangerously-skip-permissions".into(),
+            "--allow-dangerously-skip-permissions".into(),
+            "--autocompact".into(),
+            "auto".into(),
+        ]
     }
 
     fn supports_sessions(&self) -> bool {

@@ -889,6 +889,64 @@ impl super::Server {
                     }
                 }
             }
+            // ── Shell command (run outside session window) ──
+            cmd if cmd.starts_with("cmd ") => {
+                let shell_cmd = cmd
+                    .strip_prefix("cmd ")
+                    .expect("guarded by starts_with")
+                    .trim();
+                if shell_cmd.is_empty() {
+                    let _ = self
+                        .im_adapter
+                        .send_message(target, "Usage: `/atim cmd <shell command>`")
+                        .await;
+                    return Ok(());
+                }
+                let _ = self.im_adapter.send_chat_action(target).await;
+                match tokio::process::Command::new("sh")
+                    .args(["-c", shell_cmd])
+                    .output()
+                    .await
+                {
+                    Ok(out) => {
+                        let stdout = String::from_utf8_lossy(&out.stdout);
+                        let stderr = String::from_utf8_lossy(&out.stderr);
+                        let mut output = String::new();
+                        if !stdout.is_empty() {
+                            output.push_str(&stdout);
+                        }
+                        if !stderr.is_empty() {
+                            if !output.is_empty() {
+                                output.push_str("\n--- stderr ---\n");
+                            }
+                            output.push_str(&stderr);
+                        }
+                        if !out.status.success() {
+                            output.push_str(&format!(
+                                "\n(exit code: {})",
+                                out.status.code().unwrap_or(-1)
+                            ));
+                        }
+                        if output.is_empty() {
+                            output = "(no output)".into();
+                        }
+                        if output.len() > super::MAX_MSG_LEN {
+                            output.truncate(super::MAX_MSG_LEN - 20);
+                            output.push_str("\n...(truncated)");
+                        }
+                        let _ = self
+                            .im_adapter
+                            .send_message(target, &format!("```\n{output}\n```"))
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = self
+                            .im_adapter
+                            .send_message(target, &format!("Failed to run command: {e}"))
+                            .await;
+                    }
+                }
+            }
             // ── Config commands (also accessible via /atim config) ──
             "show" | "sh" => {
                 self.handle_config_show(target, user_id).await;
@@ -944,7 +1002,8 @@ impl super::Server {
                     "`/atim status` (`st`) — System CPU/mem/disk\n",
                     "`/atim ls` — List sessions\n",
                     "`/atim chdir <name> <dir>` — Update session cwd\n",
-                    "`/atim rm <name>` — Remove session\n\n",
+                    "`/atim rm <name>` — Remove session\n",
+                    "`/atim cmd <shell>` — Run shell command\n\n",
                     "**Config**\n",
                     "`/atim config` (`c`) — Show chat config\n",
                     "`/atim config set <key> <value>` — Set config\n\n",

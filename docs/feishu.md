@@ -122,9 +122,6 @@ atim service --start
 
 ## 权限配置
 
-飞书机器人需要以下权限：
+创建飞书机器人后，大部分权限已自动配置，仅需手动添加以下权限：
 
-- `im:message` — 接收和发送消息
-- `im:message.group_at_msg` — 接收群聊 @ 消息
 - `im:message.group_msg.include_bot:read` — 接收群聊中所有消息（含未 @机器人 的消息，需在飞书后台开启「接收群聊中所有消息」）
-- `im:resource` — 发送图片/文件

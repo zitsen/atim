@@ -11,6 +11,7 @@ mod hook;
 mod router;
 mod server;
 mod service;
+mod update;
 
 #[derive(Parser)]
 #[command(name = "atim", about = "IM-to-Claude-Code bridge via tmux", version)]
@@ -59,6 +60,8 @@ enum Command {
         #[arg(long)]
         system: bool,
     },
+    /// Check for updates and install the latest version from GitHub
+    Update,
 }
 
 #[tokio::main]
@@ -115,6 +118,13 @@ async fn main() -> anyhow::Result<()> {
             }
             if let Err(e) = service::run_service(&cmds, system) {
                 eprintln!("atim service error: {e}");
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
+        Some(Command::Update) => {
+            if let Err(e) = update::run_update().await {
+                eprintln!("atim update error: {e}");
                 std::process::exit(1);
             }
             return Ok(());
