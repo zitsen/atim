@@ -4113,7 +4113,25 @@ impl Server {
                     .im_adapter
                     .edit_message(&target, &msg_id, "Starting new session setup...")
                     .await;
-                self.send_agent_picker(&target, user_id, thread_id).await?;
+                // Check if a default agent is configured
+                let default_agent = self
+                    .state_mgr
+                    .load_chat_setting(user_id, thread_id, "default_agent")
+                    .await
+                    .unwrap_or(None)
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| {
+                        let cfg = self.config.default_agent.clone();
+                        if cfg.is_empty() { None } else { Some(cfg) }
+                    });
+                if let Some(agent_name) = default_agent
+                    && self.config.agent_registry.get(&agent_name).is_some()
+                {
+                    self.pending_agents.lock().await.insert(key, agent_name);
+                    self.show_setup_flow(&target, user_id, thread_id).await?;
+                } else {
+                    self.send_agent_picker(&target, user_id, thread_id).await?;
+                }
             }
             "bind" => {
                 let window_id = arg.unwrap_or("");
