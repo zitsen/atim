@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::agent::AgentRegistry;
@@ -62,12 +63,25 @@ pub struct TelegramImSection {
     pub allowed_users: String,
 }
 
+/// Per-agent config entry (under [agent.<name>]).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct AgentConfig {
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AgentSection {
     #[serde(default = "_default_agent_command")]
     pub command: String,
     #[serde(default, alias = "default")]
     pub default_agent: String,
+    /// Per-agent overrides keyed by agent name (e.g. "claude", "copilot").
+    /// Populated from [agent.claude], [agent.copilot], etc. in config.toml.
+    #[serde(default, flatten)]
+    pub agents: HashMap<String, AgentConfig>,
 }
 fn _default_agent_command() -> String {
     "claude".into()
@@ -77,6 +91,7 @@ impl Default for AgentSection {
         Self {
             command: "claude".into(),
             default_agent: String::new(),
+            agents: HashMap::new(),
         }
     }
 }
@@ -313,7 +328,11 @@ impl Config {
                     .filter(|s| !s.is_empty())
             })
             .unwrap_or_default();
-        let agent_registry = AgentRegistry::from_env();
+        let agent_configs = toml_cfg
+            .as_ref()
+            .map(|c| c.agent.agents.clone())
+            .unwrap_or_default();
+        let agent_registry = AgentRegistry::from_env_with_configs(&agent_configs);
 
         // Backward-compat fields now point to the new canonical files.
         let state_file = atim_dir.join("store.db");

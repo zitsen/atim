@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::config::AgentConfig;
 use crate::message::AgentKind;
 
 use super::AgentParser;
@@ -11,12 +13,28 @@ use super::trait_def::{Agent, AgentId};
 #[derive(Clone)]
 pub struct AgentHandle {
     inner: Arc<dyn Agent>,
+    override_command: Option<String>,
+    extra_args_override: Option<Vec<String>>,
 }
 
 impl AgentHandle {
     pub fn new(agent: impl Agent + 'static) -> Self {
         Self {
             inner: Arc::new(agent),
+            override_command: None,
+            extra_args_override: None,
+        }
+    }
+
+    pub fn with_overrides(
+        agent: impl Agent + 'static,
+        command: Option<String>,
+        args: Option<Vec<String>>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(agent),
+            override_command: command.filter(|s| !s.is_empty()),
+            extra_args_override: args.filter(|v| !v.is_empty()),
         }
     }
 
@@ -30,13 +48,17 @@ impl AgentHandle {
         self.inner.kind()
     }
     pub fn new_session_command(&self) -> String {
-        self.inner.new_session_command()
+        self.override_command
+            .clone()
+            .unwrap_or_else(|| self.inner.new_session_command())
     }
     pub fn resume_command(&self, session_id: &str) -> Option<String> {
         self.inner.resume_command(session_id)
     }
     pub fn extra_args(&self) -> Vec<String> {
-        self.inner.extra_args()
+        self.extra_args_override
+            .clone()
+            .unwrap_or_else(|| self.inner.extra_args())
     }
     pub fn required_env(&self) -> Vec<(&str, &str)> {
         self.inner.required_env()
@@ -134,13 +156,32 @@ impl AgentRegistry {
 
     /// Register all built-in agents and select a default based on config.
     pub fn from_env() -> Self {
+        Self::from_env_with_configs(&HashMap::new())
+    }
+
+    /// Register all built-in agents with per-agent config overrides.
+    pub fn from_env_with_configs(agent_configs: &HashMap<String, AgentConfig>) -> Self {
         let mut reg = Self::empty();
 
+        macro_rules! register_agent {
+            ($agent:expr, $name:expr) => {
+                if let Some(cfg) = agent_configs.get($name) {
+                    reg.register(AgentHandle::with_overrides(
+                        $agent,
+                        Some(cfg.command.clone()).filter(|s| !s.is_empty()),
+                        Some(cfg.args.clone()).filter(|v| !v.is_empty()),
+                    ));
+                } else {
+                    reg.register(AgentHandle::new($agent));
+                }
+            };
+        }
+
         // Always register all agents so `/switch` works
-        reg.register(AgentHandle::new(super::claude::ClaudeAgent));
-        reg.register(AgentHandle::new(super::copilot::CopilotAgent));
-        reg.register(AgentHandle::new(super::codex::CodexAgent));
-        reg.register(AgentHandle::new(super::mimo::MimoAgent));
+        register_agent!(super::claude::ClaudeAgent, "claude");
+        register_agent!(super::copilot::CopilotAgent, "copilot");
+        register_agent!(super::codex::CodexAgent, "codex");
+        register_agent!(super::mimo::MimoAgent, "mimo");
 
         // Determine default from ATIM_AGENT_COMMAND (or fallback env vars)
         let cmd = std::env::var("ATIM_AGENT_COMMAND")
