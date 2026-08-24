@@ -2434,8 +2434,31 @@ impl Server {
                 self.pending_chat_names.lock().await.insert(key, cn.clone());
             }
 
-            self.send_agent_picker(&target, user_id, target.thread_id.map(|t| t.0).unwrap_or(0))
-                .await?;
+            // Check if a default agent is configured for this chat
+            // Priority: per-chat setting > config.toml [agent] default_agent
+            let default_agent = self
+                .state_mgr
+                .load_chat_setting(user_id, thread_id, "default_agent")
+                .await
+                .unwrap_or(None)
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    let cfg = self.config.default_agent.clone();
+                    if cfg.is_empty() { None } else { Some(cfg) }
+                });
+            if let Some(agent_name) = default_agent
+                && !agent_name.is_empty()
+                && self.config.agent_registry.get(&agent_name).is_some()
+            {
+                tracing::info!(
+                    "[handle_text_message] Using default agent '{agent_name}' for user {user_id}"
+                );
+                self.pending_agents.lock().await.insert(key, agent_name);
+                self.show_setup_flow(&target, user_id, thread_id).await?;
+                return Ok(());
+            }
+
+            self.send_agent_picker(&target, user_id, thread_id).await?;
         }
 
         Ok(())
@@ -2711,6 +2734,13 @@ impl Server {
                     callback_data: format!("cb:{sel_token}:browse:confirm"),
                 });
                 buttons.push(nav_row);
+
+                // "Switch Agent" button to go back to agent picker
+                let agent_token = Self::make_callback_token(&mut ctx_lock, user_id, thread_id);
+                buttons.push(vec![Button {
+                    text: "🤖 Switch Agent".into(),
+                    callback_data: format!("cb:{agent_token}:browse:switch_agent"),
+                }]);
 
                 let text = format!(
                     "📁 Select a project directory:\n{}",
@@ -3042,6 +3072,15 @@ impl Server {
                     )
                     .await?;
                 }
+            }
+            "switch_agent" => {
+                // Clear browser session and go back to agent picker
+                self.browser.end_session(user_id).await;
+                let _ = self
+                    .im_adapter
+                    .edit_message(target, msg_id, "Switching agent...")
+                    .await;
+                self.send_agent_picker(target, user_id, thread_id).await?;
             }
             _ => {
                 tracing::warn!("Unknown browser action: {action}");
@@ -4124,6 +4163,11 @@ impl Server {
                         .lock()
                         .await
                         .insert(key, agent_name.clone());
+                    // Save as default agent for this chat
+                    let _ = self
+                        .state_mgr
+                        .save_chat_setting(user_id, thread_id, "default_agent", &agent_name)
+                        .await;
                 }
                 // Re-insert pending message for the subsequent setup flow
                 self.pending_messages.lock().await.insert(key, text);

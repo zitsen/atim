@@ -1040,39 +1040,39 @@ impl super::Server {
 
     /// Show config for the current chat.
     async fn handle_config_show(&self, target: &MessageTarget, user_id: i64) {
-        let rt = match self.state_mgr.load_runtime().await {
-            Ok(rt) => rt,
-            Err(e) => {
-                let _ = self
-                    .im_adapter
-                    .send_message(target, &format!("Failed to load config: {e}"))
-                    .await;
-                return;
-            }
-        };
         let thread_id = target.thread_id.map(|t| t.0).unwrap_or(0);
-        let cb = rt
-            .chat_bindings
-            .iter()
-            .find(|b| b.user_id == user_id && b.thread_id == thread_id);
-        match cb {
-            Some(cb) => {
-                let msg = format!(
-                    "**Chat Config**\n\n`replyAtOnly`: {}",
-                    if cb.reply_at_only { "true" } else { "false" },
-                );
-                let _ = self.im_adapter.send_message(target, &msg).await;
-            }
-            None => {
-                let _ = self
-                    .im_adapter
-                    .send_message(
-                        target,
-                        "No chat binding yet. Start a session first with `/atim help`.",
-                    )
-                    .await;
-            }
-        }
+
+        // replyAtOnly from ChatBinding
+        let reply_at_only = match self.state_mgr.load_runtime().await {
+            Ok(rt) => rt
+                .chat_bindings
+                .iter()
+                .find(|b| b.user_id == user_id && b.thread_id == thread_id)
+                .map(|b| b.reply_at_only)
+                .unwrap_or(false),
+            Err(_) => false,
+        };
+
+        // defaultAgent from chat_settings
+        let default_agent = self
+            .state_mgr
+            .load_chat_setting(user_id, thread_id, "default_agent")
+            .await
+            .unwrap_or(None)
+            .unwrap_or_default();
+
+        let agent_display = if default_agent.is_empty() {
+            "(not set)".to_string()
+        } else {
+            format!("`{default_agent}`")
+        };
+
+        let msg = format!(
+            "**Chat Config**\n\n`replyAtOnly`: {}\n`defaultAgent`: {}",
+            if reply_at_only { "true" } else { "false" },
+            agent_display,
+        );
+        let _ = self.im_adapter.send_message(target, &msg).await;
     }
 
     /// Set a config value for the current chat.
@@ -1137,12 +1137,61 @@ impl super::Server {
                         .await;
                 }
             }
+            "defaultAgent" => {
+                let agent_name = value.trim().to_lowercase();
+                if agent_name.is_empty() {
+                    // Clear the default
+                    let thread_id = target.thread_id.map(|t| t.0).unwrap_or(0);
+                    let _ = self
+                        .state_mgr
+                        .save_chat_setting(user_id, thread_id, "default_agent", "")
+                        .await;
+                    let _ = self
+                        .im_adapter
+                        .send_message(target, "`defaultAgent` cleared.")
+                        .await;
+                } else if self.config.agent_registry.get(&agent_name).is_some() {
+                    let thread_id = target.thread_id.map(|t| t.0).unwrap_or(0);
+                    if let Err(e) = self
+                        .state_mgr
+                        .save_chat_setting(user_id, thread_id, "default_agent", &agent_name)
+                        .await
+                    {
+                        let _ = self
+                            .im_adapter
+                            .send_message(target, &format!("Failed to save config: {e}"))
+                            .await;
+                        return;
+                    }
+                    let _ = self
+                        .im_adapter
+                        .send_message(target, &format!("`defaultAgent` set to **{agent_name}**"))
+                        .await;
+                } else {
+                    let available: Vec<&str> = self
+                        .config
+                        .agent_registry
+                        .iter()
+                        .map(|a| a.name())
+                        .collect();
+                    let _ = self
+                        .im_adapter
+                        .send_message(
+                            target,
+                            &format!(
+                                "Unknown agent '{agent_name}'. Available: {}",
+                                available.join(", ")
+                            ),
+                        )
+                        .await;
+                }
+            }
             "" => {
                 let _ = self
                     .im_adapter
                     .send_message(
                         target,
-                        "Usage: `/atim config set <key> <value>`\nAvailable keys: `replyAtOnly`",
+                        "Usage: `/atim config set <key> <value>`\nAvailable keys: `replyAtOnly`, `defaultAgent`",
                     )
                     .await;
             }
@@ -1151,7 +1200,10 @@ impl super::Server {
                     .im_adapter
                     .send_message(
                         target,
-                        &format!("Unknown config key: `{}`. Available: `replyAtOnly`", key),
+                        &format!(
+                            "Unknown config key: `{}`. Available: `replyAtOnly`, `defaultAgent`",
+                            key
+                        ),
                     )
                     .await;
             }

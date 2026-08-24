@@ -66,6 +66,8 @@ pub struct TelegramImSection {
 pub struct AgentSection {
     #[serde(default = "_default_agent_command")]
     pub command: String,
+    #[serde(default, alias = "default")]
+    pub default_agent: String,
 }
 fn _default_agent_command() -> String {
     "claude".into()
@@ -74,6 +76,7 @@ impl Default for AgentSection {
     fn default() -> Self {
         Self {
             command: "claude".into(),
+            default_agent: String::new(),
         }
     }
 }
@@ -173,6 +176,7 @@ pub struct Config {
 
     // ── Agent command ──
     pub agent_command: String,
+    pub default_agent: String,
 
     // ── Agent registry (built from env) ──
     pub agent_registry: AgentRegistry,
@@ -300,6 +304,15 @@ impl Config {
                     .filter(|s| !s.is_empty())
             })
             .unwrap_or_else(|| "claude".into());
+        let default_agent = std::env::var("ATIM_DEFAULT_AGENT")
+            .ok()
+            .or_else(|| {
+                toml_cfg
+                    .as_ref()
+                    .map(|c| c.agent.default_agent.clone())
+                    .filter(|s| !s.is_empty())
+            })
+            .unwrap_or_default();
         let agent_registry = AgentRegistry::from_env();
 
         // Backward-compat fields now point to the new canonical files.
@@ -388,6 +401,7 @@ impl Config {
             tmux_session_name,
             tmux_main_window_name: "__main__".into(),
             agent_command,
+            default_agent,
             agent_registry,
             state_file,
             session_map_file,

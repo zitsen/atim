@@ -11,7 +11,7 @@ use atim_core::session::{ChatBinding, RuntimeState, SessionInfo, WindowBinding};
 
 // ── Schema (self-describing — SQLite stores its own version) ──
 
-const SCHEMA_VERSION: i32 = 3;
+const SCHEMA_VERSION: i32 = 4;
 
 const CREATE_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -75,6 +75,14 @@ CREATE TABLE IF NOT EXISTS audit_log (
     table_name TEXT NOT NULL,
     record_key TEXT NOT NULL,
     summary    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS chat_settings (
+    user_id    INTEGER NOT NULL,
+    thread_id  INTEGER NOT NULL,
+    key        TEXT NOT NULL,
+    value      TEXT NOT NULL,
+    PRIMARY KEY (user_id, thread_id, key)
 );
 ";
 
@@ -144,6 +152,16 @@ impl Store {
                     [],
                 )
                 .ok();
+            connection
+                .execute(
+                    "UPDATE schema_version SET version = ?1",
+                    params![SCHEMA_VERSION],
+                )
+                .ok();
+        }
+
+        // V3 → V4: chat_settings table (created by CREATE TABLE IF NOT EXISTS above)
+        if version > 0 && version < 4 {
             connection
                 .execute(
                     "UPDATE schema_version SET version = ?1",
@@ -897,6 +915,45 @@ impl Store {
                 &format!("cleared session_id from {affected} window(s)"),
             );
         }
+        Ok(())
+    }
+
+    /// Load a per-chat setting value by key.
+    pub async fn load_chat_setting(
+        &self,
+        user_id: i64,
+        thread_id: i64,
+        key: &str,
+    ) -> Result<Option<String>> {
+        let db = self.db.lock().await;
+        let result = db.query_row(
+            "SELECT value FROM chat_settings WHERE user_id = ?1 AND thread_id = ?2 AND key = ?3",
+            params![user_id, thread_id, key],
+            |row| row.get::<_, String>(0),
+        );
+        match result {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(Error::State(format!("load_chat_setting: {e}"))),
+        }
+    }
+
+    /// Save a per-chat setting (upsert).
+    pub async fn save_chat_setting(
+        &self,
+        user_id: i64,
+        thread_id: i64,
+        key: &str,
+        value: &str,
+    ) -> Result<()> {
+        let db = self.db.lock().await;
+        db.execute(
+            "INSERT INTO chat_settings (user_id, thread_id, key, value)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(user_id, thread_id, key) DO UPDATE SET value = excluded.value",
+            params![user_id, thread_id, key, value],
+        )
+        .map_err(|e| Error::State(format!("save_chat_setting: {e}")))?;
         Ok(())
     }
 
