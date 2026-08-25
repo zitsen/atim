@@ -186,8 +186,13 @@ install_atim_binary() {
     exit 1
   }
 
-  cp "${extract_dir}/atim" "${INSTALL_DIR}/atim"
-  chmod +x "${INSTALL_DIR}/atim"
+  # Use `install` to avoid "Text file busy" when overwriting a running binary
+  if has install; then
+    install -m 755 "${extract_dir}/atim" "${INSTALL_DIR}/atim"
+  else
+    cp "${extract_dir}/atim" "${INSTALL_DIR}/atim"
+    chmod +x "${INSTALL_DIR}/atim"
+  fi
   info "Installed atim ${ATIM_RESOLVED_VERSION} to ${INSTALL_DIR}/atim"
 }
 
@@ -215,8 +220,12 @@ install_zoxide_binary() {
     exit 1
   }
 
-  cp "${extract_dir}/zoxide" "${INSTALL_DIR}/zoxide"
-  chmod +x "${INSTALL_DIR}/zoxide"
+  if has install; then
+    install -m 755 "${extract_dir}/zoxide" "${INSTALL_DIR}/zoxide"
+  else
+    cp "${extract_dir}/zoxide" "${INSTALL_DIR}/zoxide"
+    chmod +x "${INSTALL_DIR}/zoxide"
+  fi
   info "Installed zoxide ${ZOXIDE_RESOLVED_VERSION} to ${INSTALL_DIR}/zoxide"
 }
 
@@ -373,7 +382,7 @@ token = "${token}"
 allowed_users = "${users}"
 
 [agent]
-command = "claude"
+default = "claude"
 
 [tmux]
 session = "atim"
