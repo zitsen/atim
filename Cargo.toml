@@ -19,6 +19,13 @@ description = "AI Agent Through IM"
 repository = "https://github.com/zitsen/atim"
 keywords = ["ai", "agent", "bot", "telegram", "claude"]
 
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
