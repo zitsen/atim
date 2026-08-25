@@ -15,5 +15,5 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 regex = { workspace = true }
 chrono = { workspace = true }
-base64 = "0.22"
+base64 = "0.23"
 atim-core = { path = "../atim-core", version = "0.5" }
