@@ -110,7 +110,8 @@ impl super::Server {
             let home = home::home_dir()
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            if cwd == home || cwd.is_empty() {
+            let workdir = self.config.workdir.clone();
+            if cwd == home || cwd == workdir || cwd.is_empty() {
                 let wid = WindowId(old_window_id.clone());
                 if let Ok(path) = self.tmux_mgr.pane_cwd(&wid).await {
                     tracing::info!(
@@ -146,12 +147,13 @@ impl super::Server {
             }
         }
 
-        // If cwd is stale (HOME or empty), try to extract from the session's JSONL file.
+        // If cwd is stale (HOME, workdir, or empty), try to extract from the session's JSONL file.
         let home = home::home_dir()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
+        let workdir = self.config.workdir.clone();
         if !session_id.is_empty()
-            && (cwd == "~" || cwd.is_empty() || cwd == home)
+            && (cwd == "~" || cwd.is_empty() || cwd == home || cwd == workdir)
             && let Some(jsonl_cwd) = Self::extract_cwd_from_jsonl(&session_id).await
         {
             tracing::info!(
@@ -162,11 +164,15 @@ impl super::Server {
             cwd = jsonl_cwd;
         }
 
-        // Normalize ~ to actual home path
+        // Normalize ~ to actual path (use workdir if configured, otherwise HOME)
         if cwd == "~" || cwd.is_empty() {
-            cwd = home::home_dir()
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default();
+            cwd = if !self.config.workdir.is_empty() {
+                self.config.workdir.clone()
+            } else {
+                home::home_dir()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            };
             if !session_id.is_empty() {
                 let _ = self
                     .im_adapter
@@ -175,7 +181,7 @@ impl super::Server {
                         msg_id,
                         &format!(
                             "⚠️ Could not resolve project directory for session.\n\
-                             Starting in HOME ({cwd}) — agent context may be wrong."
+                             Starting in {cwd} — agent context may be wrong."
                         ),
                     )
                     .await;
