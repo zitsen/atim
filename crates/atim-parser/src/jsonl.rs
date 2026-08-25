@@ -303,20 +303,16 @@ fn tool_icon(tool_name: &str) -> &'static str {
 /// - Default → "✅ Done (N lines, N chars)"
 fn summarize_tool_result(text: &str, tool_name: Option<&str>) -> String {
     let text = text.trim();
-    if text.is_empty() {
-        return "✅ Done (empty result)".into();
-    }
-    let line_count = text.lines().count();
 
     match tool_name {
         Some("Read") | Some("ReadTool") | Some("FileReadTool") => {
-            // Include file content in the output (truncated for card display).
-            // Strip the "N\t" line-number prefix that Claude Code adds.
+            // Include file content (truncated) since it's useful inline.
             let cleaned: String = text
                 .lines()
                 .filter_map(|line| line.split_once('\t').map(|(_, rest)| rest).or(Some(line)))
                 .collect::<Vec<_>>()
                 .join("\n");
+            let line_count = cleaned.lines().count();
             let truncated = if cleaned.len() > 3000 {
                 format!(
                     "{}…\n(truncated)",
@@ -329,43 +325,38 @@ fn summarize_tool_result(text: &str, tool_name: Option<&str>) -> String {
             } else {
                 cleaned
             };
-            return format!("📄 Read {} lines\n```\n{}```", line_count, truncated);
-        }
-        Some("Edit") | Some("EditTool") | Some("TextEditTool") => {
-            // Count additions (+) and deletions (-) in diff output
-            let (adds, dels) = count_diff_changes(text);
-            if adds > 0 || dels > 0 {
-                return format!("✏️ Edited: +{adds} −{dels} lines");
-            }
-            return format!("✏️ Edited ({line_count} lines)");
+            format!("📄 Read {line_count} lines\n```\n{truncated}```")
         }
         Some("Bash") | Some("BashTool") | Some("BashRuntime") => {
             let exit = extract_exit_code(text);
-            return match exit {
-                Some(0) => format!("⚡ Completed (exit 0, {line_count} lines)"),
-                Some(n) => format!("⚡ Failed (exit {n}, {line_count} lines)"),
-                None => format!("⚡ Completed ({line_count} lines)"),
-            };
+            match exit {
+                Some(0) => "✅".into(),
+                Some(n) => format!("❌ exit {n}"),
+                None => "✅".into(),
+            }
         }
-        Some("Write")
-        | Some("WriteTool")
-        | Some("CreateTool")
-        | Some("Create")
-        | Some("FileWriteTool") => {
-            return format!("📝 Wrote {} chars", text.len());
+        Some("Edit") | Some("EditTool") | Some("TextEditTool") => {
+            let (adds, dels) = count_diff_changes(text);
+            if adds > 0 || dels > 0 {
+                format!("✅ +{adds} −{dels}")
+            } else {
+                "✅".into()
+            }
         }
-        Some("Search") | Some("SearchTool") | Some("GrepTool") | Some("GlobTool") => {
-            let matches = count_search_matches(text);
-            return format!("🔍 Found {matches} matches");
+        _ => {
+            if text.is_empty() {
+                "✅".into()
+            } else {
+                let line_count = text.lines().count();
+                let char_count = text.len();
+                if line_count <= 3 && char_count <= 120 {
+                    format!("✅ {text}")
+                } else {
+                    format!("✅ ({line_count} lines)")
+                }
+            }
         }
-        _ => {}
     }
-
-    let char_count = text.len();
-    if line_count <= 3 && char_count <= 120 {
-        return format!("✅ {text}");
-    }
-    format!("✅ Done ({line_count} lines, {char_count} chars)")
 }
 
 /// Count `+` and `-` lines in a unified diff (ignoring `---`/`+++` headers and `@@` hunks).
@@ -417,20 +408,6 @@ fn extract_exit_code(text: &str) -> Option<i32> {
 /// Count the number of matches found in search/grep output.
 ///
 /// Heuristic: count lines that look like match results (contain `:` after a file path).
-fn count_search_matches(text: &str) -> usize {
-    let line_count = text.lines().count();
-    // If output looks like grep matches (path:line:content), count match lines
-    let colon_lines = text
-        .lines()
-        .filter(|l| l.contains(':') && !l.trim().is_empty())
-        .count();
-    if colon_lines > line_count / 2 {
-        colon_lines
-    } else {
-        line_count
-    }
-}
-
 /// Extract text and images from tool_result content blocks.
 struct ExtractedContent {
     text: String,
@@ -676,7 +653,6 @@ mod tests {
     fn test_smart_summary_edit_shows_diff() {
         let text = "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1,2 @@\n-old line\n+new line\n+another line\n";
         let result = summarize_tool_result(text, Some("Edit"));
-        assert!(result.contains("Edited"));
         assert!(result.contains("+2"));
         assert!(result.contains("−1"));
     }
@@ -685,22 +661,20 @@ mod tests {
     fn test_smart_summary_bash_shows_exit_code() {
         let text = "build output\n[Exit 0]";
         let result = summarize_tool_result(text, Some("Bash"));
-        assert!(result.contains("exit 0"));
+        assert_eq!(result, "✅");
     }
 
     #[test]
     fn test_smart_summary_bash_failed() {
         let text = "error: compilation failed\n[Exit 1]";
         let result = summarize_tool_result(text, Some("Bash"));
-        assert!(result.contains("Failed"));
         assert!(result.contains("exit 1"));
     }
 
     #[test]
     fn test_smart_summary_write_shows_chars() {
         let result = summarize_tool_result("hello world\n", Some("Write"));
-        assert!(result.contains("Wrote"));
-        assert!(result.contains("11 chars"));
+        assert!(result.starts_with("✅"));
     }
 
     #[test]
@@ -708,8 +682,7 @@ mod tests {
         // grep-style output lines
         let text = "src/main.rs:10:fn main()\nsrc/main.rs:20:    let x = 1\nsrc/lib.rs:5:pub fn test()\nsrc/lib.rs:15:    assert_eq!(1, 1)\n";
         let result = summarize_tool_result(text, Some("GrepTool"));
-        assert!(result.contains("Found"));
-        assert!(result.contains("4 matches"));
+        assert!(result.starts_with("✅"));
     }
 
     #[test]
@@ -816,6 +789,6 @@ mod tests {
     #[test]
     fn test_smart_summary_empty_result() {
         let result = summarize_tool_result("", Some("Read"));
-        assert!(result.contains("empty result"));
+        assert!(result.contains("📄 Read 0 lines"));
     }
 }

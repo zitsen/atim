@@ -30,6 +30,8 @@ mod recovery;
 type UserTriple = (i64, i64);
 /// Key type for tool_use message tracking: (chat_id, thread_id, tool_use_id).
 type ToolUseMsgKey = (i64, i64, String);
+/// Value stored per tracked tool_use: (message_id, original summary text).
+type ToolUseMsgVal = (MessageId, String);
 
 /// Terminal manager type used by the server.
 ///
@@ -60,8 +62,8 @@ pub struct Server {
     /// Directory browser for session creation with project navigation.
     pub browser: DirectoryBrowser,
     /// Tool_use message tracking for in-place editing:
-    /// key = (chat_id, thread_id, tool_use_id) -> message_id of the sent tool_use summary.
-    pub tool_use_msg_ids: Arc<Mutex<HashMap<ToolUseMsgKey, MessageId>>>,
+    /// key = (chat_id, thread_id, tool_use_id) -> (message_id, original summary text).
+    pub tool_use_msg_ids: Arc<Mutex<HashMap<ToolUseMsgKey, ToolUseMsgVal>>>,
     /// Status message tracking for status→content conversion:
     /// key = (chat_id, thread_id) -> whether status has been consumed by first content.
     pub status_consumed: Arc<Mutex<HashSet<(i64, i64)>>>,
@@ -485,10 +487,10 @@ impl Server {
                                         self.send_ask_user_card(&target, raw, &msg.text).await
                                 {
                                     if let Some(tuid) = &msg.tool_use_id {
-                                        self.tool_use_msg_ids
-                                            .lock()
-                                            .await
-                                            .insert((chat_id, thread_id_val, tuid.clone()), mid);
+                                        self.tool_use_msg_ids.lock().await.insert(
+                                            (chat_id, thread_id_val, tuid.clone()),
+                                            (mid, msg.text.clone()),
+                                        );
                                     }
                                     continue;
                                 }
@@ -503,10 +505,10 @@ impl Server {
                                         self.im_adapter.send_message(&target, &diff_text).await
                                         && let Some(tuid) = &msg.tool_use_id
                                     {
-                                        self.tool_use_msg_ids
-                                            .lock()
-                                            .await
-                                            .insert((chat_id, thread_id_val, tuid.clone()), mid);
+                                        self.tool_use_msg_ids.lock().await.insert(
+                                            (chat_id, thread_id_val, tuid.clone()),
+                                            (mid, diff_text),
+                                        );
                                     }
                                     continue;
                                 }
@@ -514,17 +516,17 @@ impl Server {
                                     && let Ok(mid) =
                                         self.im_adapter.send_message(&target, &msg.text).await
                                 {
-                                    self.tool_use_msg_ids
-                                        .lock()
-                                        .await
-                                        .insert((chat_id, thread_id_val, tuid.clone()), mid);
+                                    self.tool_use_msg_ids.lock().await.insert(
+                                        (chat_id, thread_id_val, tuid.clone()),
+                                        (mid, msg.text.clone()),
+                                    );
                                 }
                             }
                             ContentType::ToolResult => {
                                 flush!();
-                                // Take the tracked message id out of the map BEFORE awaiting,
-                                // so we don't hold the lock across network I/O.
-                                let tracked_mid = if let Some(tuid) = &msg.tool_use_id {
+                                // Take the tracked (message_id, original_text) out of the map
+                                // BEFORE awaiting, so we don't hold the lock across network I/O.
+                                let tracked = if let Some(tuid) = &msg.tool_use_id {
                                     self.tool_use_msg_ids.lock().await.remove(&(
                                         chat_id,
                                         thread_id_val,
@@ -533,16 +535,18 @@ impl Server {
                                 } else {
                                     None
                                 };
-                                if let Some(mid) = tracked_mid {
+                                if let Some((mid, original_text)) = tracked {
                                     // Edit tool: diff card already sent, just append result
                                     let is_edit = matches!(
                                         msg.tool_name.as_deref(),
                                         Some("Edit" | "EditTool" | "TextEditTool")
                                     );
                                     if !is_edit {
+                                        // Combine: original tool_use summary + result summary
+                                        let combined = format!("{original_text}\n{}", msg.text);
                                         let _ = self
                                             .im_adapter
-                                            .edit_message(&target, &mid, &msg.text)
+                                            .edit_message(&target, &mid, &combined)
                                             .await;
                                     }
                                 } else {
