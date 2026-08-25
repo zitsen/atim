@@ -76,6 +76,9 @@ pub struct AgentConfig {
 pub struct AgentSection {
     #[serde(default, alias = "default")]
     pub default_agent: String,
+    /// Starting work directory for new sessions (replaces HOME).
+    #[serde(default)]
+    pub workdir: String,
     /// Per-agent overrides keyed by agent name (e.g. "claude", "copilot").
     /// Populated from [agent.claude], [agent.copilot], etc. in config.toml.
     #[serde(default, flatten)]
@@ -177,6 +180,7 @@ pub struct Config {
 
     // ── Agent ──
     pub default_agent: String,
+    pub workdir: String,
 
     // ── Agent registry (built from env) ──
     pub agent_registry: AgentRegistry,
@@ -304,6 +308,11 @@ impl Config {
                     .filter(|s| !s.is_empty())
             })
             .unwrap_or_default();
+        let workdir = toml_cfg
+            .as_ref()
+            .map(|c| c.agent.workdir.clone())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_default();
         let agent_configs = toml_cfg
             .as_ref()
             .map(|c| c.agent.agents.clone())
@@ -396,6 +405,7 @@ impl Config {
             tmux_session_name,
             tmux_main_window_name: "__main__".into(),
             default_agent,
+            workdir,
             agent_registry,
             state_file,
             session_map_file,
@@ -411,6 +421,16 @@ impl Config {
 
     pub fn is_user_allowed(&self, user_id: i64) -> bool {
         self.allowed_users.is_empty() || self.allowed_users.contains(&user_id)
+    }
+
+    /// Resolve the starting work directory for new sessions.
+    /// Returns the configured workdir if set, otherwise the process cwd.
+    pub fn start_path(&self) -> std::path::PathBuf {
+        if !self.workdir.is_empty() {
+            std::path::PathBuf::from(&self.workdir)
+        } else {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"))
+        }
     }
 }
 

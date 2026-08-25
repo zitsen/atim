@@ -2485,7 +2485,7 @@ impl Server {
         user_id: i64,
         thread_id: i64,
     ) -> Result<()> {
-        let start_path = std::env::current_dir().unwrap_or_else(|_| Path::new("/").to_path_buf());
+        let start_path = self.config.start_path();
 
         self.browser.start_browsing(user_id, &start_path).await;
         let _ = self
@@ -2586,7 +2586,7 @@ impl Server {
         unbound: &[browser::WindowEntry],
         thread_id: i64,
     ) -> Result<()> {
-        let start_path = std::env::current_dir().unwrap_or_else(|_| Path::new("/").to_path_buf());
+        let start_path = self.config.start_path();
 
         self.browser.start_browsing(user_id, &start_path).await;
         self.browser
@@ -3754,10 +3754,7 @@ impl Server {
             Some(name) => name.to_string(),
             None => format!("atim-{user_id}"),
         };
-        let cwd = std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("/"))
-            .to_string_lossy()
-            .to_string();
+        let cwd = self.config.start_path().to_string_lossy().to_string();
 
         let window_id = self.tmux_mgr.new_window(&window_name, &cwd).await?;
 
