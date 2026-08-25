@@ -72,28 +72,14 @@ pub struct AgentConfig {
     pub args: Vec<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct AgentSection {
-    #[serde(default = "_default_agent_command")]
-    pub command: String,
     #[serde(default, alias = "default")]
     pub default_agent: String,
     /// Per-agent overrides keyed by agent name (e.g. "claude", "copilot").
     /// Populated from [agent.claude], [agent.copilot], etc. in config.toml.
     #[serde(default, flatten)]
     pub agents: HashMap<String, AgentConfig>,
-}
-fn _default_agent_command() -> String {
-    "claude".into()
-}
-impl Default for AgentSection {
-    fn default() -> Self {
-        Self {
-            command: "claude".into(),
-            default_agent: String::new(),
-            agents: HashMap::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -189,8 +175,7 @@ pub struct Config {
     pub tmux_session_name: String,
     pub tmux_main_window_name: String,
 
-    // ── Agent command ──
-    pub agent_command: String,
+    // ── Agent ──
     pub default_agent: String,
 
     // ── Agent registry (built from env) ──
@@ -310,15 +295,6 @@ impl Config {
             })
             .unwrap_or_else(|| "atim".into());
 
-        let agent_command = std::env::var("ATIM_AGENT_COMMAND")
-            .ok()
-            .or_else(|| {
-                toml_cfg
-                    .as_ref()
-                    .map(|c| c.agent.command.clone())
-                    .filter(|s| !s.is_empty())
-            })
-            .unwrap_or_else(|| "claude".into());
         let default_agent = std::env::var("ATIM_DEFAULT_AGENT")
             .ok()
             .or_else(|| {
@@ -419,7 +395,6 @@ impl Config {
             feishu_webhook_port,
             tmux_session_name,
             tmux_main_window_name: "__main__".into(),
-            agent_command,
             default_agent,
             agent_registry,
             state_file,
@@ -436,18 +411,6 @@ impl Config {
 
     pub fn is_user_allowed(&self, user_id: i64) -> bool {
         self.allowed_users.is_empty() || self.allowed_users.contains(&user_id)
-    }
-
-    /// Derive the agent type ("claude", "copilot", "codex") from the agent command.
-    pub fn agent_type(&self) -> &'static str {
-        let cmd = self.agent_command.to_lowercase();
-        if cmd.contains("copilot") {
-            "copilot"
-        } else if cmd.contains("codex") {
-            "codex"
-        } else {
-            "claude"
-        }
     }
 }
 

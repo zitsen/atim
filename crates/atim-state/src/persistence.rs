@@ -1022,7 +1022,6 @@ impl Store {
                             "ATIM_IM_BACKEND" => config.im.backend = val,
                             "ATIM_FEISHU_APP_ID" => config.im.feishu.app_id = val,
                             "ATIM_FEISHU_APP_SECRET" => config.im.feishu.app_secret = val,
-                            "ATIM_AGENT_COMMAND" => config.agent.command = val,
                             "ATIM_TMUX_SESSION" => config.tmux.session = val,
                             "ATIM_TELEGRAM_TOKEN" => config.im.telegram.token = val,
                             "ATIM_ALLOWED_USERS" => config.im.telegram.allowed_users = val,
