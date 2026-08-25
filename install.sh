@@ -498,8 +498,14 @@ done
 require_cmds
 install_atim_binary
 install_zoxide_binary
-collect_im_config
-write_config_toml
+
+if [ -f "$ATIM_CONFIG_FILE" ]; then
+  info "Config already exists at ${ATIM_CONFIG_FILE} — skipping setup (update mode)."
+else
+  collect_im_config
+  write_config_toml
+fi
+
 install_user_service
 enable_user_service
 start_user_service_if_requested
