@@ -556,15 +556,15 @@ impl Server {
                                         let combined = if is_bash {
                                             // Bash: code block for command
                                             let cmd = stripped
-                                                .strip_prefix("Bash:")
-                                                .or_else(|| stripped.strip_prefix("Bash: "))
+                                                .strip_prefix("Bash: ")
+                                                .or_else(|| stripped.strip_prefix("Bash:"))
                                                 .unwrap_or(stripped)
                                                 .trim();
                                             if result_suffix.is_empty() {
-                                                format!("✅ Bash:\n```\n{cmd}\n```")
+                                                format!("✅ Bash:\n```bash\n{cmd}\n```")
                                             } else {
                                                 format!(
-                                                    "✅ Bash ({result_suffix}):\n```\n{cmd}\n```"
+                                                    "✅ Bash ({result_suffix}):\n```bash\n{cmd}\n```"
                                                 )
                                             }
                                         } else if result_suffix.is_empty() {
