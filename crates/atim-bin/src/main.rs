@@ -402,6 +402,10 @@ async fn main() -> anyhow::Result<()> {
     // 7. Start message queue worker
     let queue = Arc::new(Mutex::new(atim_queue::message_queue::MessageQueue::new()));
 
+    // Save tmux config for shutdown handler
+    let tmux_session_name = config.tmux_session_name.clone();
+    let tmux_keep_running = config.tmux_keep_running;
+
     // 8. Enter main event loop
     let server = server::Server {
         config,
@@ -441,6 +445,17 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Shutting down...");
     im_handle.abort();
     monitor_handle.abort();
+
+    // Kill tmux session unless keep_running is set
+    if !tmux_keep_running {
+        tracing::info!("Killing tmux session '{}'...", tmux_session_name);
+        let _ = tokio::process::Command::new("tmux")
+            .args(["kill-session", "-t", &tmux_session_name])
+            .output()
+            .await;
+    } else {
+        tracing::info!("Keeping tmux session '{}' alive", tmux_session_name);
+    }
 
     Ok(())
 }

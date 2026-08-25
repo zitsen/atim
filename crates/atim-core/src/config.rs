@@ -89,6 +89,9 @@ pub struct AgentSection {
 pub struct TmuxSection {
     #[serde(default = "_default_tmux_session")]
     pub session: String,
+    /// When true, keep tmux session alive after atim stops (default: false).
+    #[serde(default)]
+    pub keep_running: bool,
 }
 fn _default_tmux_session() -> String {
     "atim".into()
@@ -97,6 +100,7 @@ impl Default for TmuxSection {
     fn default() -> Self {
         Self {
             session: "atim".into(),
+            keep_running: false,
         }
     }
 }
@@ -177,6 +181,7 @@ pub struct Config {
     // ── Tmux ──
     pub tmux_session_name: String,
     pub tmux_main_window_name: String,
+    pub tmux_keep_running: bool,
 
     // ── Agent ──
     pub default_agent: String,
@@ -404,6 +409,10 @@ impl Config {
             feishu_webhook_port,
             tmux_session_name,
             tmux_main_window_name: "__main__".into(),
+            tmux_keep_running: toml_cfg
+                .as_ref()
+                .map(|c| c.tmux.keep_running)
+                .unwrap_or(false),
             default_agent,
             workdir,
             agent_registry,

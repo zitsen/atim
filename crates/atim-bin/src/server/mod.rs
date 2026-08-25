@@ -553,8 +553,22 @@ impl Server {
                                             .or_else(|| original_text.strip_prefix("🔍 "))
                                             .unwrap_or(&original_text)
                                             .trim_start();
-                                        let combined = if is_bash {
-                                            // Bash: code block for command
+                                        let combined = if is_bash
+                                            && original_text.contains("```bash")
+                                        {
+                                            // Bash with code block: replace emoji, insert suffix
+                                            let suffix_part = if result_suffix.is_empty() {
+                                                String::new()
+                                            } else {
+                                                format!(" ({result_suffix})")
+                                            };
+                                            original_text.replacen(
+                                                "💻 Bash:",
+                                                &format!("✅ Bash{suffix_part}:"),
+                                                1,
+                                            )
+                                        } else if is_bash {
+                                            // Bash without code block (legacy format)
                                             let cmd = stripped
                                                 .strip_prefix("Bash: ")
                                                 .or_else(|| stripped.strip_prefix("Bash:"))

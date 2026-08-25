@@ -265,7 +265,7 @@ fn summarize_tool_use(tool_name: &str, input: Option<&serde_json::Value>) -> Str
         return format!("{icon} {tool_name}: {path}");
     }
     if let Some(cmd) = input.get("command").and_then(|v| v.as_str()) {
-        return format!("{icon} {tool_name}: {cmd}");
+        return format!("{icon} {tool_name}:\n```bash\n{cmd}\n```");
     }
     if let Some(query) = input.get("query").and_then(|v| v.as_str()) {
         return format!("{icon} {tool_name}: {query}");
