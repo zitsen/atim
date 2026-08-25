@@ -539,12 +539,38 @@ impl Server {
                                         Some("Edit" | "EditTool" | "TextEditTool")
                                     );
                                     if !is_edit {
-                                        // Append result suffix to original tool_use line
                                         let result_suffix = &msg.text;
-                                        let combined = if result_suffix.is_empty() {
-                                            format!("✅ {original_text}")
+                                        let is_bash = matches!(
+                                            msg.tool_name.as_deref(),
+                                            Some("Bash" | "BashTool" | "BashRuntime")
+                                        );
+                                        // Strip emoji prefix from original tool_use text
+                                        let stripped = original_text
+                                            .strip_prefix("💻 ")
+                                            .or_else(|| original_text.strip_prefix("📖 "))
+                                            .or_else(|| original_text.strip_prefix("✏️ "))
+                                            .or_else(|| original_text.strip_prefix("📝 "))
+                                            .or_else(|| original_text.strip_prefix("🔍 "))
+                                            .unwrap_or(&original_text)
+                                            .trim_start();
+                                        let combined = if is_bash {
+                                            // Bash: code block for command
+                                            let cmd = stripped
+                                                .strip_prefix("Bash:")
+                                                .or_else(|| stripped.strip_prefix("Bash: "))
+                                                .unwrap_or(stripped)
+                                                .trim();
+                                            if result_suffix.is_empty() {
+                                                format!("✅ Bash:\n```\n{cmd}\n```")
+                                            } else {
+                                                format!(
+                                                    "✅ Bash ({result_suffix}):\n```\n{cmd}\n```"
+                                                )
+                                            }
+                                        } else if result_suffix.is_empty() {
+                                            format!("✅ {stripped}")
                                         } else {
-                                            format!("✅ {original_text} {result_suffix}")
+                                            format!("✅ {stripped} ({result_suffix})")
                                         };
                                         let _ = self
                                             .im_adapter
