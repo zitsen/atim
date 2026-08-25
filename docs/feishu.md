@@ -1,6 +1,6 @@
 # Feishu / Lark
 
-Feishu (飞书) 是 Atim 的主要使用平台。本文档介绍如何创建飞书机器人并开始使用。
+Feishu (飞书) 是 Atim 支持的 IM 平台之一。本文档介绍如何创建飞书机器人并开始使用。
 
 ## 创建飞书机器人
 
@@ -20,7 +20,13 @@ Feishu (飞书) 是 Atim 的主要使用平台。本文档介绍如何创建飞�
 
 ![App List](assets/feishu-apps-list.png)
 
-### 3. 配置 Atim
+### 3. 配置权限
+
+大部分权限在安装时会自动申请。仅需手动添加以下权限：
+
+- `im:message.group_msg.include_bot:read` — 接收群聊中所有消息（含未 @机器人 的消息，需在飞书后台开启「接收群聊中所有消息」）
+
+### 4. 配置 Atim
 
 创建配置文件 `~/.atim/config.toml`：
 
@@ -47,7 +53,7 @@ ATIM_FEISHU_APP_ID=cli_xxxx
 ATIM_FEISHU_APP_SECRET=xxxx
 ```
 
-### 4. 启动 Atim
+### 5. 启动 Atim
 
 ```bash
 atim service --start
@@ -70,21 +76,9 @@ atim service --start
 - 话题之间互不干扰
 - 删除话题 = 清理绑定
 
-### 会话管理
+### 命令参考
 
-| 命令 | 说明 |
-|------|------|
-| `/rebind` | 重新绑定当前窗口（agent 重启后修复路由） |
-| `/rebind agent` | 重新绑定 agent 类型 |
-| `/unbind` | 解绑 session，关闭 tmux 窗口 |
-| `/clear` | 清除对话并开启新 session |
-| `/status` | 查看 agent 状态 |
-| `/ss` | 截图当前终端 |
-| `/usage` | 查看 Claude Code 用量 |
-| `/switch <agent>` | 切换 agent（claude/copilot/codex） |
-| `/esc` | 发送 Escape 键 |
-| `/enter` | 发送 Enter 键 |
-| `!<command>` | 在 agent 窗口运行 shell 命令 |
+参见 [Slash Commands](commands.md) 获取完整命令列表。
 
 ### 目录浏览
 
@@ -92,7 +86,7 @@ atim service --start
 
 ### 语音消息
 
-配置 `ATIM_OPENAI_API_KEY` 后，发送语音消息会自动转录为文字再发给 agent。
+配置 `ATIM_OPENAI_API_KEY` 后，发送语音消息会自动转录为文字。参见 [Features](features.md)。
 
 ## 故障排除
 
@@ -119,9 +113,3 @@ atim service --start
 
 1. 发送 `/unbind`
 2. 重新发送消息，选择正确的项目目录
-
-## 权限配置
-
-创建飞书机器人后，大部分权限已自动配置，仅需手动添加以下权限：
-
-- `im:message.group_msg.include_bot:read` — 接收群聊中所有消息（含未 @机器人 的消息，需在飞书后台开启「接收群聊中所有消息」）

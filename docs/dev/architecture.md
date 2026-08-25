@@ -1,6 +1,6 @@
 # Atim Architecture
 
-**Atim** (AI Agent through IM) — Rust rewrite of CCBot. A multi-IM bridge that remotely controls AI coding CLI agents (Claude Code, Copilot CLI, Codex CLI) via tmux.
+**Atim** (AI Agent through IM) — Rust bridge that remotely controls AI coding CLI agents (Claude Code, Copilot CLI, Codex CLI, Mimo) via tmux.
 
 ## Core Design Principle
 
@@ -31,7 +31,7 @@
          ▼                        ▼
   ┌──────────────┐       ┌────────────────┐
   │  atim-parser │       │  atim-parser   │
-  │  Terminal UI │       │  JSONL Parser  │
+  │  Terminal UI │       │  JSONL / DB    │
   │  Detection   │       │  (agent output)│
   └──────────────┘       └────────────────┘
          │
@@ -41,66 +41,53 @@
   │  ┌──────────┐  ┌──────────┐  ┌──────────┐ │
   │  │  Claude   │  │  Copilot │  │  Codex   │ │
   │  │  Code     │  │  CLI     │  │  CLI     │ │
+  │  │  / Mimo   │  │          │  │          │ │
   │  └──────────┘  └──────────┘  └──────────┘ │
   └────────────────────────────────────────────┘
 ```
 
 ## Crate Map
 
-| Crate | Layer | Dependencies | Lines (est.) |
-|-------|-------|-------------|-------------|
-| **atim-core** | Foundation | — | 500 |
-| **atim-tmux** | Terminal I/O | atim-core | 600 |
-| **atim-parser** | Output Parsing | atim-core | 800 |
-| **atim-im** | IM Adapter | atim-core | 1200 |
-| **atim-queue** | Message Pipeline | atim-core, atim-im | 500 |
-| **atim-state** | Persistence | atim-core | 700 |
-| **atim-monitor** | Session Watching | atim-parser, atim-state, atim-queue | 400 |
-| **atim** | Entry Point | everything | 300 |
+| Crate | Layer | Dependencies |
+|-------|-------|-------------|
+| **atim-core** | Foundation (config, errors, IM trait, agent abstraction) | — |
+| **atim-tmux** | Terminal I/O, screenshot rendering | atim-core |
+| **atim-parser** | JSONL log and terminal output parsing | atim-core |
+| **atim-im** | Telegram + Feishu adapter implementations | atim-core |
+| **atim-queue** | Per-user async message queues with flood control | atim-core, atim-im |
+| **atim-state** | Thread binding and window state persistence (SQLite) | atim-core |
+| **atim-monitor** | Session log polling with byte-offset tracking | atim-parser, atim-state, atim-queue |
+| **atim-bin** | Entry point — server + CLI | everything |
 
 ## Trait Design
 
 ### IM Adapter (`atim-core`)
 
 ```rust
-/// Unified IM interface — Telegram and Feishu are impls.
 #[async_trait]
 pub trait ImAdapter: Send + Sync {
-    /// Start the bot and return a receiver for inbound messages.
     async fn run(self: Box<Self>, tx: mpsc::UnboundedSender<ImEvent>) -> Result<()>;
-
-    /// Send text message to a chat/thread.
     async fn send_message(&self, target: &MessageTarget, text: &str) -> Result<MessageId>;
-
-    /// Edit an existing message.
     async fn edit_message(&self, target: &MessageTarget, msg_id: &MessageId, text: &str) -> Result<()>;
-
-    /// Send a photo/image.
     async fn send_photo(&self, target: &MessageTarget, filename: &str, data: &[u8]) -> Result<MessageId>;
-
-    /// Send keyboard markup for interactive UI navigation.
     async fn send_keyboard(&self, target: &MessageTarget, text: &str, buttons: &[Vec<Button>]) -> Result<MessageId>;
-
-    /// Delete a message.
     async fn delete_message(&self, target: &MessageTarget, msg_id: &MessageId) -> Result<()>;
+    async fn edit_keyboard(&self, target: &MessageTarget, msg_id: &MessageId, buttons: &[Vec<Button>]) -> Result<()>;
+    async fn send_check_card(&self, target: &MessageTarget, ...) -> Result<MessageId>;
+    async fn send_chat_action(&self, target: &MessageTarget, action: &str) -> Result<()>;
+    async fn answer_callback(&self, callback_id: &str, text: &str) -> Result<()>;
+    async fn add_reaction(&self, target: &MessageTarget, msg_id: &MessageId, emoji: &str) -> Result<()>;
+    async fn send_kv_table(&self, target: &MessageTarget, title: &str, kv: &[(String, String)]) -> Result<MessageId>;
 }
 ```
 
 ### Agent Parser (`atim-core`)
 
 ```rust
-/// Agent-specific output format detection and parsing.
 pub trait AgentParser: Send + Sync {
-    /// Detect which agent is running in a pane.
     fn detect(pane_text: &str, process_name: &str) -> AgentKind;
-
-    /// Parse the status line from terminal output.
     fn parse_status(&self, pane_text: &str) -> Option<String>;
-
-    /// Detect if terminal is showing an interactive UI (question/prompt).
     fn detect_interactive(&self, pane_text: &str) -> Option<InteractiveUi>;
-
-    /// Parse the current prompt state (e.g. waiting for input).
     fn parse_prompt_state(&self, pane_text: &str) -> PromptState;
 }
 ```
@@ -108,49 +95,26 @@ pub trait AgentParser: Send + Sync {
 ### Core Types (`atim-core`)
 
 ```rust
-pub struct MessageTarget {
-    pub chat_id: ChatId,
-    pub thread_id: Option<i64>,
-}
-
-pub struct ImEvent {
-    pub user_id: UserId,
-    pub chat_id: ChatId,
-    pub thread_id: Option<i64>,
-    pub kind: ImEventKind,
-    pub text: Option<String>,
-    pub photo: Option<Vec<u8>>,
-    pub voice: Option<Vec<u8>>,
-}
-
-pub enum ImEventKind {
-    Text,
-    Photo,
-    Voice,
-    CallbackQuery { data: String, msg_id: MessageId },
-    TopicClosed,
-    TopicEdited { new_name: String },
-}
-
 pub enum AgentKind {
     ClaudeCode,
     CopilotCli,
     CodexCli,
+    MimoCode,
     Unknown,
 }
 
-pub struct InteractiveUi {
-    pub kind: UiKind,
-    pub content: String,
+pub enum ImEventKind {
+    Text { text: String, is_mention: bool, is_group: bool, message_id: Option<String> },
+    Photo { caption: Option<String>, data: Vec<u8>, mime_type: String },
+    Voice(Vec<u8>),
+    CallbackQuery { data: String, msg_id: MessageId },
+    TopicCreated { topic_name: String },
+    TopicClosed,
+    TopicEdited { new_name: String },
+    BotAdded,
 }
 
-pub enum UiKind {
-    AskUserQuestion,
-    ExitPlanMode,
-    PermissionPrompt,
-    Settings,
-    Unknown,
-}
+pub struct MessageId(pub String);
 ```
 
 ## Data Flow
@@ -166,20 +130,16 @@ User sends "fix the bug" in Telegram topic
   → Agent sees input in tmux pane
 ```
 
-### Inbound (Agent → User via Telegram)
+### Inbound (Agent → User via IM)
 
 ```
-Agent writes to session.jsonl
-  → atim-monitor polls JSONL (byte offset tracking)
+Agent writes to session JSONL (or Mimo's SQLite DB)
+  → atim-monitor polls JSONL / DB (byte offset tracking)
   → atim-parser parses new entries (text, tool_use, tool_result)
-  → Formats response parts
+  → Detects Edit tool → formats diff card
+  → Detects interactive UI → sends inline keyboard
   → atim-queue enqueues for delivery
   → IM Adapter sends message to correct topic
-
-Concurrently:
-  atim-monitor also captures tmux pane text
-  → Detects interactive UI
-  → Sends interactive UI with inline keyboard via IM Adapter
 ```
 
 ## Multi-Agent Strategy
@@ -190,62 +150,33 @@ Each tmux window runs exactly one agent CLI. Atim detects the agent type by:
 2. **Directory detection** — `.claude/` → Claude Code, `.github/copilot/` → Copilot CLI
 3. **Output format matching** — first output line patterns differentiate agents
 
-AgentParser trait implementations:
-- `ClaudeParser` — regex patterns from original terminal_parser.py (AskUserQuestion, ExitPlanMode, PermissionPrompt, status spinners)
-- `CopilotParser` — Copilot CLI specific patterns (session management, multi-turn)
-- `CodexParser` — Codex CLI specific patterns (task definitions, results)
-
-## IM State Flow
-
-```
-                    ┌─────────────┐
-                    │ Inbound Msg │
-                    └──────┬──────┘
-                           ▼
-                    ┌──────────────┐      ┌─────────────────┐
-              ┌────▶│ Topic Bound? │──No──▶│ DirectoryBrowse │
-              │     └──────┬───────┘      │ or WindowPicker │
-              │            │ Yes          └────────┬────────┘
-              │            ▼                       │
-              │     ┌──────────────┐               │
-              │     │ Window Alive?│──No──▶ Unbind │
-              │     └──────┬───────┘               │
-              │            │ Yes                   │
-              │            ▼                       ▼
-              │     ┌──────────────────┐    ┌──────────────┐
-              │     │ Send to Tmux     │    │ Create/Bind  │
-              │     └──────────────────┘    │ Window       │
-              │                             └──────────────┘
-              │                                      │
-              └──────────────────────────────────────┘
-```
-
-## Error Handling
-
-- `atim-core` defines `Error` enum with typed variants
-- Each crate has its own error type, converting to/from core Error via `From`
-- Network failures in IM adapter: exponential backoff, message queued to disk
-- Tmux failures (window gone): clear binding, notify user
-- JSONL parse failures: skip malformed line, log warning, continue
+AgentParser implementations:
+- `ClaudeParser` — JSONL-based session tracking, AskUserQuestion/ExitPlanMode/PermissionPrompt detection
+- `CopilotParser` — Copilot CLI patterns (session management, multi-turn)
+- `CodexParser` — Codex CLI patterns (task definitions, results); uses pane capture instead of JSONL
+- `MimoParser` — reuses ClaudeParser logic, polls Mimo's SQLite database
 
 ## Persistence
 
-All state in `~/.atim/` directory (`AIM_DIR` env var override):
+All state stored in `~/.atim/store.db` (SQLite):
 
-| File | Purpose |
-|------|---------|
-| `state.json` | Thread bindings, window states, display names |
-| `session_map.json` | Hook-generated window_id → session_id mapping |
-| `monitor_state.json` | Byte offsets per session JSONL |
-| `queue/*.json` | Persisted messages during IM outage |
+| Table | Purpose |
+|-------|---------|
+| chat_bindings | IM conversation ↔ session mappings |
+| window_bindings | session ↔ tmux window mappings |
+| session_info | Session metadata (agent type, cwd, display name) |
+| monitor_state | Byte offsets per session JSONL |
+
+Legacy `state.json` / `session_map.json` paths now resolve to `store.db`.
 
 ## Startup Recovery
 
-1. Load persisted state from `~/.atim/`
+1. Load persisted state from `store.db`
 2. Re-resolve stale window IDs against live tmux windows
 3. Clean up session_map entries for dead windows
 4. Initialize monitor byte offsets (prevent duplicate notifications)
-5. Start IM adapter → enter poll loop
+5. Consume hook session_map for newly discovered sessions
+6. Start IM adapter → enter poll loop
 
 ## Shutdown
 

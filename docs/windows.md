@@ -162,6 +162,4 @@ cat /etc/resolv.conf
 
 If empty, add a nameserver: `echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf`
 
-## Future: Native Windows Support
-
-Native Windows support (without WSL2) is tracked as a planned feature. This would replace tmux with Windows Terminal + ConPTY sessions. See the [GitHub issues](https://github.com/zitsen/atim/issues) for progress.
+## Troubleshooting

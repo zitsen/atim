@@ -35,16 +35,19 @@ nav:
     - Installation: install.md
     - Quick Start: quickstart.md
     - Windows: windows.md
-  - Configuration:
-    - Configuration: configuration.md
   - Usage:
     - Feishu: feishu.md
     - Telegram: telegram.md
   - Reference:
-    - Slash Commands: commands.md
-    - Session Management: session-lifecycle.md
-    - Architecture: architecture.md
+    - Commands: commands.md
+    - Configuration: configuration.md
+    - Features: features.md
   - Contributing: contributing.md
+  - Developer:
+    - Architecture: dev/architecture.md
+    - Session Lifecycle: dev/session-lifecycle.md
+    - IM Interface: dev/im-interface.md
+    - Feishu Integration: dev/feishu-integration.md
 
 markdown_extensions:
   - admonition

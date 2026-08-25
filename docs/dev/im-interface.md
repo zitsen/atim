@@ -1,7 +1,6 @@
-# IM Interface Documentation — Atim
+# IM Interface — Developer Guide
 
-**Atim** (AI Agent through IM) is a bridge between IM platforms and AI coding agents.
-This document describes how to add a new IM backend.
+How to add a new IM backend to Atim.
 
 ## Trait Definition
 
@@ -11,9 +10,6 @@ All IM backends implement the `ImAdapter` trait defined in `atim-core/src/im.rs`
 #[async_trait]
 pub trait ImAdapter: Send + Sync {
     /// Start the bot and begin receiving events.
-    ///
-    /// Events are emitted into `tx` as they arrive. This method should block
-    /// for the lifetime of the application.
     async fn run(self: Box<Self>, tx: mpsc::UnboundedSender<ImEvent>) -> Result<()>;
 
     /// Send a text message to a chat/thread.
@@ -31,8 +27,23 @@ pub trait ImAdapter: Send + Sync {
     /// Delete a message.
     async fn delete_message(&self, target: &MessageTarget, msg_id: &MessageId) -> Result<()>;
 
-    /// Edit an existing message's keyboard markup.
+    /// Update buttons on an existing message.
     async fn edit_keyboard(&self, target: &MessageTarget, msg_id: &MessageId, buttons: &[Vec<Button>]) -> Result<()>;
+
+    /// Send a structured check/health card.
+    async fn send_check_card(&self, target: &MessageTarget, ...) -> Result<MessageId>;
+
+    /// Send a typing/chat-action indicator.
+    async fn send_chat_action(&self, target: &MessageTarget, action: &str) -> Result<()>;
+
+    /// Answer a callback query (acknowledge button press).
+    async fn answer_callback(&self, callback_id: &str, text: &str) -> Result<()>;
+
+    /// Add a reaction emoji to a message.
+    async fn add_reaction(&self, target: &MessageTarget, msg_id: &MessageId, emoji: &str) -> Result<()>;
+
+    /// Send a key-value table card.
+    async fn send_kv_table(&self, target: &MessageTarget, title: &str, kv: &[(String, String)]) -> Result<MessageId>;
 }
 ```
 
@@ -45,8 +56,8 @@ pub struct UserId(pub i64);
 /// Platform-neutral chat/group identifier.
 pub struct ChatId(pub i64);
 
-/// Platform-neutral message identifier.
-pub struct MessageId(pub i32);
+/// Platform-neutral message identifier (String to support Feishu's string IDs).
+pub struct MessageId(pub String);
 
 /// Target for outbound messages: chat + optional thread/topic.
 pub struct MessageTarget {
@@ -63,12 +74,14 @@ pub struct ImEvent {
 
 /// Supported inbound event types.
 pub enum ImEventKind {
-    Text(String),
+    Text { text: String, is_mention: bool, is_group: bool, message_id: Option<String> },
     Photo { caption: Option<String>, data: Vec<u8>, mime_type: String },
     Voice(Vec<u8>),
     CallbackQuery { data: String, msg_id: MessageId },
+    TopicCreated { topic_name: String },
     TopicClosed,
     TopicEdited { new_name: String },
+    BotAdded,
 }
 
 /// Inline keyboard button.
@@ -80,16 +93,9 @@ pub struct Button {
 
 ## Adding a New IM Backend
 
-1. **Create a new module** in `crates/atim-im/src/`, e.g. `feishu.rs` or `discord.rs`
+1. **Create a new module** in `crates/atim-im/src/`, e.g. `discord.rs`
 
-2. **Implement `ImAdapter`** — all 7 methods are required:
-   - `run()` — enter the event loop, parse inbound messages into `ImEvent`, forward through `tx`
-   - `send_message()` — basic text output to a chat/thread
-   - `edit_message()` — update a previously sent message
-   - `send_photo()` — send an image or file
-   - `send_keyboard()` — send interactive buttons
-   - `delete_message()` — remove a message
-   - `edit_keyboard()` — update buttons on an existing message
+2. **Implement `ImAdapter`** — all methods are required
 
 3. **Register the backend** in `crates/atim-bin/src/main.rs`:
    ```rust
@@ -109,44 +115,25 @@ ImAdapter::run()  →  tx.send(ImEvent)
   ↓
 Server event loop  →  resolve thread binding  →  TmuxManager::send_keys()
   ↓  agent responds
-SessionMonitor  →  parses JSONL  →  MessageQueue  →  ImAdapter::send_message()
+SessionMonitor  →  parses JSONL / DB  →  MessageQueue  →  ImAdapter::send_message()
 ```
 
 ## Inbound Event Mapping
 
-Each IM backend must map platform-specific events to `ImEventKind`:
-
 | Platform Event     | ImEventKind              |
 |--------------------|--------------------------|
-| Plain text message | `Text(String)`           |
+| Plain text message | `Text { text, is_mention, is_group, message_id }` |
 | Image/photo        | `Photo { caption, data, mime_type }` |
 | Voice message      | `Voice(Vec<u8>)`         |
 | Button press       | `CallbackQuery { data, msg_id }` |
+| Bot added to group | `BotAdded`               |
+| Topic created      | `TopicCreated { topic_name }` |
 | Topic closed       | `TopicClosed`            |
 | Topic renamed      | `TopicEdited { new_name }` |
-
-## Required Configuration
-
-Each IM backend reads its config from environment variables in `Config`:
-
-```rust
-pub struct Config {
-    // ── Telegram ──
-    pub telegram_bot_token: String,
-    pub allowed_users: Vec<i64>,
-
-    // ── Future backends add fields here ──
-    // pub feishu_app_id: String,
-    // pub feishu_app_secret: String,
-    // pub discord_bot_token: String,
-}
-```
 
 ## Currently Implemented
 
 | Backend   | Module              | Status     |
 |-----------|---------------------|------------|
 | Telegram  | `atim-im::telegram`  | Implemented (long-polling, inline keyboards, topic support) |
-| Feishu    | —                   | Planned (Phase 3) |
-| Discord   | —                   | Future     |
-| Slack     | —                   | Future     |
+| Feishu    | `atim-im::feishu`    | Implemented (webhook + polling, interactive cards, rich text) |

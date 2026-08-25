@@ -22,31 +22,34 @@ atim service --status   # verify it's running
 === "Feishu"
 
     1. Add your bot to a Feishu group chat
-    2. Send any message in the chat
-    3. Atim creates a tmux window and starts Claude Code
-    4. Chat naturally — every message goes to the agent, every response comes back
+    2. Enable **Topics** mode in the group (recommended) for per-topic session isolation
+    3. Send any message in the chat (or in a topic)
+    4. Atim creates a tmux window and starts Claude Code
+    5. Chat naturally — every message goes to the agent, every response comes back
 
 === "Telegram"
 
-    1. Create a Telegram group and enable **Topics** (Forum mode)
-    2. Add your bot as an admin
-    3. Open a new topic and send any message
-    4. Atim creates a tmux window and starts Claude Code
-    5. Chat naturally
+    1. Create a Telegram group
+    2. Enable **Topics** (group settings → Topics / Forum mode)
+    3. Add your bot as an admin
+    4. Open a new topic and send any message
+    5. Atim creates a tmux window and starts Claude Code
+    6. Chat naturally
 
 ## What Happens Under the Hood
 
 ```
-Your message  →  Atim receives it via IM webhook
+Your message  →  Atim receives it via IM webhook / polling
              →  Finds or creates a tmux window binding
              →  Sends keystrokes to the agent's terminal
              →  Agent processes and generates output
-             →  Monitor detects new output in JSONL log
+             →  Monitor detects new output in JSONL log / SQLite
              →  Atim sends the response back to your IM chat
 ```
 
 ## Next Steps
 
-- [Configure your setup](configuration.md) — customize polling interval, display options, etc.
-- [Learn slash commands](commands.md) — control sessions with `/rebind`, `/clear`, etc.
-- [Set up Feishu](feishu.md) or [Telegram](telegram.md) — detailed setup guides
+- [Configure your setup](configuration.md) — polling interval, display options, per-agent config
+- [Learn slash commands](commands.md) — full command reference with 25+ commands
+- [Explore features](features.md) — session recovery, voice messages, screenshots, and more
+- [Set up Feishu](feishu.md) or [Telegram](telegram.md) — detailed platform-specific guides
