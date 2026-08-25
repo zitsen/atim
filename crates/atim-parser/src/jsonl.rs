@@ -301,59 +301,41 @@ fn tool_icon(tool_name: &str) -> &'static str {
 /// - Write/Create → "📝 Wrote N chars"
 /// - Search/Grep  → "🔍 Found N matches"
 /// - Default → "✅ Done (N lines, N chars)"
-fn summarize_tool_result(text: &str, tool_name: Option<&str>) -> String {
+pub fn summarize_tool_result(text: &str, tool_name: Option<&str>) -> String {
     let text = text.trim();
 
     match tool_name {
         Some("Read") | Some("ReadTool") | Some("FileReadTool") => {
-            // Include file content (truncated) since it's useful inline.
             let cleaned: String = text
                 .lines()
                 .filter_map(|line| line.split_once('\t').map(|(_, rest)| rest).or(Some(line)))
                 .collect::<Vec<_>>()
                 .join("\n");
             let line_count = cleaned.lines().count();
-            let truncated = if cleaned.len() > 3000 {
-                format!(
-                    "{}…\n(truncated)",
-                    &cleaned[..cleaned
-                        .char_indices()
-                        .nth(2997)
-                        .map(|(i, _)| i)
-                        .unwrap_or(cleaned.len())]
-                )
-            } else {
-                cleaned
-            };
-            format!("📄 Read {line_count} lines\n```\n{truncated}```")
+            format!("({line_count} lines)")
         }
         Some("Bash") | Some("BashTool") | Some("BashRuntime") => {
             let exit = extract_exit_code(text);
             match exit {
-                Some(0) => "✅".into(),
-                Some(n) => format!("❌ exit {n}"),
-                None => "✅".into(),
+                Some(0) => String::new(),
+                Some(n) => format!("exit {n}"),
+                None => String::new(),
             }
         }
         Some("Edit") | Some("EditTool") | Some("TextEditTool") => {
             let (adds, dels) = count_diff_changes(text);
             if adds > 0 || dels > 0 {
-                format!("✅ +{adds} −{dels}")
+                format!("+{adds} −{dels}")
             } else {
-                "✅".into()
+                String::new()
             }
         }
         _ => {
             if text.is_empty() {
-                "✅".into()
+                String::new()
             } else {
                 let line_count = text.lines().count();
-                let char_count = text.len();
-                if line_count <= 3 && char_count <= 120 {
-                    format!("✅ {text}")
-                } else {
-                    format!("✅ ({line_count} lines)")
-                }
+                format!("({line_count} lines)")
             }
         }
     }
@@ -620,7 +602,7 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].content_type, ContentType::ToolResult);
         assert_eq!(entries[0].tool_use_id.as_deref(), Some("toolu_abc"));
-        assert!(entries[0].text.contains("Hello World"));
+        assert_eq!(entries[0].text, "(1 lines)");
     }
 
     #[test]
@@ -644,9 +626,7 @@ mod tests {
     #[test]
     fn test_smart_summary_read_shows_line_count() {
         let result = summarize_tool_result("fn main() {\n    println!(\"hi\");\n}\n", Some("Read"));
-        assert!(result.contains("Read"));
         assert!(result.contains("3 lines"));
-        assert!(!result.contains("Done"));
     }
 
     #[test]
@@ -661,7 +641,7 @@ mod tests {
     fn test_smart_summary_bash_shows_exit_code() {
         let text = "build output\n[Exit 0]";
         let result = summarize_tool_result(text, Some("Bash"));
-        assert_eq!(result, "✅");
+        assert_eq!(result, "");
     }
 
     #[test]
@@ -674,7 +654,7 @@ mod tests {
     #[test]
     fn test_smart_summary_write_shows_chars() {
         let result = summarize_tool_result("hello world\n", Some("Write"));
-        assert!(result.starts_with("✅"));
+        assert!(result.contains("1 lines"));
     }
 
     #[test]
@@ -682,7 +662,7 @@ mod tests {
         // grep-style output lines
         let text = "src/main.rs:10:fn main()\nsrc/main.rs:20:    let x = 1\nsrc/lib.rs:5:pub fn test()\nsrc/lib.rs:15:    assert_eq!(1, 1)\n";
         let result = summarize_tool_result(text, Some("GrepTool"));
-        assert!(result.starts_with("✅"));
+        assert!(result.contains("4 lines"));
     }
 
     #[test]
@@ -702,7 +682,6 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].content_type, ContentType::ToolUse);
         assert_eq!(entries[1].content_type, ContentType::ToolResult);
-        assert!(entries[1].text.contains("Read"));
         assert!(entries[1].text.contains("3 lines"));
     }
 
@@ -782,13 +761,12 @@ mod tests {
     #[test]
     fn test_smart_summary_short_text_no_tool_name() {
         let result = summarize_tool_result("Hello World", None);
-        assert!(result.contains("Hello World"));
-        assert!(!result.contains("lines"));
+        assert!(result.contains("1 lines"));
     }
 
     #[test]
     fn test_smart_summary_empty_result() {
         let result = summarize_tool_result("", Some("Read"));
-        assert!(result.contains("📄 Read 0 lines"));
+        assert!(result.contains("0 lines"));
     }
 }

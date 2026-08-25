@@ -30,7 +30,6 @@ mod recovery;
 type UserTriple = (i64, i64);
 /// Key type for tool_use message tracking: (chat_id, thread_id, tool_use_id).
 type ToolUseMsgKey = (i64, i64, String);
-/// Value stored per tracked tool_use: (message_id, original summary text).
 type ToolUseMsgVal = (MessageId, String);
 
 /// Terminal manager type used by the server.
@@ -62,7 +61,6 @@ pub struct Server {
     /// Directory browser for session creation with project navigation.
     pub browser: DirectoryBrowser,
     /// Tool_use message tracking for in-place editing:
-    /// key = (chat_id, thread_id, tool_use_id) -> (message_id, original summary text).
     pub tool_use_msg_ids: Arc<Mutex<HashMap<ToolUseMsgKey, ToolUseMsgVal>>>,
     /// Status message tracking for status→content conversion:
     /// key = (chat_id, thread_id) -> whether status has been consumed by first content.
@@ -536,14 +534,18 @@ impl Server {
                                     None
                                 };
                                 if let Some((mid, original_text)) = tracked {
-                                    // Edit tool: diff card already sent, just append result
                                     let is_edit = matches!(
                                         msg.tool_name.as_deref(),
                                         Some("Edit" | "EditTool" | "TextEditTool")
                                     );
                                     if !is_edit {
-                                        // Combine: original tool_use summary + result summary
-                                        let combined = format!("{original_text}\n{}", msg.text);
+                                        // Append result suffix to original tool_use line
+                                        let result_suffix = &msg.text;
+                                        let combined = if result_suffix.is_empty() {
+                                            format!("✅ {original_text}")
+                                        } else {
+                                            format!("✅ {original_text} {result_suffix}")
+                                        };
                                         let _ = self
                                             .im_adapter
                                             .edit_message(&target, &mid, &combined)
