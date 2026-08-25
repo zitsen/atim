@@ -556,17 +556,17 @@ impl Server {
                                         let combined = if is_bash
                                             && original_text.contains("```bash")
                                         {
-                                            // Bash with code block: replace emoji, insert suffix
-                                            let suffix_part = if result_suffix.is_empty() {
-                                                String::new()
+                                            // Bash with code block: replace emoji, append suffix after code block
+                                            if result_suffix.is_empty() {
+                                                original_text.replacen("💻 Bash:", "✅ Bash:", 1)
                                             } else {
-                                                format!(" ({result_suffix})")
-                                            };
-                                            original_text.replacen(
-                                                "💻 Bash:",
-                                                &format!("✅ Bash{suffix_part}:"),
-                                                1,
-                                            )
+                                                let replaced = original_text.replacen(
+                                                    "💻 Bash:",
+                                                    "✅ Bash:",
+                                                    1,
+                                                );
+                                                format!("{replaced}\n{result_suffix}")
+                                            }
                                         } else if is_bash {
                                             // Bash without code block (legacy format)
                                             let cmd = stripped
