@@ -158,22 +158,32 @@ pub async fn run_update() -> Result<(), Box<dyn std::error::Error>> {
     // Replace binary
     println!("Installing to {}...", install_path.display());
 
-    // On Linux, use cp + chmod to avoid issues with rename across filesystems
-    let cp_status = Command::new("cp")
-        .args([new_binary.to_str().unwrap(), install_path.to_str().unwrap()])
-        .status()?;
-    if !cp_status.success() {
-        // Try direct copy as fallback
-        std::fs::copy(&new_binary, &install_path)?;
-    }
-
-    // Make executable (Linux/macOS)
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&install_path)?.permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&install_path, perms)?;
+        // On Linux, `install` replaces the binary atomically (new inode),
+        // avoiding "Text file busy" errors when the old binary is still running.
+        let install_status = Command::new("install")
+            .args([
+                "-m",
+                "755",
+                new_binary.to_str().unwrap(),
+                install_path.to_str().unwrap(),
+            ])
+            .status()?;
+        if !install_status.success() {
+            // Fallback: unlink + copy (in case `install` is not available)
+            let _ = std::fs::remove_file(&install_path);
+            std::fs::copy(&new_binary, &install_path)?;
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&install_path)?.permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&install_path, perms)?;
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        std::fs::copy(&new_binary, &install_path)?;
     }
 
     // Restart service
