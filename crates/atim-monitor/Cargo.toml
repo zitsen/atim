@@ -15,6 +15,6 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
 home = { workspace = true }
-atim-core = { path = "../atim-core", version = "0.4" }
-atim-parser = { path = "../atim-parser", version = "0.4" }
+atim-core = { path = "../atim-core", version = "0.5" }
+atim-parser = { path = "../atim-parser", version = "0.5" }
 rusqlite = { workspace = true }

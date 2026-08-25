@@ -14,7 +14,7 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
-atim-core = { path = "../atim-core", version = "0.4" }
+atim-core = { path = "../atim-core", version = "0.5" }
 image = { version = "0.25", default-features = false, features = ["png"] }
 imageproc = { version = "0.27", default-features = false, features = ["text"] }
 ab_glyph = "0.2"
