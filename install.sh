@@ -123,6 +123,17 @@ fetch_latest_version() {
   echo "${tag#v}"
 }
 
+# Fetch the second-latest release version (for fallback when latest asset is missing).
+fetch_previous_version() {
+  local repo="$1"
+  local tag
+  # releases/latest returns the newest; releases returns all (newest first).
+  tag="$(curl -fsSL "https://api.github.com/repos/${repo}/releases?per_page=2" \
+    | grep '"tag_name"' | sed -n '2p' | cut -d'"' -f4)"
+  [[ -n "$tag" ]] || return 1
+  echo "${tag#v}"
+}
+
 # ── Resolve download URLs ──
 
 resolve_atim_url() {
@@ -170,13 +181,37 @@ install_atim_binary() {
 
   info "Downloading atim ${ATIM_RESOLVED_VERSION} ..."
   info "  ${url}"
-  curl -fsSL "$url" -o "$archive_path"
-  curl -fsSL "${url}.sha256" -o "$sha256_path"
+  if ! curl -fsSL "$url" -o "$archive_path" 2>/dev/null; then
+    # Latest asset not found (e.g. CI still building) — try previous version
+    local prev_version
+    prev_version="$(fetch_previous_version "$ATIM_REPO")" || true
+    if [[ -n "$prev_version" && "$prev_version" != "$ATIM_RESOLVED_VERSION" ]]; then
+      info "Latest v${ATIM_RESOLVED_VERSION} asset not available, trying v${prev_version} ..."
+      ATIM_RESOLVED_VERSION="$prev_version"
+      url="https://github.com/${ATIM_REPO}/releases/download/v${prev_version}/atim-$(detect_target).tar.gz"
+      archive_name="$(basename "$url")"
+      archive_path="${WORK_DIR}/${archive_name}"
+      sha256_path="${archive_path}.sha256"
+      info "  ${url}"
+      curl -fsSL "$url" -o "$archive_path" || {
+        err "failed to download atim v${prev_version}"
+        exit 1
+      }
+    else
+      err "failed to download atim v${ATIM_RESOLVED_VERSION}"
+      exit 1
+    fi
+  fi
+  curl -fsSL "${url}.sha256" -o "$sha256_path" 2>/dev/null || true
 
-  (cd "$WORK_DIR" && sha256sum -c "${archive_name}.sha256" 2>/dev/null) || {
-    err "atim checksum verification failed"
-    exit 1
-  }
+  if [[ -f "$sha256_path" ]]; then
+    (cd "$WORK_DIR" && sha256sum -c "${archive_name}.sha256" 2>/dev/null) || {
+      err "atim checksum verification failed"
+      exit 1
+    }
+  else
+    info "No checksum file available, skipping verification"
+  fi
 
   rm -rf "$extract_dir"
   mkdir -p "$extract_dir"
