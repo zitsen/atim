@@ -15,3 +15,5 @@ monitor_state.json
 Thumbs.db
 # mkdocs build output
 site/
+# Patent disclosures (not committed to repo)
+docs/dev/patent-*.md
