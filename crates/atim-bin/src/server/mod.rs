@@ -682,10 +682,16 @@ impl Server {
         // ── replyAtOnly filter: skip non-@mention messages in group chats ──
         if is_group && !is_mention {
             let thread_id_val = target.thread_id.map(|t| t.0).unwrap_or(0);
+            let chat_id_val = target.chat_id.0;
             let should_skip = rt
                 .chat_bindings
                 .iter()
                 .find(|b| b.user_id == user_id && b.thread_id == thread_id_val)
+                .or_else(|| {
+                    rt.chat_bindings
+                        .iter()
+                        .find(|b| b.user_id == user_id && b.chat_id == chat_id_val)
+                })
                 .is_some_and(|b| b.reply_at_only);
             if should_skip {
                 tracing::debug!(
@@ -695,15 +701,24 @@ impl Server {
             }
         }
 
-        // Helper: find chat_binding by (user_id, thread_id)
+        // Helper: find chat_binding by (user_id, thread_id).
+        // Falls back to (user_id, chat_id) when thread_id doesn't match
+        // (e.g. Feishu replies to cards use a different thread_id).
         let thread_id_val = target.thread_id.map(|t| t.0).unwrap_or(0);
+        let chat_id_val = target.chat_id.0;
         let find_cb = || -> Option<(ChatBinding, Option<&WindowBinding>)> {
             let cb = rt
                 .chat_bindings
                 .iter()
-                .find(|b| b.user_id == user_id && b.thread_id == thread_id_val)?
+                .find(|b| b.user_id == user_id && b.thread_id == thread_id_val)
+                .or_else(|| {
+                    // Fallback: match by chat_id for card reply threads
+                    rt.chat_bindings
+                        .iter()
+                        .find(|b| b.user_id == user_id && b.chat_id == chat_id_val)
+                })?
                 .clone();
-            let wb = rt.resolve_window_binding(user_id, thread_id_val);
+            let wb = rt.resolve_window_binding(user_id, cb.thread_id);
             Some((cb, wb))
         };
 
