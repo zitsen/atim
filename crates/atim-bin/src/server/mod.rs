@@ -539,51 +539,11 @@ impl Server {
                                         Some("Edit" | "EditTool" | "TextEditTool")
                                     );
                                     if !is_edit {
-                                        let result_suffix = &msg.text;
-                                        let is_bash = matches!(
+                                        let combined = format_tool_result(
+                                            &original_text,
+                                            &msg.text,
                                             msg.tool_name.as_deref(),
-                                            Some("Bash" | "BashTool" | "BashRuntime")
                                         );
-                                        // Strip emoji prefix from original tool_use text
-                                        let stripped = original_text
-                                            .strip_prefix("💻 ")
-                                            .or_else(|| original_text.strip_prefix("📖 "))
-                                            .or_else(|| original_text.strip_prefix("✏️ "))
-                                            .or_else(|| original_text.strip_prefix("📝 "))
-                                            .or_else(|| original_text.strip_prefix("🔍 "))
-                                            .unwrap_or(&original_text)
-                                            .trim_start();
-                                        let combined = if is_bash && original_text.contains("```") {
-                                            // Bash with code block: replace emoji, insert suffix in header
-                                            let suffix_part = if result_suffix.is_empty() {
-                                                String::new()
-                                            } else {
-                                                format!(" ({result_suffix})")
-                                            };
-                                            original_text.replacen(
-                                                "💻 Bash:",
-                                                &format!("✅ Bash{suffix_part}:"),
-                                                1,
-                                            )
-                                        } else if is_bash {
-                                            // Bash without code block (legacy format)
-                                            let cmd = stripped
-                                                .strip_prefix("Bash: ")
-                                                .or_else(|| stripped.strip_prefix("Bash:"))
-                                                .unwrap_or(stripped)
-                                                .trim();
-                                            if result_suffix.is_empty() {
-                                                format!("✅ Bash:\n```bash\n{cmd}\n```")
-                                            } else {
-                                                format!(
-                                                    "✅ Bash ({result_suffix}):\n```bash\n{cmd}\n```"
-                                                )
-                                            }
-                                        } else if result_suffix.is_empty() {
-                                            format!("✅ {stripped}")
-                                        } else {
-                                            format!("✅ {stripped} ({result_suffix})")
-                                        };
                                         let _ = self
                                             .im_adapter
                                             .edit_message(&target, &mid, &combined)
@@ -4880,6 +4840,49 @@ fn format_delta(delta: chrono::TimeDelta) -> String {
     }
 }
 
+/// Combine tool_use summary text with a tool_result suffix.
+///
+/// - Bash tools with code blocks: replace 💻 with ✅, insert suffix in header.
+/// - Other tools: replace emoji prefix with ✅, append suffix.
+fn format_tool_result(
+    original_tool_use: &str,
+    result_suffix: &str,
+    tool_name: Option<&str>,
+) -> String {
+    let is_bash = matches!(tool_name, Some("Bash" | "BashTool" | "BashRuntime"));
+
+    if is_bash {
+        // For Bash: replace the emoji header with ✅ + suffix
+        let suffix_part = if result_suffix.is_empty() {
+            String::new()
+        } else {
+            format!(" ({result_suffix})")
+        };
+        if let Some(rest) = original_tool_use.strip_prefix("💻 Bash:") {
+            return format!("✅ Bash{suffix_part}:{rest}");
+        }
+        if let Some(rest) = original_tool_use.strip_prefix("💻 Bash: ") {
+            return format!("✅ Bash{suffix_part}: {rest}");
+        }
+    }
+
+    // Non-Bash: strip emoji, prepend ✅
+    let stripped = original_tool_use
+        .strip_prefix("💻 ")
+        .or_else(|| original_tool_use.strip_prefix("📖 "))
+        .or_else(|| original_tool_use.strip_prefix("✏️ "))
+        .or_else(|| original_tool_use.strip_prefix("📝 "))
+        .or_else(|| original_tool_use.strip_prefix("🔍 "))
+        .unwrap_or(original_tool_use)
+        .trim_start();
+
+    if result_suffix.is_empty() {
+        format!("✅ {stripped}")
+    } else {
+        format!("✅ {stripped} ({result_suffix})")
+    }
+}
+
 fn is_shell_process(process: &str) -> bool {
     matches!(
         process,
@@ -6099,5 +6102,63 @@ mod tests {
         offsets.remove(&old_sid);
         assert!(!offsets.contains_key(&old_sid));
         assert!(offsets.contains_key(&other_sid));
+    }
+
+    // ── format_tool_result tests ──
+
+    #[test]
+    fn test_format_bash_with_code_block_and_suffix() {
+        let original = "💻 Bash:\n```bash\nls -la /tmp\n```";
+        let result = format_tool_result(original, "16 lines", Some("Bash"));
+        assert_eq!(result, "✅ Bash (16 lines):\n```bash\nls -la /tmp\n```");
+    }
+
+    #[test]
+    fn test_format_bash_with_code_block_no_suffix() {
+        let original = "💻 Bash:\n```bash\nls -la\n```";
+        let result = format_tool_result(original, "", Some("Bash"));
+        assert_eq!(result, "✅ Bash:\n```bash\nls -la\n```");
+    }
+
+    #[test]
+    fn test_format_bash_simple_inline() {
+        let original = "💻 Bash: ls -la /tmp";
+        let result = format_tool_result(original, "16 lines", Some("Bash"));
+        assert_eq!(result, "✅ Bash (16 lines): ls -la /tmp");
+    }
+
+    #[test]
+    fn test_format_write_tool() {
+        let original = "📝 Write: /path/to/file";
+        let result = format_tool_result(original, "1 lines", Some("Write"));
+        assert_eq!(result, "✅ Write: /path/to/file (1 lines)");
+    }
+
+    #[test]
+    fn test_format_read_tool() {
+        let original = "📖 Read: /path/to/file";
+        let result = format_tool_result(original, "3 lines", Some("Read"));
+        assert_eq!(result, "✅ Read: /path/to/file (3 lines)");
+    }
+
+    #[test]
+    fn test_format_edit_tool() {
+        let original = "✏️ Edit: /path/to/file";
+        let result = format_tool_result(original, "+2 −1", Some("Edit"));
+        assert_eq!(result, "✅ Edit: /path/to/file (+2 −1)");
+    }
+
+    #[test]
+    fn test_format_no_suffix() {
+        let original = "🔧 Tool: something";
+        let result = format_tool_result(original, "", Some("OtherTool"));
+        assert_eq!(result, "✅ 🔧 Tool: something");
+    }
+
+    #[test]
+    fn test_format_bash_exit_failure() {
+        let original = "💻 Bash:\n```bash\ncargo test\n```";
+        let result = format_tool_result(original, "exit 1", Some("Bash"));
+        assert_eq!(result, "✅ Bash (exit 1):\n```bash\ncargo test\n```");
     }
 }
