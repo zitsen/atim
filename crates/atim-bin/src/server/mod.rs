@@ -4842,7 +4842,7 @@ fn format_delta(delta: chrono::TimeDelta) -> String {
 
 /// Combine tool_use summary text with a tool_result suffix.
 ///
-/// - Bash tools with code blocks: replace 💻 with ✅, insert suffix in header.
+/// - Bash: replace "Bash:" with "✅ Bash (N):" preserving the rest of the line.
 /// - Other tools: replace emoji prefix with ✅, append suffix.
 fn format_tool_result(
     original_tool_use: &str,
@@ -4852,34 +4852,44 @@ fn format_tool_result(
     let is_bash = matches!(tool_name, Some("Bash" | "BashTool" | "BashRuntime"));
 
     if is_bash {
-        // For Bash: replace the emoji header with ✅ + suffix
         let suffix_part = if result_suffix.is_empty() {
             String::new()
         } else {
             format!(" ({result_suffix})")
         };
-        if let Some(rest) = original_tool_use.strip_prefix("💻 Bash:") {
-            return format!("✅ Bash{suffix_part}:{rest}");
-        }
-        if let Some(rest) = original_tool_use.strip_prefix("💻 Bash: ") {
-            return format!("✅ Bash{suffix_part}: {rest}");
-        }
+        // Replace emoji + "Bash:" with "✅ Bash (suffix):" — try both common forms
+        let replaced = original_tool_use
+            .replacen("💻 Bash:", &format!("✅ Bash{suffix_part}:"), 1)
+            .replacen("💻 Bash: ", &format!("✅ Bash{suffix_part}: "), 1);
+        return replaced;
     }
 
-    // Non-Bash: strip emoji, prepend ✅
-    let stripped = original_tool_use
-        .strip_prefix("💻 ")
-        .or_else(|| original_tool_use.strip_prefix("📖 "))
-        .or_else(|| original_tool_use.strip_prefix("✏️ "))
-        .or_else(|| original_tool_use.strip_prefix("📝 "))
-        .or_else(|| original_tool_use.strip_prefix("🔍 "))
-        .unwrap_or(original_tool_use)
-        .trim_start();
+    // Non-Bash: find and replace the emoji prefix with ✅
+    let result = original_tool_use
+        .replacen("💻 ", "✅ ", 1)
+        .replacen("📖 ", "✅ ", 1)
+        .replacen("✏️ ", "✅ ", 1)
+        .replacen("📝 ", "✅ ", 1)
+        .replacen("🔍 ", "✅ ", 1);
+    // If no emoji was replaced, prepend ✅
+    let result = if result == original_tool_use && !result.starts_with("✅ ") {
+        format!("✅ {result}")
+    } else {
+        result
+    };
 
     if result_suffix.is_empty() {
-        format!("✅ {stripped}")
+        result
+    } else if result.starts_with("✅ ") {
+        // Insert suffix after the tool name on the first line
+        if let Some(line_end) = result.find('\n') {
+            let (first_line, rest) = result.split_at(line_end);
+            format!("{first_line} ({result_suffix}){rest}")
+        } else {
+            format!("{result} ({result_suffix})")
+        }
     } else {
-        format!("✅ {stripped} ({result_suffix})")
+        format!("{result} ({result_suffix})")
     }
 }
 
