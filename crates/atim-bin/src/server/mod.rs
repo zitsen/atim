@@ -553,9 +553,7 @@ impl Server {
                                             .or_else(|| original_text.strip_prefix("🔍 "))
                                             .unwrap_or(&original_text)
                                             .trim_start();
-                                        let combined = if is_bash
-                                            && original_text.contains("```bash")
-                                        {
+                                        let combined = if is_bash && original_text.contains("```") {
                                             // Bash with code block: replace emoji, insert suffix in header
                                             let suffix_part = if result_suffix.is_empty() {
                                                 String::new()
