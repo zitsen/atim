@@ -492,6 +492,11 @@ impl Server {
                                     }
                                     continue;
                                 }
+                                // AskUserQuestion without raw_input: skip text summary
+                                // (the interactive card already contains all the content)
+                                if msg.tool_name.as_deref() == Some("AskUserQuestion") {
+                                    continue;
+                                }
                                 // Edit: include diff content in the card
                                 if matches!(
                                     msg.tool_name.as_deref(),
