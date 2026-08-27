@@ -3985,34 +3985,26 @@ impl Server {
                     }
 
                     if pending.questions.is_empty() {
-                        // All questions answered — send summary and submit
+                        // All questions answered — delete old card, send summary with buttons
                         let mut summary = String::from("**Answers:**\n");
                         for (q, a) in &pending.answers {
                             summary.push_str(&format!("- {}: **{}**\n", q, a));
                         }
-                        summary.push_str("\n✅ Submit (Enter) / ✖ Cancel (Esc)");
+                        let submit_buttons = vec![
+                            vec![Button {
+                                text: "✅ Submit".into(),
+                                callback_data: "ui:enter".into(),
+                            }],
+                            vec![Button {
+                                text: "✖ Cancel".into(),
+                                callback_data: "ui:esc".into(),
+                            }],
+                        ];
+                        let _ = self.im_adapter.delete_message(&target, &msg_id).await;
                         let _ = self
                             .im_adapter
-                            .edit_message(&target, &msg_id, &summary)
+                            .send_keyboard(&target, &summary, &submit_buttons)
                             .await;
-                        // Send Enter to submit
-                        let rt = self.state_mgr.load_runtime().await?;
-                        let cb = rt.chat_bindings.iter().find(|b| {
-                            b.user_id == user_id
-                                && (b.thread_id == thread_id || b.chat_id == target.chat_id.0)
-                        });
-                        if let Some(wid) = cb
-                            .filter(|cb| !cb.session_id.is_empty())
-                            .and_then(|cb| {
-                                rt.window_bindings
-                                    .values()
-                                    .find(|wb| wb.session_id == cb.session_id)
-                            })
-                            .map(|wb| &wb.window_id)
-                        {
-                            let wid = atim_core::message::WindowId(wid.clone());
-                            let _ = self.tmux_mgr.send_key(&wid, "Enter").await;
-                        }
                     } else {
                         // More questions: delete old card, send new one
                         let next_q = pending.questions.remove(0);
