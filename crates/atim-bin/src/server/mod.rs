@@ -4593,6 +4593,14 @@ impl Server {
 
             // New or changed UI — send keyboard
             if let Some(interactive) = ui {
+                // Skip AskUserQuestion for agents that use JSONL (e.g. Claude Code)
+                // — the JSONL monitor already sends an interactive card via send_ask_user_card.
+                // Pane-based detection is only needed for non-JSONL agents (Copilot, Codex).
+                if interactive.kind == atim_core::message::UiKind::AskUserQuestion
+                    && agent.output_source() == atim_core::agent::OutputSource::JsonlFiles
+                {
+                    continue;
+                }
                 // Send all interactive UI cards including AskUserQuestion
                 // (options are extracted and shown as clickable buttons)
                 {
