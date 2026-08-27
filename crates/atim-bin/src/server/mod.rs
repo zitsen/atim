@@ -3970,6 +3970,35 @@ impl Server {
                 let thread_id = target.thread_id.map(|t| t.0).unwrap_or(0);
                 let key = (user_id, thread_id);
 
+                // Resolve window_id for terminal input
+                let window_id = {
+                    let rt = self.state_mgr.load_runtime().await.ok();
+                    rt.and_then(|rt| {
+                        rt.chat_bindings
+                            .iter()
+                            .find(|b| {
+                                b.user_id == user_id
+                                    && (b.thread_id == thread_id || b.chat_id == target.chat_id.0)
+                            })
+                            .filter(|cb| !cb.session_id.is_empty())
+                            .and_then(|cb| {
+                                rt.window_bindings
+                                    .values()
+                                    .find(|wb| wb.session_id == cb.session_id)
+                            })
+                            .map(|wb| WindowId(wb.window_id.clone()))
+                    })
+                };
+
+                // Send selection to terminal: Down×oi + Enter
+                if let Some(ref wid) = window_id {
+                    for _ in 0..oi {
+                        let _ = self.tmux_mgr.send_key(wid, "Down").await;
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    let _ = self.tmux_mgr.send_key(wid, "Enter").await;
+                }
+
                 let mut pending_map = self.pending_ask_questions.lock().await;
                 if let Some(mut pending) = pending_map.remove(&key) {
                     // Record the answer
