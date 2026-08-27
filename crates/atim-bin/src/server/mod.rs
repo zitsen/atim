@@ -28,6 +28,23 @@ mod recovery;
 /// Key type for per-user pending state: (user_id, thread_id).
 /// thread_id serves as the sole chat identifier — for Feishu, thread_id == chat_id.
 type UserTriple = (i64, i64);
+
+/// State for a multi-question AskUserQuestion flow.
+#[allow(dead_code)]
+pub struct PendingAskQuestions {
+    /// Remaining questions to ask (JSON array elements).
+    questions: Vec<serde_json::Value>,
+    /// Answers collected so far: question_text -> selected_label.
+    answers: Vec<(String, String)>,
+    /// The target to send cards to.
+    target: MessageTarget,
+}
+
+/// A question card ready to send.
+struct QuestionCard {
+    text: String,
+    buttons: Vec<Vec<Button>>,
+}
 /// Key type for tool_use message tracking: (chat_id, thread_id, tool_use_id).
 type ToolUseMsgKey = (i64, i64, String);
 type ToolUseMsgVal = (MessageId, String);
@@ -79,6 +96,8 @@ pub struct Server {
     /// Pending rename names: (user_id, thread_id) -> new chat_name.
     /// Set when the rename prompt is shown; consumed by the rename callback.
     pub pending_rename_names: Arc<Mutex<HashMap<UserTriple, String>>>,
+    /// Multi-question AskUser state: (user_id, thread_id) -> pending questions.
+    pub pending_ask_questions: Arc<Mutex<HashMap<UserTriple, PendingAskQuestions>>>,
     /// Callback context tokens for validating inline keyboard callbacks.
     /// Stores (user_id, thread_id, created_at) for each callback token.
     pub callback_contexts: Arc<Mutex<HashMap<String, CallbackCtx>>>,
@@ -481,8 +500,14 @@ impl Server {
                                 // AskUserQuestion: send interactive card with option buttons
                                 if msg.tool_name.as_deref() == Some("AskUserQuestion")
                                     && let Some(ref raw) = msg.raw_input
-                                    && let Ok(mid) =
-                                        self.send_ask_user_card(&target, raw, &msg.text).await
+                                    && let Ok(mid) = self
+                                        .send_ask_user_card(
+                                            &target,
+                                            binding.user_id,
+                                            raw,
+                                            &msg.text,
+                                        )
+                                        .await
                                 {
                                     if let Some(tuid) = &msg.tool_use_id {
                                         self.tool_use_msg_ids.lock().await.insert(
@@ -2624,12 +2649,13 @@ impl Server {
 
     /// Send an AskUserQuestion as Feishu interactive card(s) with clickable option buttons.
     ///
-    /// For single-question prompts, sends one card.
-    /// For multi-question prompts, sends one card per question.
-    /// Returns the last message_id for tracking.
+    /// For single-question prompts, sends one card immediately.
+    /// For multi-question prompts, sends the first card and stores the rest
+    /// in `pending_ask_questions` for sequential delivery.
     async fn send_ask_user_card(
         &self,
         target: &MessageTarget,
+        user_id: i64,
         raw_input: &str,
         fallback_text: &str,
     ) -> Result<MessageId> {
@@ -2637,77 +2663,97 @@ impl Server {
             .map_err(|e| atim_core::error::Error::Config(format!("AskUserQuestion JSON: {e}")))?;
 
         let questions = match parsed["questions"].as_array() {
-            Some(qs) if !qs.is_empty() => qs,
+            Some(qs) if !qs.is_empty() => qs.clone(),
             _ => {
                 return self.im_adapter.send_message(target, fallback_text).await;
             }
         };
 
-        let mut last_mid = None;
-
-        for (qi, q) in questions.iter().enumerate() {
-            let question = q["question"].as_str().unwrap_or("Choose:");
-            let header = q["header"].as_str().unwrap_or("");
-
-            let mut card_text = if !header.is_empty() {
-                format!("**{}**: {}\n", header, question)
-            } else if questions.len() > 1 {
-                format!("**Q{}**: {}\n", qi + 1, question)
-            } else {
-                format!("**{}**\n", question)
-            };
-
-            let mut buttons: Vec<Vec<Button>> = Vec::new();
-            if let Some(options) = q["options"].as_array() {
-                for (i, opt) in options.iter().enumerate() {
-                    let label = opt["label"].as_str().unwrap_or("");
-                    // Skip options whose label matches the header (duplicate)
-                    if !header.is_empty() && label == header {
-                        continue;
-                    }
-                    let desc = opt["description"].as_str().unwrap_or("");
-                    let btn_text = if !desc.is_empty() && desc != label {
-                        format!("{}. {} — {}", i + 1, label, desc)
-                    } else {
-                        format!("{}. {}", i + 1, label)
-                    };
-                    let btn_label = if btn_text.len() > 45 {
-                        format!(
-                            "{}…",
-                            &btn_text[..btn_text
-                                .char_indices()
-                                .nth(42)
-                                .map(|(j, _)| j)
-                                .unwrap_or(btn_text.len())]
-                        )
-                    } else {
-                        btn_text
-                    };
-                    buttons.push(vec![Button {
-                        text: btn_label,
-                        callback_data: format!("ui:select:{i}"),
-                    }]);
-                }
-            }
-
-            // Cancel button
-            buttons.push(vec![Button {
-                text: "✖ Cancel".into(),
-                callback_data: "ui:esc".into(),
-            }]);
-
-            if card_text.is_empty() {
-                card_text = fallback_text.to_string();
-            }
-
-            let mid = self
+        if questions.len() <= 1 {
+            // Single question: send directly
+            let q = &questions[0];
+            let card = Self::build_question_card(q, 0, 1);
+            return self
                 .im_adapter
-                .send_keyboard(target, &card_text, &buttons)
-                .await?;
-            last_mid = Some(mid);
+                .send_keyboard(target, &card.text, &card.buttons)
+                .await;
         }
 
-        last_mid.ok_or_else(|| atim_core::error::Error::Config("no questions".into()))
+        // Multi-question: send first, store the rest
+        let thread_id = target.thread_id.map(|t| t.0).unwrap_or(0);
+        let key = (user_id, thread_id);
+
+        let first_card = Self::build_question_card(&questions[0], 0, questions.len());
+        let mid = self
+            .im_adapter
+            .send_keyboard(target, &first_card.text, &first_card.buttons)
+            .await?;
+
+        self.pending_ask_questions.lock().await.insert(
+            key,
+            PendingAskQuestions {
+                questions: questions[1..].to_vec(),
+                answers: vec![],
+                target: target.clone(),
+            },
+        );
+
+        Ok(mid)
+    }
+
+    fn build_question_card(q: &serde_json::Value, qi: usize, total: usize) -> QuestionCard {
+        let question = q["question"].as_str().unwrap_or("Choose:");
+        let header = q["header"].as_str().unwrap_or("");
+
+        let card_text = if !header.is_empty() {
+            format!("**{}**: {}\n", header, question)
+        } else if total > 1 {
+            format!("**Q{}**: {}\n", qi + 1, question)
+        } else {
+            format!("**{}**\n", question)
+        };
+
+        let mut buttons: Vec<Vec<Button>> = Vec::new();
+        if let Some(options) = q["options"].as_array() {
+            for (i, opt) in options.iter().enumerate() {
+                let label = opt["label"].as_str().unwrap_or("");
+                if !header.is_empty() && label == header {
+                    continue;
+                }
+                let desc = opt["description"].as_str().unwrap_or("");
+                let btn_text = if !desc.is_empty() && desc != label {
+                    format!("{}. {} — {}", i + 1, label, desc)
+                } else {
+                    format!("{}. {}", i + 1, label)
+                };
+                let btn_label = if btn_text.len() > 45 {
+                    format!(
+                        "{}…",
+                        &btn_text[..btn_text
+                            .char_indices()
+                            .nth(42)
+                            .map(|(j, _)| j)
+                            .unwrap_or(btn_text.len())]
+                    )
+                } else {
+                    btn_text
+                };
+                buttons.push(vec![Button {
+                    text: btn_label,
+                    callback_data: format!("ui:answer:{qi}:{i}"),
+                }]);
+            }
+        }
+
+        buttons.push(vec![Button {
+            text: "✖ Cancel".into(),
+            callback_data: "ui:esc".into(),
+        }]);
+
+        QuestionCard {
+            text: card_text,
+            buttons,
+        }
     }
 
     /// Build and send the current browser keyboard to the user.
@@ -3914,6 +3960,98 @@ impl Server {
         callback_query_id: Option<&str>,
     ) -> Result<()> {
         tracing::debug!("Callback from user {user_id}: {data}");
+
+        // Handle multi-question answer callbacks (ui:answer:qi:oi)
+        if data.starts_with("ui:answer:") {
+            let parts: Vec<&str> = data.splitn(3, ':').collect();
+            if parts.len() >= 3 {
+                let _qi: usize = parts[1].parse().unwrap_or(0);
+                let oi: usize = parts[2].parse().unwrap_or(0);
+                let thread_id = target.thread_id.map(|t| t.0).unwrap_or(0);
+                let key = (user_id, thread_id);
+
+                let mut pending_map = self.pending_ask_questions.lock().await;
+                if let Some(mut pending) = pending_map.remove(&key) {
+                    // Record the answer
+                    if let Some(q) = pending.questions.first() {
+                        let q_text = q["question"].as_str().unwrap_or("").to_string();
+                        let label = q["options"]
+                            .as_array()
+                            .and_then(|opts| opts.get(oi))
+                            .and_then(|opt| opt["label"].as_str())
+                            .unwrap_or("?")
+                            .to_string();
+                        pending.answers.push((q_text, label));
+                    }
+
+                    if pending.questions.is_empty() {
+                        // All questions answered — send summary and submit
+                        let mut summary = String::from("**Answers:**\n");
+                        for (q, a) in &pending.answers {
+                            summary.push_str(&format!("- {}: **{}**\n", q, a));
+                        }
+                        summary.push_str("\n✅ Submit (Enter) / ✖ Cancel (Esc)");
+                        let _ = self
+                            .im_adapter
+                            .edit_message(&target, &msg_id, &summary)
+                            .await;
+                        // Send Enter to submit
+                        let rt = self.state_mgr.load_runtime().await?;
+                        let cb = rt.chat_bindings.iter().find(|b| {
+                            b.user_id == user_id
+                                && (b.thread_id == thread_id || b.chat_id == target.chat_id.0)
+                        });
+                        if let Some(wid) = cb
+                            .filter(|cb| !cb.session_id.is_empty())
+                            .and_then(|cb| {
+                                rt.window_bindings
+                                    .values()
+                                    .find(|wb| wb.session_id == cb.session_id)
+                            })
+                            .map(|wb| &wb.window_id)
+                        {
+                            let wid = atim_core::message::WindowId(wid.clone());
+                            let _ = self.tmux_mgr.send_key(&wid, "Enter").await;
+                        }
+                    } else {
+                        // More questions: send next one
+                        let next_q = pending.questions.remove(0);
+                        let total = pending.answers.len() + pending.questions.len() + 1;
+                        let qi_current = pending.answers.len();
+                        let card = Self::build_question_card(&next_q, qi_current, total);
+                        let _ = self
+                            .im_adapter
+                            .edit_message(&target, &msg_id, &card.text)
+                            .await;
+                        // Re-insert with remaining questions
+                        pending_map.insert(key, pending);
+                    }
+                } else {
+                    // No pending questions — treat as regular ui:select
+                    let rt = self.state_mgr.load_runtime().await?;
+                    let cb = rt.chat_bindings.iter().find(|b| {
+                        b.user_id == user_id
+                            && (b.thread_id == thread_id || b.chat_id == target.chat_id.0)
+                    });
+                    if let Some(wid) = cb
+                        .filter(|cb| !cb.session_id.is_empty())
+                        .and_then(|cb| {
+                            rt.window_bindings
+                                .values()
+                                .find(|wb| wb.session_id == cb.session_id)
+                        })
+                        .map(|wb| &wb.window_id)
+                    {
+                        let select_data = format!("ui:select:{}", parts.get(2).unwrap_or(&"0"));
+                        let _ = handle_ui_callback(&self.tmux_mgr, wid, &select_data).await;
+                    }
+                }
+            }
+            if let Some(qid) = callback_query_id {
+                let _ = self.im_adapter.answer_callback(qid, "").await;
+            }
+            return Ok(());
+        }
 
         // Handle UI navigation callbacks (no token validation needed)
         if data.starts_with("ui:") {

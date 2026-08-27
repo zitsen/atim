@@ -425,6 +425,7 @@ async fn main() -> anyhow::Result<()> {
         last_pane_output: Arc::new(Mutex::new(std::collections::HashMap::new())),
         pending_chat_names: Arc::new(Mutex::new(std::collections::HashMap::new())),
         pending_rename_names: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        pending_ask_questions: Arc::new(Mutex::new(std::collections::HashMap::new())),
         welcome_sent: Arc::new(Mutex::new(std::collections::HashSet::new())),
     };
 
