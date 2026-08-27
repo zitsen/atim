@@ -2740,7 +2740,7 @@ impl Server {
                 };
                 buttons.push(vec![Button {
                     text: btn_label,
-                    callback_data: format!("ui:answer:{qi}:{i}"),
+                    callback_data: format!("ui:answer-{qi}-{i}"),
                 }]);
             }
         }
@@ -3961,12 +3961,12 @@ impl Server {
     ) -> Result<()> {
         tracing::debug!("Callback from user {user_id}: {data}");
 
-        // Handle multi-question answer callbacks (ui:answer:qi:oi)
-        if data.starts_with("ui:answer:") {
-            let parts: Vec<&str> = data.splitn(3, ':').collect();
-            if parts.len() >= 3 {
-                let qi: usize = parts[1].parse().unwrap_or(0);
-                let oi: usize = parts[2].parse().unwrap_or(0);
+        // Handle multi-question answer callbacks (ui:answer-{qi}-{oi})
+        if let Some(rest) = data.strip_prefix("ui:answer-") {
+            let parts: Vec<&str> = rest.splitn(2, '-').collect();
+            if parts.len() >= 2 {
+                let qi: usize = parts[0].parse().unwrap_or(0);
+                let oi: usize = parts[1].parse().unwrap_or(0);
                 let thread_id = target.thread_id.map(|t| t.0).unwrap_or(0);
                 let key = (user_id, thread_id);
 
