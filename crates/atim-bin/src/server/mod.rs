@@ -2622,11 +2622,11 @@ impl Server {
         Ok(())
     }
 
-    /// Send an AskUserQuestion as a Feishu interactive card with clickable option buttons.
+    /// Send an AskUserQuestion as Feishu interactive card(s) with clickable option buttons.
     ///
-    /// Parses the tool_use input JSON to extract questions/options, builds
-    /// a card with one button per option, and returns the message_id for
-    /// tracking (so the ToolResult can edit it later).
+    /// For single-question prompts, sends one card.
+    /// For multi-question prompts, sends one card per question.
+    /// Returns the last message_id for tracking.
     async fn send_ask_user_card(
         &self,
         target: &MessageTarget,
@@ -2636,72 +2636,78 @@ impl Server {
         let parsed: serde_json::Value = serde_json::from_str(raw_input)
             .map_err(|e| atim_core::error::Error::Config(format!("AskUserQuestion JSON: {e}")))?;
 
-        let questions = parsed["questions"].as_array();
-        let mut all_buttons: Vec<Vec<Button>> = Vec::new();
-        let mut card_text = String::new();
+        let questions = match parsed["questions"].as_array() {
+            Some(qs) if !qs.is_empty() => qs,
+            _ => {
+                return self.im_adapter.send_message(target, fallback_text).await;
+            }
+        };
 
-        if let Some(qs) = questions {
-            let mut btn_idx: usize = 0;
-            for (qi, q) in qs.iter().enumerate() {
-                let question = q["question"].as_str().unwrap_or("Choose:");
-                let header = q["header"].as_str().unwrap_or("");
-                if !header.is_empty() {
-                    card_text.push_str(&format!("**{}**: {}\n", header, question));
-                } else if qs.len() > 1 {
-                    card_text.push_str(&format!("**Q{}**: {}\n", qi + 1, question));
-                } else {
-                    card_text.push_str(&format!("**{}**\n", question));
-                }
+        let mut last_mid = None;
 
-                if let Some(options) = q["options"].as_array() {
-                    for opt in options.iter() {
-                        let label = opt["label"].as_str().unwrap_or("");
-                        // Skip options whose label matches the header (duplicate)
-                        if !header.is_empty() && label == header {
-                            btn_idx += 1;
-                            continue;
-                        }
-                        let desc = opt["description"].as_str().unwrap_or("");
-                        let btn_text = if !desc.is_empty() && desc != label {
-                            format!("{}. {} — {}", btn_idx + 1, label, desc)
-                        } else {
-                            format!("{}. {}", btn_idx + 1, label)
-                        };
-                        let btn_label = if btn_text.len() > 45 {
-                            format!(
-                                "{}…",
-                                &btn_text[..btn_text
-                                    .char_indices()
-                                    .nth(42)
-                                    .map(|(j, _)| j)
-                                    .unwrap_or(btn_text.len())]
-                            )
-                        } else {
-                            btn_text
-                        };
-                        all_buttons.push(vec![Button {
-                            text: btn_label,
-                            callback_data: format!("ui:select:{btn_idx}"),
-                        }]);
-                        btn_idx += 1;
+        for (qi, q) in questions.iter().enumerate() {
+            let question = q["question"].as_str().unwrap_or("Choose:");
+            let header = q["header"].as_str().unwrap_or("");
+
+            let mut card_text = if !header.is_empty() {
+                format!("**{}**: {}\n", header, question)
+            } else if questions.len() > 1 {
+                format!("**Q{}**: {}\n", qi + 1, question)
+            } else {
+                format!("**{}**\n", question)
+            };
+
+            let mut buttons: Vec<Vec<Button>> = Vec::new();
+            if let Some(options) = q["options"].as_array() {
+                for (i, opt) in options.iter().enumerate() {
+                    let label = opt["label"].as_str().unwrap_or("");
+                    // Skip options whose label matches the header (duplicate)
+                    if !header.is_empty() && label == header {
+                        continue;
                     }
+                    let desc = opt["description"].as_str().unwrap_or("");
+                    let btn_text = if !desc.is_empty() && desc != label {
+                        format!("{}. {} — {}", i + 1, label, desc)
+                    } else {
+                        format!("{}. {}", i + 1, label)
+                    };
+                    let btn_label = if btn_text.len() > 45 {
+                        format!(
+                            "{}…",
+                            &btn_text[..btn_text
+                                .char_indices()
+                                .nth(42)
+                                .map(|(j, _)| j)
+                                .unwrap_or(btn_text.len())]
+                        )
+                    } else {
+                        btn_text
+                    };
+                    buttons.push(vec![Button {
+                        text: btn_label,
+                        callback_data: format!("ui:select:{i}"),
+                    }]);
                 }
             }
+
+            // Cancel button
+            buttons.push(vec![Button {
+                text: "✖ Cancel".into(),
+                callback_data: "ui:esc".into(),
+            }]);
+
+            if card_text.is_empty() {
+                card_text = fallback_text.to_string();
+            }
+
+            let mid = self
+                .im_adapter
+                .send_keyboard(target, &card_text, &buttons)
+                .await?;
+            last_mid = Some(mid);
         }
 
-        if card_text.is_empty() {
-            card_text = fallback_text.to_string();
-        }
-
-        // Always add a cancel button
-        all_buttons.push(vec![Button {
-            text: "✖ Cancel".into(),
-            callback_data: "ui:esc".into(),
-        }]);
-
-        self.im_adapter
-            .send_keyboard(target, &card_text, &all_buttons)
-            .await
+        last_mid.ok_or_else(|| atim_core::error::Error::Config("no questions".into()))
     }
 
     /// Build and send the current browser keyboard to the user.
