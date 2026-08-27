@@ -3990,13 +3990,10 @@ impl Server {
                     })
                 };
 
-                // Send selection to terminal: Down×oi + Enter
+                // Send selection to terminal: press number key
                 if let Some(ref wid) = window_id {
-                    for _ in 0..oi {
-                        let _ = self.tmux_mgr.send_key(wid, "Down").await;
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                    }
-                    let _ = self.tmux_mgr.send_key(wid, "Enter").await;
+                    let num_key = format!("{}", oi + 1);
+                    let _ = self.tmux_mgr.send_line(wid, &num_key).await;
                 }
 
                 let mut pending_map = self.pending_ask_questions.lock().await;
