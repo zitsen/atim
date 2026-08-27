@@ -4014,15 +4014,16 @@ impl Server {
                             let _ = self.tmux_mgr.send_key(&wid, "Enter").await;
                         }
                     } else {
-                        // More questions: send next one
+                        // More questions: delete old card, send new one
                         let next_q = pending.questions.remove(0);
                         let total = pending.answers.len() + pending.questions.len() + 1;
                         let qi_current = pending.answers.len();
                         let card = Self::build_question_card(&next_q, qi_current, total);
-                        let _ = self
+                        let _ = self.im_adapter.delete_message(&target, &msg_id).await;
+                        let _new_mid = self
                             .im_adapter
-                            .edit_message(&target, &msg_id, &card.text)
-                            .await;
+                            .send_keyboard(&target, &card.text, &card.buttons)
+                            .await?;
                         // Re-insert with remaining questions
                         pending_map.insert(key, pending);
                     }
