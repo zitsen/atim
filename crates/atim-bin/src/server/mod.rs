@@ -2650,6 +2650,10 @@ impl Server {
                 if let Some(options) = q["options"].as_array() {
                     for (i, opt) in options.iter().enumerate() {
                         let label = opt["label"].as_str().unwrap_or("");
+                        // Skip options whose label matches the header (duplicate)
+                        if !header.is_empty() && label == header {
+                            continue;
+                        }
                         let desc = opt["description"].as_str().unwrap_or("");
                         let btn_text = if !desc.is_empty() && desc != label {
                             format!("{}. {} — {}", i + 1, label, desc)
