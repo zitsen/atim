@@ -3965,10 +3965,14 @@ impl Server {
         if data.starts_with("ui:answer:") {
             let parts: Vec<&str> = data.splitn(3, ':').collect();
             if parts.len() >= 3 {
-                let _qi: usize = parts[1].parse().unwrap_or(0);
+                let qi: usize = parts[1].parse().unwrap_or(0);
                 let oi: usize = parts[2].parse().unwrap_or(0);
                 let thread_id = target.thread_id.map(|t| t.0).unwrap_or(0);
                 let key = (user_id, thread_id);
+
+                tracing::info!(
+                    "[ui:answer] user={user_id} qi={qi} oi={oi} thread={thread_id} data={data}"
+                );
 
                 // Resolve window_id for terminal input
                 let window_id = {
@@ -3993,7 +3997,22 @@ impl Server {
                 // Send selection to terminal: press number key
                 if let Some(ref wid) = window_id {
                     let num_key = format!("{}", oi + 1);
+                    tracing::info!(
+                        "[ui:answer] sending key '{}' to window {} (option {})",
+                        num_key,
+                        wid.0,
+                        oi + 1
+                    );
                     let _ = self.tmux_mgr.send_line(wid, &num_key).await;
+                    // Capture pane after sending to verify
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    if let Ok(pane) = self.tmux_mgr.capture_pane(wid).await {
+                        let clean = strip_ansi(&pane);
+                        let preview: String = clean.chars().take(200).collect();
+                        tracing::info!("[ui:answer] pane after key: {:?}", preview);
+                    }
+                } else {
+                    tracing::warn!("[ui:answer] no window_id found for user={user_id}");
                 }
 
                 let mut pending_map = self.pending_ask_questions.lock().await;
