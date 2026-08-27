@@ -2636,6 +2636,7 @@ impl Server {
         let mut card_text = String::new();
 
         if let Some(qs) = questions {
+            let mut btn_idx: usize = 0;
             for (qi, q) in qs.iter().enumerate() {
                 let question = q["question"].as_str().unwrap_or("Choose:");
                 let header = q["header"].as_str().unwrap_or("");
@@ -2648,17 +2649,18 @@ impl Server {
                 }
 
                 if let Some(options) = q["options"].as_array() {
-                    for (i, opt) in options.iter().enumerate() {
+                    for opt in options.iter() {
                         let label = opt["label"].as_str().unwrap_or("");
                         // Skip options whose label matches the header (duplicate)
                         if !header.is_empty() && label == header {
+                            btn_idx += 1;
                             continue;
                         }
                         let desc = opt["description"].as_str().unwrap_or("");
                         let btn_text = if !desc.is_empty() && desc != label {
-                            format!("{}. {} — {}", i + 1, label, desc)
+                            format!("{}. {} — {}", btn_idx + 1, label, desc)
                         } else {
-                            format!("{}. {}", i + 1, label)
+                            format!("{}. {}", btn_idx + 1, label)
                         };
                         let btn_label = if btn_text.len() > 45 {
                             format!(
@@ -2674,8 +2676,9 @@ impl Server {
                         };
                         all_buttons.push(vec![Button {
                             text: btn_label,
-                            callback_data: format!("ui:select:{i}"),
+                            callback_data: format!("ui:select:{btn_idx}"),
                         }]);
+                        btn_idx += 1;
                     }
                 }
             }
