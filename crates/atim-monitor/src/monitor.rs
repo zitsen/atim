@@ -934,10 +934,11 @@ impl SessionMonitor {
                 return;
             }
         };
-        // Find window bindings with empty session_id and matching CWD
+        // Find window bindings with matching CWD and update session_id
+        // (replaces stale sessions or empty session_id)
         match db.execute(
             "UPDATE window_bindings SET session_id = ?1
-             WHERE session_id = '' AND cwd = ?2",
+             WHERE cwd = ?2 AND session_id != ?1",
             rusqlite::params![session_id, cwd],
         ) {
             Ok(0) => {
@@ -950,10 +951,10 @@ impl SessionMonitor {
                 // Also update chat_bindings with matching display_name
                 let _ = db.execute(
                     "UPDATE chat_bindings SET session_id = ?1
-                     WHERE session_id = '' AND display_name IN (
-                         SELECT window_name FROM window_bindings WHERE session_id = ?1
-                     )",
-                    rusqlite::params![session_id],
+                     WHERE display_name IN (
+                         SELECT window_name FROM window_bindings WHERE session_id = ?1 AND cwd = ?2
+                     ) AND session_id != ?1",
+                    rusqlite::params![session_id, cwd],
                 );
             }
             Err(e) => {
