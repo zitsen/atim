@@ -166,7 +166,7 @@ impl Agent for CodexAgent {
     }
 
     fn supports_sessions(&self) -> bool {
-        false
+        true
     }
 
     fn has_session_start_hook(&self) -> bool {
@@ -174,7 +174,7 @@ impl Agent for CodexAgent {
     }
 
     fn output_source(&self) -> OutputSource {
-        OutputSource::PaneCapture
+        OutputSource::JsonlFiles
     }
 
     fn parser(&self) -> Box<dyn AgentParser> {
@@ -244,9 +244,9 @@ mod tests {
         let agent = CodexAgent;
         assert_eq!(agent.name(), "codex");
         assert_eq!(agent.kind(), AgentKind::CodexCli);
-        assert!(!agent.supports_sessions());
+        assert!(agent.supports_sessions());
         assert!(!agent.has_session_start_hook());
-        assert_eq!(agent.output_source(), OutputSource::PaneCapture);
+        assert_eq!(agent.output_source(), OutputSource::JsonlFiles);
     }
 
     #[test]

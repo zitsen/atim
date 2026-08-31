@@ -3409,6 +3409,18 @@ impl Server {
             if let Ok(Some(sid)) = agent.discover_session(cwd, &known_ids) {
                 return Some(sid);
             }
+
+            // e) Codex JSONL: scan ~/.codex/sessions/ for matching CWD
+            if let Some(cwd_str) = cwd_hint
+                && let Some((sid, path)) =
+                    atim_monitor::monitor::discover_codex_session(cwd_str).await
+            {
+                tracing::info!(
+                    "Found Codex session {sid} for window {window_id} via JSONL scan ({})",
+                    path.display()
+                );
+                return Some(sid);
+            }
         }
 
         None

@@ -110,11 +110,25 @@ pub async fn resolve_jsonl(session_id: &str) -> Option<PathBuf> {
                             continue;
                         }
                         if let Ok(mut day_dir) = tokio::fs::read_dir(month_entry.path()).await {
-                            while let Ok(Some(file_entry)) = day_dir.next_entry().await {
-                                let fname = file_entry.file_name();
-                                let fname_str = fname.to_string_lossy();
-                                if fname_str.ends_with(&format!("{session_id}.jsonl")) {
-                                    return Some(file_entry.path());
+                            while let Ok(Some(day_entry)) = day_dir.next_entry().await {
+                                if !day_entry
+                                    .file_type()
+                                    .await
+                                    .map(|t| t.is_dir())
+                                    .unwrap_or(false)
+                                {
+                                    continue;
+                                }
+                                if let Ok(mut file_dir) =
+                                    tokio::fs::read_dir(day_entry.path()).await
+                                {
+                                    while let Ok(Some(file_entry)) = file_dir.next_entry().await {
+                                        let fname = file_entry.file_name();
+                                        let fname_str = fname.to_string_lossy();
+                                        if fname_str.ends_with(&format!("{session_id}.jsonl")) {
+                                            return Some(file_entry.path());
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -125,6 +139,75 @@ pub async fn resolve_jsonl(session_id: &str) -> Option<PathBuf> {
     }
 
     None
+}
+
+/// Discover a Codex session ID by matching the CWD from JSONL metadata.
+/// Scans `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` for the most recently
+/// modified file whose `session_meta.cwd` matches the given `cwd`.
+pub async fn discover_codex_session(cwd: &str) -> Option<(String, PathBuf)> {
+    let home = home::home_dir()?;
+    let codex_dir = home.join(".codex").join("sessions");
+    if !codex_dir.is_dir() {
+        return None;
+    }
+
+    let mut best: Option<(String, PathBuf, std::time::SystemTime)> = None;
+
+    // Walk YYYY/MM/DD directories
+    let mut year_dir = tokio::fs::read_dir(&codex_dir).await.ok()?;
+    while let Some(year_entry) = year_dir.next_entry().await.ok()? {
+        if !year_entry
+            .file_type()
+            .await
+            .map(|t| t.is_dir())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let mut month_dir = tokio::fs::read_dir(year_entry.path()).await.ok()?;
+        while let Some(month_entry) = month_dir.next_entry().await.ok()? {
+            if !month_entry
+                .file_type()
+                .await
+                .map(|t| t.is_dir())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let mut day_dir = tokio::fs::read_dir(month_entry.path()).await.ok()?;
+            while let Some(day_entry) = day_dir.next_entry().await.ok()? {
+                if !day_entry
+                    .file_type()
+                    .await
+                    .map(|t| t.is_dir())
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                let mut file_dir = tokio::fs::read_dir(day_entry.path()).await.ok()?;
+                while let Some(file_entry) = file_dir.next_entry().await.ok()? {
+                    let path = file_entry.path();
+                    let fname = file_entry.file_name().to_string_lossy().to_string();
+                    if !fname.starts_with("rollout-") || !fname.ends_with(".jsonl") {
+                        continue;
+                    }
+                    // Check modification time
+                    let meta = tokio::fs::metadata(&path).await.ok()?;
+                    let modified = meta.modified().ok()?;
+                    // Read session metadata to check CWD
+                    if let Ok(session_meta) =
+                        atim_parser::codex_jsonl::CodexJsonlParser::read_meta(&path).await
+                        && session_meta.cwd == cwd
+                        && (best.is_none() || modified > best.as_ref().unwrap().2)
+                    {
+                        best = Some((session_meta.session_id, path.clone(), modified));
+                    }
+                }
+            }
+        }
+    }
+
+    best.map(|(sid, path, _)| (sid, path))
 }
 
 impl SessionMonitor {
