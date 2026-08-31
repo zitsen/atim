@@ -161,6 +161,10 @@ impl Agent for CodexAgent {
         None
     }
 
+    fn extra_args(&self) -> Vec<String> {
+        vec!["--yolo".into()]
+    }
+
     fn supports_sessions(&self) -> bool {
         false
     }
