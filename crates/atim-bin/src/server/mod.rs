@@ -1585,31 +1585,6 @@ impl Server {
                     None
                 };
 
-                // Fallback: Codex JSONL discovery by CWD
-                let discovered_sid = if discovered_sid.is_none() {
-                    let cwd = rebind_rt
-                        .window_bindings
-                        .get(&window_id_str)
-                        .map(|wb| wb.cwd.clone())
-                        .unwrap_or_default();
-                    if !cwd.is_empty() {
-                        if let Some((sid, _path)) =
-                            atim_monitor::monitor::discover_codex_session(&cwd).await
-                        {
-                            tracing::info!(
-                                "[rebind] Found Codex session {sid} for window {window_id_str} via JSONL scan"
-                            );
-                            Some(sid)
-                        } else {
-                            discovered_sid
-                        }
-                    } else {
-                        discovered_sid
-                    }
-                } else {
-                    discovered_sid
-                };
-
                 // Capture stored_sid before any mutations (owned String)
                 let stored_sid = rebind_rt
                     .window_bindings
@@ -3432,18 +3407,6 @@ impl Server {
                 }
             }
             if let Ok(Some(sid)) = agent.discover_session(cwd, &known_ids) {
-                return Some(sid);
-            }
-
-            // e) Codex JSONL: scan ~/.codex/sessions/ for matching CWD
-            if let Some(cwd_str) = cwd_hint
-                && let Some((sid, path)) =
-                    atim_monitor::monitor::discover_codex_session(cwd_str).await
-            {
-                tracing::info!(
-                    "Found Codex session {sid} for window {window_id} via JSONL scan ({})",
-                    path.display()
-                );
                 return Some(sid);
             }
         }
