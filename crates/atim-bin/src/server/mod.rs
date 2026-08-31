@@ -2094,6 +2094,29 @@ impl Server {
 
             // Verify window is alive and agent is actually running
             match self.tmux_mgr.find_window(&window_id).await {
+                Err(atim_core::error::Error::Tmux(ref msg))
+                    if msg.contains("I/O error")
+                        || msg.contains("Input/output")
+                        || msg.contains("os error 5") =>
+                {
+                    // I/O error (e.g. /mnt/home unavailable) — don't show recovery,
+                    // just report the error. The window is likely still alive.
+                    tracing::warn!(
+                        "[handle_text_message] Window {} I/O error: {msg}",
+                        window_id_str,
+                    );
+                    let _ = self
+                        .im_adapter
+                        .send_message(
+                            &target,
+                            &format!(
+                                "⚠️ 临时无法访问会话窗口（I/O error）。请稍后重试。\n{}",
+                                msg
+                            ),
+                        )
+                        .await;
+                    return Ok(());
+                }
                 Err(e) => {
                     // Window died — prompt user to recover or create new session
                     tracing::warn!(

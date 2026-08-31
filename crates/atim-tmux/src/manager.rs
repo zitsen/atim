@@ -174,7 +174,11 @@ impl TmuxManager {
                 "#{window_id}|#{window_name}|#{pane_current_command}",
             ])
             .await
-            .map_err(|_| Error::WindowNotFound(window_id.0.clone()))?;
+            .map_err(|e| match &e {
+                // I/O errors: window exists but filesystem is unavailable
+                Error::Tmux(msg) if is_eio_error(msg) => e,
+                _ => Error::WindowNotFound(window_id.0.clone()),
+            })?;
 
         let trimmed = out.trim();
         let mut parts = trimmed.splitn(3, '|');
