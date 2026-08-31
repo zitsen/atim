@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use atim_core::agent::OutputSource;
 use atim_core::agent::types::AgentHandle;
 use atim_core::config::Config;
 use atim_core::error::Result;
@@ -86,8 +85,6 @@ pub struct Server {
     pub pending_agents: Arc<Mutex<HashMap<UserTriple, String>>>,
     /// Interactive UI detection cache: window_id -> hash of last detected UI content.
     pub last_ui_states: Arc<Mutex<HashMap<String, String>>>,
-    /// Last pane output per window (for non-Claude agents without JSONL logs).
-    pub last_pane_output: Arc<Mutex<HashMap<String, String>>>,
     /// Pending chat names: (user_id, thread_id) -> IM chat/group name.
     /// Set from the first text message's target.chat_name before any callback
     /// resolves. Used as the window name / binding display_name so the window
@@ -4719,10 +4716,6 @@ impl Server {
             .lock()
             .await
             .retain(|wid, _| live_windows.contains(wid));
-        self.last_pane_output
-            .lock()
-            .await
-            .retain(|wid, _| live_windows.contains(wid));
 
         // Clean up tool_use message tracking for bindings that are gone
         // (e.g. session unbound), preventing unbounded growth when an agent
@@ -4816,10 +4809,6 @@ impl Server {
             };
 
             if !hash_changed {
-                // UI unchanged — still forward pane output if agent uses PaneCapture
-                if agent.output_source() == OutputSource::PaneCapture {
-                    self.forward_new_pane_output(wb, cb, &clean).await;
-                }
                 continue;
             }
 
@@ -4852,15 +4841,6 @@ impl Server {
                         .send_keyboard(&target, &text, &buttons)
                         .await;
                 }
-            } else if agent.output_source() == OutputSource::PaneCapture {
-                // Pane content changed but no interactive UI detected —
-                // forward new pane output for PaneCapture agents (e.g. Codex).
-                self.forward_new_pane_output(wb, cb, &clean).await;
-            }
-
-            // Forward terminal output for PaneCapture agents
-            if agent.output_source() == OutputSource::PaneCapture {
-                self.forward_new_pane_output(wb, cb, &clean).await;
             }
         }
 
@@ -4873,122 +4853,6 @@ impl Server {
     /// rather than appending lines, so line-count-based diffing doesn't work.
     /// Instead, compares the full pane content hash and forwards any
     /// newly-appeared lines that aren't TUI chrome (borders, prompts, etc.).
-    async fn forward_new_pane_output(&self, wb: &WindowBinding, cb: &ChatBinding, clean: &str) {
-        // Only hold the lock for the map read + baseline update. The diff and
-        // the send_message await happen outside the lock to avoid blocking
-        // other pane-output updates on network I/O.
-        let prev = {
-            let mut pane_outputs = self.last_pane_output.lock().await;
-            let last = pane_outputs.get(&wb.window_id).cloned();
-            pane_outputs.insert(wb.window_id.clone(), clean.to_string());
-            last
-        };
-
-        // First call: establish baseline only
-        let Some(prev) = prev else {
-            tracing::debug!(
-                "[forward] window {} ({}) — baseline stored ({} chars)",
-                wb.window_id,
-                wb.window_name,
-                clean.len()
-            );
-            return;
-        };
-
-        if prev == clean {
-            return; // No change
-        }
-
-        tracing::debug!(
-            "[forward] window {} ({}) — content changed ({} → {} chars)",
-            wb.window_id,
-            wb.window_name,
-            prev.len(),
-            clean.len()
-        );
-
-        // Content changed — find lines in new pane text that weren't in old
-        // Trim trailing whitespace from each line to avoid terminal padding noise
-        fn trim_trailing(s: &str) -> &str {
-            s.trim_end()
-        }
-        let old_lines: Vec<&str> = prev.lines().map(trim_trailing).collect();
-        let new_lines: Vec<&str> = clean.lines().map(trim_trailing).collect();
-        let old_set: std::collections::HashSet<&str> = old_lines.iter().copied().collect();
-        let added: Vec<&str> = new_lines
-            .iter()
-            .copied()
-            .filter(|l| !old_set.contains(l))
-            .collect();
-
-        if added.is_empty() {
-            return;
-        }
-
-        // Filter out TUI chrome (borders, empty lines, status bars)
-        let significant: Vec<&str> = added
-            .iter()
-            .filter(|l| {
-                let t = l.trim();
-                if t.is_empty() {
-                    return false;
-                }
-                let c = t
-                    .chars()
-                    .next()
-                    .expect("t is non-empty (checked by is_empty filter above)");
-                // Skip box-drawing, block, and shade characters
-                if matches!(
-                    c,
-                    '│' | '╭'
-                        | '╮'
-                        | '╰'
-                        | '╯'
-                        | '─'
-                        | '▔'
-                        | '▁'
-                        | '░'
-                        | '█'
-                        | '▝'
-                        | '▘'
-                        | '▖'
-                        | '▗'
-                ) {
-                    return false;
-                }
-                // Skip lines that are purely decorative
-                if t.chars()
-                    .all(|c| c.is_ascii_punctuation() || c.is_whitespace())
-                {
-                    return false;
-                }
-                true
-            })
-            .copied()
-            .collect();
-
-        if significant.is_empty() {
-            return;
-        }
-
-        let joined = significant.join("\n");
-        let target = MessageTarget {
-            chat_id: ChatId(cb.group_chat_id.unwrap_or(cb.chat_id)),
-            thread_id: Some(ThreadId(cb.thread_id)),
-            chat_name: None,
-        };
-        let display = if joined.len() > MAX_MSG_LEN {
-            let truncated: String = joined.chars().take(MAX_MSG_LEN).collect();
-            format!("```\n{}…\n```", truncated)
-        } else if joined.len() > 400 {
-            format!("```\n{}\n```", joined)
-        } else {
-            joined
-        };
-
-        let _ = self.im_adapter.send_message(&target, &display).await;
-    }
-
     /// Detect the actual agent type from a running process name.
     fn detect_running_agent(&self, command: &str) -> Option<&'static str> {
         self.config
