@@ -89,7 +89,6 @@ impl CodexJsonlParser {
 
         match entry_type {
             "event_msg" => Self::parse_event_msg(&v),
-            "response_item" => Self::parse_response_item(&v),
             _ => None,
         }
     }
@@ -183,38 +182,6 @@ impl CodexJsonlParser {
             }
             _ => None,
         }
-    }
-
-    /// Parse `response_item` entries (alternative format for messages).
-    fn parse_response_item(v: &serde_json::Value) -> Option<Vec<ParsedEntry>> {
-        let payload = v.get("payload")?;
-        let role = payload.get("role")?.as_str()?;
-        let content = payload.get("content")?;
-        let text = extract_text_from_content(content);
-        if text.is_empty() {
-            return None;
-        }
-        let timestamp = v
-            .get("timestamp")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-
-        let (role_str, content_type) = match role {
-            "assistant" => ("assistant", ContentType::Text),
-            "user" => ("user", ContentType::Text),
-            _ => return None,
-        };
-
-        Some(vec![ParsedEntry {
-            role: role_str.into(),
-            text,
-            content_type,
-            tool_use_id: None,
-            tool_name: None,
-            timestamp,
-            image_data: None,
-            raw_input: None,
-        }])
     }
 }
 
