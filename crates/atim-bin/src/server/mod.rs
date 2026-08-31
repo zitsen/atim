@@ -4741,12 +4741,39 @@ impl Server {
         // session, only probe the last binding per window to avoid sending
         // interactive UI (e.g. permission requests) to all groups.
         let mut seen_windows = HashSet::new();
-        let bindings: Vec<_> = rt
+        let mut bindings: Vec<_> = rt
             .resolved_bindings()
             .into_iter()
             .rev()
             .filter(|(_cb, wb)| seen_windows.insert(wb.window_id.clone()))
             .collect();
+        bindings.reverse();
+
+        // Also include windows with empty session_id (e.g. Codex) that have
+        // a matching chat_binding by display_name.
+        for wb in rt.window_bindings.values() {
+            if seen_windows.contains(&wb.window_id) {
+                continue;
+            }
+            if wb.session_id.is_empty() {
+                // Find chat_binding by matching display_name == window_name
+                if let Some(cb) = rt
+                    .chat_bindings
+                    .iter()
+                    .find(|cb| cb.display_name == wb.window_name && cb.session_id.is_empty())
+                {
+                    tracing::debug!(
+                        "[probe] Found unbound window {} ({}) with matching chat binding",
+                        wb.window_id,
+                        wb.window_name
+                    );
+                    seen_windows.insert(wb.window_id.clone());
+                    bindings.push((cb, wb));
+                }
+            }
+        }
+
+        tracing::debug!("[probe] Probing {} windows", bindings.len());
 
         for (cb, wb) in bindings.into_iter().rev() {
             let wid = WindowId(wb.window_id.clone());
@@ -4825,6 +4852,10 @@ impl Server {
                         .send_keyboard(&target, &text, &buttons)
                         .await;
                 }
+            } else if agent.output_source() == OutputSource::PaneCapture {
+                // Pane content changed but no interactive UI detected —
+                // forward new pane output for PaneCapture agents (e.g. Codex).
+                self.forward_new_pane_output(wb, cb, &clean).await;
             }
 
             // Forward terminal output for PaneCapture agents
@@ -4855,12 +4886,26 @@ impl Server {
 
         // First call: establish baseline only
         let Some(prev) = prev else {
+            tracing::debug!(
+                "[forward] window {} ({}) — baseline stored ({} chars)",
+                wb.window_id,
+                wb.window_name,
+                clean.len()
+            );
             return;
         };
 
         if prev == clean {
             return; // No change
         }
+
+        tracing::debug!(
+            "[forward] window {} ({}) — content changed ({} → {} chars)",
+            wb.window_id,
+            wb.window_name,
+            prev.len(),
+            clean.len()
+        );
 
         // Content changed — find lines in new pane text that weren't in old
         // Trim trailing whitespace from each line to avoid terminal padding noise
