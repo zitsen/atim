@@ -595,93 +595,129 @@ impl SessionMonitor {
         // 3c: Codex CLI sessions — ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
         if let Some(home) = home::home_dir() {
             let codex_sessions_dir = Path::new(&home).join(".codex").join("sessions");
+            tracing::debug!(
+                "[monitor] Codex scan: checking {} (exists={})",
+                codex_sessions_dir.display(),
+                codex_sessions_dir.is_dir()
+            );
             if codex_sessions_dir.is_dir() {
                 // Walk YYYY/MM/DD subdirectories
                 if let Ok(mut year_dir) = tokio::fs::read_dir(&codex_sessions_dir).await {
                     while let Ok(Some(year_entry)) = year_dir.next_entry().await {
-                        if !year_entry
+                        let year_name = year_entry.file_name().to_string_lossy().to_string();
+                        let year_is_dir = year_entry
                             .file_type()
                             .await
                             .map(|t| t.is_dir())
-                            .unwrap_or(false)
-                        {
+                            .unwrap_or(false);
+                        tracing::debug!(
+                            "[monitor] Codex scan: year={year_name} is_dir={year_is_dir}"
+                        );
+                        if !year_is_dir {
                             continue;
                         }
                         if let Ok(mut month_dir) = tokio::fs::read_dir(year_entry.path()).await {
                             while let Ok(Some(month_entry)) = month_dir.next_entry().await {
-                                if !month_entry
+                                let month_is_dir = month_entry
                                     .file_type()
                                     .await
                                     .map(|t| t.is_dir())
-                                    .unwrap_or(false)
-                                {
+                                    .unwrap_or(false);
+                                let month_name =
+                                    month_entry.file_name().to_string_lossy().to_string();
+                                tracing::debug!(
+                                    "[monitor] Codex scan: {year_name}/{month_name} is_dir={month_is_dir}"
+                                );
+                                if !month_is_dir {
                                     continue;
                                 }
                                 if let Ok(mut day_dir) =
                                     tokio::fs::read_dir(month_entry.path()).await
                                 {
-                                    while let Ok(Some(file_entry)) = day_dir.next_entry().await {
-                                        let path = file_entry.path();
-                                        let fname = file_entry.file_name();
-                                        let fname_str = fname.to_string_lossy();
-                                        // Match rollout-*.jsonl files
-                                        if !fname_str.starts_with("rollout-")
-                                            || !fname_str.ends_with(".jsonl")
-                                        {
+                                    while let Ok(Some(day_entry)) = day_dir.next_entry().await {
+                                        let day_is_dir = day_entry
+                                            .file_type()
+                                            .await
+                                            .map(|t| t.is_dir())
+                                            .unwrap_or(false);
+                                        if !day_is_dir {
                                             continue;
                                         }
-                                        // Extract session ID from filename: rollout-TIMESTAMP-SESSION_ID.jsonl
-                                        // Format: rollout-2026-08-31T16-43-04-01a056fc-835f-7892-bab1-505db59e3df3.jsonl
-                                        // UUID is the last 36 chars before .jsonl
-                                        let name_no_ext = &fname_str[..fname_str.len() - 6]; // strip .jsonl
-                                        let sid_str = if name_no_ext.len() >= 36 {
-                                            let candidate = &name_no_ext[name_no_ext.len() - 36..];
-                                            // Validate UUID format: 8-4-4-4-12 hex
-                                            if candidate.chars().filter(|c| *c == '-').count() == 4
-                                                && candidate.len() == 36
+                                        if let Ok(mut file_dir) =
+                                            tokio::fs::read_dir(day_entry.path()).await
+                                        {
+                                            while let Ok(Some(file_entry)) =
+                                                file_dir.next_entry().await
                                             {
-                                                candidate.to_string()
-                                            } else {
-                                                continue;
-                                            }
-                                        } else {
-                                            continue;
-                                        };
+                                                let path = file_entry.path();
+                                                let fname = file_entry.file_name();
+                                                let fname_str = fname.to_string_lossy();
+                                                // Match rollout-*.jsonl files
+                                                if !fname_str.starts_with("rollout-")
+                                                    || !fname_str.ends_with(".jsonl")
+                                                {
+                                                    continue;
+                                                }
+                                                tracing::debug!(
+                                                    "[monitor] Codex scan: found {fname_str}"
+                                                );
+                                                // Extract session ID from filename
+                                                let name_no_ext = &fname_str[..fname_str.len() - 6];
+                                                let sid_str = if name_no_ext.len() >= 36 {
+                                                    let candidate =
+                                                        &name_no_ext[name_no_ext.len() - 36..];
+                                                    if candidate
+                                                        .chars()
+                                                        .filter(|c| *c == '-')
+                                                        .count()
+                                                        == 4
+                                                        && candidate.len() == 36
+                                                    {
+                                                        candidate.to_string()
+                                                    } else {
+                                                        continue;
+                                                    }
+                                                } else {
+                                                    continue;
+                                                };
 
-                                        if session_ids.contains(&sid_str)
-                                            || all_known.contains(&sid_str)
-                                        {
-                                            continue;
-                                        }
-                                        {
-                                            let offsets = self.byte_offsets.lock().await;
-                                            if offsets.contains_key(&sid_str) {
-                                                continue;
+                                                if session_ids.contains(&sid_str)
+                                                    || all_known.contains(&sid_str)
+                                                {
+                                                    continue;
+                                                }
+                                                {
+                                                    let offsets = self.byte_offsets.lock().await;
+                                                    if offsets.contains_key(&sid_str) {
+                                                        continue;
+                                                    }
+                                                }
+                                                if let Ok(meta) = tokio::fs::metadata(&path).await {
+                                                    let is_recent = meta
+                                                        .modified()
+                                                        .map(|m| {
+                                                            m.elapsed()
+                                                                .map(|e| e.as_secs() < 3600)
+                                                                .unwrap_or(true)
+                                                        })
+                                                        .unwrap_or(true);
+                                                    if !is_recent {
+                                                        continue;
+                                                    }
+                                                    let file_len = meta.len();
+                                                    let mut offsets =
+                                                        self.byte_offsets.lock().await;
+                                                    offsets.insert(sid_str.clone(), file_len);
+                                                    self.jsonl_cache
+                                                        .lock()
+                                                        .await
+                                                        .insert(sid_str.clone(), path.clone());
+                                                    tracing::info!(
+                                                        "[monitor] Discovered untracked Codex session {sid_str} via fs scan"
+                                                    );
+                                                    session_ids.push(sid_str);
+                                                }
                                             }
-                                        }
-                                        if let Ok(meta) = tokio::fs::metadata(&path).await {
-                                            let is_recent = meta
-                                                .modified()
-                                                .map(|m| {
-                                                    m.elapsed()
-                                                        .map(|e| e.as_secs() < 3600)
-                                                        .unwrap_or(true)
-                                                })
-                                                .unwrap_or(true);
-                                            if !is_recent {
-                                                continue;
-                                            }
-                                            let file_len = meta.len();
-                                            let mut offsets = self.byte_offsets.lock().await;
-                                            offsets.insert(sid_str.clone(), file_len);
-                                            self.jsonl_cache
-                                                .lock()
-                                                .await
-                                                .insert(sid_str.clone(), path.clone());
-                                            tracing::info!(
-                                                "[monitor] Discovered untracked Codex session {sid_str} via fs scan"
-                                            );
-                                            session_ids.push(sid_str);
                                         }
                                     }
                                 }
