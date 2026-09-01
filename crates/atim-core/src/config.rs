@@ -80,8 +80,9 @@ pub struct AgentSection {
     #[serde(default)]
     pub workdir: String,
     /// Per-agent overrides keyed by agent name (e.g. "claude", "copilot").
-    /// Populated from [agent.claude], [agent.copilot], etc. in config.toml.
-    #[serde(default, flatten)]
+    /// NOT deserialized from TOML directly — populated manually from
+    /// [agent.claude], [agent.copilot], etc. sub-tables.
+    #[serde(skip)]
     pub agents: HashMap<String, AgentConfig>,
 }
 
@@ -449,13 +450,38 @@ fn load_config_toml(atim_dir: &std::path::Path) -> Option<ConfigToml> {
         return None;
     }
     let data = std::fs::read_to_string(&path).ok()?;
-    match toml::from_str::<ConfigToml>(&data) {
-        Ok(cfg) => Some(cfg),
+
+    // Parse as raw TOML value first to extract agent sub-tables
+    let raw: toml::Value = match toml::from_str(&data) {
+        Ok(v) => v,
         Err(e) => {
             tracing::warn!("Failed to parse {}: {e}", path.display());
-            None
+            return None;
+        }
+    };
+
+    // Deserialize main config (agents field is skipped via #[serde(skip)])
+    let mut cfg: ConfigToml = match toml::from_str(&data) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("Failed to parse {}: {e}", path.display());
+            return None;
+        }
+    };
+
+    // Manually parse [agent.claude], [agent.copilot], etc. sub-tables
+    if let Some(agent_table) = raw.get("agent").and_then(|v| v.as_table()) {
+        for (key, value) in agent_table {
+            if let Some(sub_table) = value.as_table() {
+                // This is a sub-table like [agent.claude]
+                if let Ok(agent_cfg) = sub_table.clone().try_into::<AgentConfig>() {
+                    cfg.agent.agents.insert(key.clone(), agent_cfg);
+                }
+            }
         }
     }
+
+    Some(cfg)
 }
 
 fn resolve_atim_dir() -> PathBuf {

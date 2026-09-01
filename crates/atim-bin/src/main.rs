@@ -428,8 +428,11 @@ async fn main() -> anyhow::Result<()> {
         welcome_sent: Arc::new(Mutex::new(std::collections::HashSet::new())),
     };
 
-    // 8. Enter main event loop — wait for Ctrl+C (SIGINT/CTRL_C_EVENT)
-    // to gracefully shut down, regardless of platform.
+    // 8. Enter main event loop — wait for SIGINT or SIGTERM
+    let sigterm = tokio::signal::unix::SignalKind::terminate();
+    let mut sigterm_signal =
+        tokio::signal::unix::signal(sigterm).expect("Failed to register SIGTERM handler");
+
     tokio::select! {
         result = server.run(im_rx, &mut monitor_rx) => {
             if let Err(e) = result {
@@ -438,6 +441,9 @@ async fn main() -> anyhow::Result<()> {
         }
         _ = tokio::signal::ctrl_c() => {
             tracing::info!("Received interrupt signal, shutting down...");
+        }
+        _ = sigterm_signal.recv() => {
+            tracing::info!("Received SIGTERM, shutting down...");
         }
     }
 

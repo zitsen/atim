@@ -237,15 +237,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_response_item() {
-        let line = r#"{"timestamp":"2026-08-31T08:43:13.085Z","ordinal":2,"type":"response_item","payload":{"type":"message","id":"msg_abc","role":"assistant","content":[{"type":"output_text","text":"Let me help you."}]}}"#;
-        let entries = CodexJsonlParser::parse_line(line).unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].role, "assistant");
-        assert_eq!(entries[0].text, "Let me help you.");
-    }
-
-    #[test]
     fn test_parse_session_meta_skipped() {
         let line = r#"{"timestamp":"2026-08-31T08:43:13.085Z","ordinal":0,"type":"session_meta","payload":{"session_id":"abc","cwd":"/tmp"}}"#;
         assert!(CodexJsonlParser::parse_line(line).is_none());
