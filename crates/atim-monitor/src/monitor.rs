@@ -934,14 +934,13 @@ impl SessionMonitor {
                 return;
             }
         };
-        // Find window bindings with matching CWD that are EITHER:
-        // 1. Already a codex window (agent_type='codex'), or
-        // 2. Have no session_id yet (freshly created)
-        // Do NOT overwrite claude/copilot/mimo windows even if CWD matches.
+        // Auto-bind only to windows that are BOTH:
+        // - agent_type = 'codex' AND
+        // - session_id = '' (unbound codex window)
+        // Never overwrite an existing session_id on any window.
         match db.execute(
             "UPDATE window_bindings SET session_id = ?1
-             WHERE cwd = ?2 AND session_id != ?1
-               AND (agent_type = 'codex' OR session_id = '')",
+             WHERE cwd = ?2 AND agent_type = 'codex' AND session_id = ''",
             rusqlite::params![session_id, cwd],
         ) {
             Ok(0) => {
@@ -953,12 +952,12 @@ impl SessionMonitor {
                 tracing::info!(
                     "[monitor] Auto-bound Codex session {session_id} to {n} window(s) with cwd={cwd}"
                 );
-                // Also update chat_bindings with matching display_name
+                // Also update chat_bindings with matching display_name (only unbound ones)
                 let _ = db.execute(
                     "UPDATE chat_bindings SET session_id = ?1
                      WHERE display_name IN (
                          SELECT window_name FROM window_bindings WHERE session_id = ?1 AND cwd = ?2
-                     ) AND session_id != ?1",
+                     ) AND session_id = ''",
                     rusqlite::params![session_id, cwd],
                 );
             }
