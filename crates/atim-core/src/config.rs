@@ -93,6 +93,10 @@ pub struct TmuxSection {
     /// When true, keep tmux session alive after atim stops (default: false).
     #[serde(default)]
     pub keep_running: bool,
+    /// Max bytes per `send-keys -l` invocation; long messages are chunked to
+    /// stay under it. `None`/0 uses the tmux crate's default (32 KiB).
+    #[serde(default)]
+    pub max_send_chunk: Option<usize>,
 }
 fn _default_tmux_session() -> String {
     "atim".into()
@@ -102,6 +106,7 @@ impl Default for TmuxSection {
         Self {
             session: "atim".into(),
             keep_running: false,
+            max_send_chunk: None,
         }
     }
 }
@@ -183,6 +188,9 @@ pub struct Config {
     pub tmux_session_name: String,
     pub tmux_main_window_name: String,
     pub tmux_keep_running: bool,
+    /// Max bytes per `send-keys -l` call sent to the agent; `None` uses the
+    /// tmux crate's default (32 KiB).
+    pub tmux_max_send_chunk: Option<usize>,
 
     // ── Agent ──
     pub default_agent: String,
@@ -305,6 +313,11 @@ impl Config {
             })
             .unwrap_or_else(|| "atim".into());
 
+        let tmux_max_send_chunk = std::env::var("ATIM_TMUX_MAX_SEND_CHUNK")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .or_else(|| toml_cfg.as_ref().and_then(|c| c.tmux.max_send_chunk));
+
         let default_agent = std::env::var("ATIM_DEFAULT_AGENT")
             .ok()
             .or_else(|| {
@@ -414,6 +427,7 @@ impl Config {
                 .as_ref()
                 .map(|c| c.tmux.keep_running)
                 .unwrap_or(false),
+            tmux_max_send_chunk,
             default_agent,
             workdir,
             agent_registry,

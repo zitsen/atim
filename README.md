@@ -144,6 +144,7 @@ command = "claude"
 
 [tmux]
 session = "atim"
+max_send_chunk = 32768  # bytes per send-keys call; longer messages are chunked
 
 [monitor]
 poll_interval = "2.0"

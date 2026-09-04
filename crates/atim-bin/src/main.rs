@@ -180,11 +180,14 @@ async fn main() -> anyhow::Result<()> {
     use atim_core::terminal::TerminalManager;
     #[cfg(windows)]
     let tmux_mgr: std::sync::Arc<dyn TerminalManager> = std::sync::Arc::new(
-        atim_tmux::manager::TmuxManager::new(&config.tmux_session_name).with_binary("psmux"),
+        atim_tmux::manager::TmuxManager::new(&config.tmux_session_name)
+            .with_binary("psmux")
+            .with_send_chunk(config.tmux_max_send_chunk),
     );
     #[cfg(not(windows))]
     let tmux_mgr: std::sync::Arc<dyn TerminalManager> = std::sync::Arc::new(
-        atim_tmux::manager::TmuxManager::new(&config.tmux_session_name),
+        atim_tmux::manager::TmuxManager::new(&config.tmux_session_name)
+            .with_send_chunk(config.tmux_max_send_chunk),
     );
 
     tmux_mgr.ensure_session().await?;

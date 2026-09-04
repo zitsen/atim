@@ -9,27 +9,31 @@ use tokio::process::Command;
 /// Alias for the shared WindowInfo type (defined in atim-core).
 pub use atim_core::terminal::WindowInfo as TmuxWindowInfo;
 
-/// Maximum bytes sent in a single `send-keys -l` invocation.
+/// Default max bytes sent in a single `send-keys -l` invocation.
 ///
 /// The text is passed to tmux as one command-line argument; Linux caps a
 /// single argument at `MAX_ARG_STRLEN` (32 pages, typically 128 KiB) and the
 /// whole argv at `ARG_MAX`. A long message (e.g. pasted docx content) would
 /// otherwise fail the exec with E2BIG. Kept well below the limit so every
 /// chunk always fits.
-const MAX_SEND_CHUNK: usize = 32 * 1024;
+pub const DEFAULT_SEND_CHUNK: usize = 32 * 1024;
 
-/// Byte ranges to send `text` in [`MAX_SEND_CHUNK`]-sized chunks.
+/// Upper bound for a configured send-chunk override: large enough to cut down
+/// on tmux calls, still safely under Linux's per-argument limit.
+const MAX_ALLOWED_SEND_CHUNK: usize = 100 * 1024;
+
+/// Byte ranges to send `text` in `chunk_len`-sized chunks.
 ///
 /// Every chunk ends on a UTF-8 char boundary so a multi-byte character is
 /// never split across two `send-keys` calls.
-fn chunk_ranges(text: &str) -> Vec<(usize, usize)> {
-    if text.len() <= MAX_SEND_CHUNK {
+fn chunk_ranges(text: &str, chunk_len: usize) -> Vec<(usize, usize)> {
+    if text.len() <= chunk_len {
         return vec![(0, text.len())];
     }
     let mut ranges = Vec::new();
     let mut start = 0;
     while start < text.len() {
-        let end = text.floor_char_boundary((start + MAX_SEND_CHUNK).min(text.len()));
+        let end = text.floor_char_boundary((start + chunk_len).min(text.len()));
         ranges.push((start, end));
         start = end;
     }
@@ -49,6 +53,7 @@ pub struct TmuxManager {
     /// "psmux" or its "tmux" alias on Windows).
     pub binary: String,
     send_delay: Duration,
+    send_chunk: usize,
 }
 
 impl TmuxManager {
@@ -61,6 +66,7 @@ impl TmuxManager {
             session_name: session_name.to_string(),
             binary: "tmux".to_string(),
             send_delay: Duration::from_millis(100),
+            send_chunk: DEFAULT_SEND_CHUNK,
         }
     }
 
@@ -73,6 +79,17 @@ impl TmuxManager {
     /// Set the delay between typing text and pressing Enter.
     pub fn with_send_delay(mut self, delay: Duration) -> Self {
         self.send_delay = delay;
+        self
+    }
+
+    /// Set the max bytes sent per `send-keys -l` call when a message must be
+    /// chunked. `None`/0 keeps the default (32 KiB); values above the safe
+    /// upper bound are clamped.
+    pub fn with_send_chunk(mut self, send_chunk: Option<usize>) -> Self {
+        self.send_chunk = match send_chunk {
+            Some(n) if n != 0 => n.min(MAX_ALLOWED_SEND_CHUNK),
+            _ => DEFAULT_SEND_CHUNK,
+        };
         self
     }
 
@@ -304,12 +321,12 @@ impl TmuxManager {
     /// Uses `-l` (literal) to avoid interpreting special characters.
     /// Uses `--` to prevent tmux from parsing text starting with `--` as flags.
     ///
-    /// Text longer than [`MAX_SEND_CHUNK`] is split across multiple
-    /// `send-keys` calls (chunks never split a multi-byte UTF-8 char). tmux
-    /// appends each chunk to the pane's input line, so the agent still receives
-    /// the full text in one input.
+    /// Text longer than `send_chunk` is split across multiple `send-keys`
+    /// calls (chunks never split a multi-byte UTF-8 char). tmux appends each
+    /// chunk to the pane's input line, so the agent still receives the full
+    /// text in one input.
     pub async fn send_text(&self, window_id: &WindowId, text: &str) -> Result<()> {
-        for (start, end) in chunk_ranges(text) {
+        for (start, end) in chunk_ranges(text, self.send_chunk) {
             self.tmux(&[
                 "send-keys",
                 "-t",
@@ -629,21 +646,22 @@ mod tests {
 
     #[test]
     fn test_chunk_ranges_small_text_single_chunk() {
-        let ranges = chunk_ranges("hello");
+        let ranges = chunk_ranges("hello", 4096);
         assert_eq!(ranges, vec![(0, 5)]);
     }
 
     #[test]
     fn test_chunk_ranges_splits_large_text() {
-        let text = "x".repeat((MAX_SEND_CHUNK * 2) + 10);
-        let ranges = chunk_ranges(&text);
+        let chunk = 7usize;
+        let text = "abcdefghijklmnop"; // 16 bytes
+        let ranges = chunk_ranges(text, chunk);
         assert_eq!(ranges.len(), 3);
         // Chunks are contiguous and cover the whole text without gaps.
         let mut prev_end = 0;
         for (start, end) in &ranges {
             assert_eq!(*start, prev_end);
             assert!(*end > *start);
-            assert!(*end - *start <= MAX_SEND_CHUNK);
+            assert!(*end - *start <= chunk);
             prev_end = *end;
         }
         assert_eq!(prev_end, text.len());
@@ -654,15 +672,40 @@ mod tests {
 
     #[test]
     fn test_chunk_ranges_never_splits_multibyte_char() {
-        // Docx-style CJK text: 2 UTF-8 *bytes* per *char*. Force a chunk
-        // boundary that would land mid-char if we sliced on bytes alone.
-        let text = "文".repeat(MAX_SEND_CHUNK);
-        let ranges = chunk_ranges(&text);
-        for (start, end) in &ranges {
-            let slice = &text[*start..*end];
-            assert_eq!(slice.len() % "文".len(), 0, "chunk splits a CJK char");
-        }
+        // Docx-style CJK text: "文" is exactly 3 UTF-8 bytes. A chunk target
+        // of 4 bytes lands mid-char (offset 4 is inside byte 3..5), so the
+        // boundary must be backed off to a multiple of 3.
+        let chunk = 4usize;
+        let text = "文".repeat(4); // 12 bytes
+        let ranges = chunk_ranges(&text, chunk);
+        assert_eq!(ranges, vec![(0, 3), (3, 6), (6, 9), (9, 12)]);
         let joined: String = ranges.iter().map(|&(s, e)| &text[s..e]).collect();
         assert_eq!(joined, text);
+    }
+
+    #[test]
+    fn test_with_send_chunk_clamps_and_defaults() {
+        let mgr = TmuxManager::new("atim");
+        assert_eq!(mgr.send_chunk, DEFAULT_SEND_CHUNK);
+        assert_eq!(
+            TmuxManager::new("atim").with_send_chunk(None).send_chunk,
+            DEFAULT_SEND_CHUNK
+        );
+        assert_eq!(
+            TmuxManager::new("atim").with_send_chunk(Some(0)).send_chunk,
+            DEFAULT_SEND_CHUNK
+        );
+        assert_eq!(
+            TmuxManager::new("atim")
+                .with_send_chunk(Some(4096))
+                .send_chunk,
+            4096
+        );
+        assert_eq!(
+            TmuxManager::new("atim")
+                .with_send_chunk(Some(MAX_ALLOWED_SEND_CHUNK + 1))
+                .send_chunk,
+            MAX_ALLOWED_SEND_CHUNK
+        );
     }
 }

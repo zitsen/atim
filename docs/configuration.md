@@ -30,7 +30,8 @@ command = "copilot"
 args = ["--allow-all-tools"]
 
 [tmux]
-session = "atim"        # tmux session name
+session = "atim"          # tmux session name
+max_send_chunk = 32768    # bytes per send-keys -l call; longer messages are chunked
 
 [monitor]
 poll_interval = "2.0"   # seconds between JSONL polls
@@ -53,6 +54,7 @@ Any setting in `config.toml` can be overridden by the corresponding environment 
 | --- | --- | --- |
 | `ATIM_DIR` | `~/.atim` | Data directory |
 | `ATIM_TMUX_SESSION` | `atim` | Target tmux session |
+| `ATIM_TMUX_MAX_SEND_CHUNK` | `32768` | Max bytes per `send-keys` call to the agent; longer messages are chunked |
 | `ATIM_AGENT_COMMAND` | `claude` | Agent CLI command |
 | `ATIM_DEFAULT_AGENT` | `claude` | Default agent for new sessions |
 | `ATIM_IM_BACKEND` | — | IM backend (`feishu` or `telegram`) |
