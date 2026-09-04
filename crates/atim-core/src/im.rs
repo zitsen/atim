@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use crate::error::Result;
-use crate::message::{Button, CheckItem, ImEvent, MessageId, MessageTarget};
+use crate::message::{CheckItem, ImEvent, MessageId, MessageTarget};
 
 /// Unified IM interface — Telegram and Feishu implement this trait.
 ///
@@ -38,23 +38,22 @@ pub trait ImAdapter: Send + Sync {
         data: &[u8],
     ) -> Result<MessageId>;
 
-    /// Send an inline keyboard markup.
-    async fn send_keyboard(
+    /// Send a structured card (header + markdown + buttons/list/dropdown).
+    async fn send_card(
         &self,
         target: &MessageTarget,
-        text: &str,
-        buttons: &[Vec<Button>],
+        card: &crate::card::Card,
     ) -> Result<MessageId>;
 
     /// Delete a message.
     async fn delete_message(&self, target: &MessageTarget, msg_id: &MessageId) -> Result<()>;
 
-    /// Edit an existing message's keyboard markup (for interactive UIs).
-    async fn edit_keyboard(
+    /// Edit an existing message's card content in-place.
+    async fn edit_card(
         &self,
         target: &MessageTarget,
         msg_id: &MessageId,
-        buttons: &[Vec<Button>],
+        card: &crate::card::Card,
     ) -> Result<()>;
 
     /// Send a structured check report card.

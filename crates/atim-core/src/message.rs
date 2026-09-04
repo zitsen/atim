@@ -133,15 +133,6 @@ impl ImEventKind {
     }
 }
 
-// ── IM UI widgets ──
-
-/// A button in an inline keyboard.
-#[derive(Debug, Clone)]
-pub struct Button {
-    pub text: String,
-    pub callback_data: String,
-}
-
 // ── Agent / Session types ──
 
 /// Type of AI coding agent running in a pane.

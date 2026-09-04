@@ -2,10 +2,11 @@ use async_trait::async_trait;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+use atim_core::card::{Card, CardElement};
 use atim_core::error::{Error, Result};
 use atim_core::im::ImAdapter;
 use atim_core::message::{
-    Button, ChatId, CheckItem, ImEvent, ImEventKind, MessageId, MessageTarget, UserId,
+    ChatId, CheckItem, ImEvent, ImEventKind, MessageId, MessageTarget, UserId,
 };
 
 /// Convert Markdown text to Telegram-compatible HTML.
@@ -83,6 +84,75 @@ fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+/// Render a [`Card`] for Telegram: HTML body text + inline keyboard rows.
+///
+/// Telegram has no card layout, so rich elements degrade (cc-connect's
+/// approach): header → bold title line, Markdown → body, Divider → rule line,
+/// Actions → keyboard row, ListItem → description line + a full-width button,
+/// Note → italic footnote, Select → one button per option.
+fn render_tg_card(card: &Card) -> (String, Vec<Vec<serde_json::Value>>) {
+    let mut lines: Vec<String> = Vec::new();
+    let mut keyboard: Vec<Vec<serde_json::Value>> = Vec::new();
+
+    if let Some(header) = &card.header {
+        lines.push(format!("<b>{}</b>", html_escape(&header.title)));
+    }
+
+    for element in &card.elements {
+        match element {
+            CardElement::Markdown(content) => {
+                let content = atim_parser::table::convert_tables(content);
+                lines.push(markdown_to_html(&content));
+            }
+            CardElement::Divider => lines.push("──────────────".into()),
+            CardElement::Actions { buttons, .. } => {
+                let row: Vec<serde_json::Value> = buttons
+                    .iter()
+                    .map(|b| {
+                        serde_json::json!({
+                            "text": b.text,
+                            "callback_data": b.value,
+                        })
+                    })
+                    .collect();
+                if !row.is_empty() {
+                    keyboard.push(row);
+                }
+            }
+            CardElement::ListItem {
+                text,
+                btn_text,
+                btn_value,
+                ..
+            } => {
+                if !text.is_empty() {
+                    let text = atim_parser::table::convert_tables(text);
+                    lines.push(format!("• {}", markdown_to_html(&text)));
+                }
+                keyboard.push(vec![serde_json::json!({
+                    "text": btn_text,
+                    "callback_data": btn_value,
+                })]);
+            }
+            CardElement::Note(text) => {
+                if !text.is_empty() {
+                    lines.push(format!("<i>{}</i>", html_escape(text)));
+                }
+            }
+            CardElement::Select { options, .. } => {
+                for (label, value) in options {
+                    keyboard.push(vec![serde_json::json!({
+                        "text": label,
+                        "callback_data": value,
+                    })]);
+                }
+            }
+        }
+    }
+
+    (lines.join("\n"), keyboard)
 }
 
 /// Telegram bot adapter using the Bot API directly via HTTP.
@@ -440,29 +510,13 @@ impl ImAdapter for TelegramAdapter {
         }
     }
 
-    async fn send_keyboard(
-        &self,
-        target: &MessageTarget,
-        text: &str,
-        buttons: &[Vec<Button>],
-    ) -> Result<MessageId> {
-        let inline_keyboard: Vec<Vec<serde_json::Value>> = buttons
-            .iter()
-            .map(|row| {
-                row.iter()
-                    .map(|btn| {
-                        serde_json::json!({
-                            "text": btn.text,
-                            "callback_data": btn.callback_data,
-                        })
-                    })
-                    .collect()
-            })
-            .collect();
+    async fn send_card(&self, target: &MessageTarget, card: &Card) -> Result<MessageId> {
+        let (html, inline_keyboard) = render_tg_card(card);
 
         let mut params = serde_json::json!({
             "chat_id": target.chat_id.0,
-            "text": text,
+            "text": html,
+            "parse_mode": "HTML",
             "reply_markup": {
                 "inline_keyboard": inline_keyboard,
             },
@@ -488,29 +542,19 @@ impl ImAdapter for TelegramAdapter {
         Ok(())
     }
 
-    async fn edit_keyboard(
+    async fn edit_card(
         &self,
         target: &MessageTarget,
         msg_id: &MessageId,
-        buttons: &[Vec<Button>],
+        card: &Card,
     ) -> Result<()> {
-        let inline_keyboard: Vec<Vec<serde_json::Value>> = buttons
-            .iter()
-            .map(|row| {
-                row.iter()
-                    .map(|btn| {
-                        serde_json::json!({
-                            "text": btn.text,
-                            "callback_data": btn.callback_data,
-                        })
-                    })
-                    .collect()
-            })
-            .collect();
+        let (html, inline_keyboard) = render_tg_card(card);
 
         let mut params = serde_json::json!({
             "chat_id": target.chat_id.0,
             "message_id": msg_id.0,
+            "text": html,
+            "parse_mode": "HTML",
             "reply_markup": {
                 "inline_keyboard": inline_keyboard,
             },
@@ -518,7 +562,7 @@ impl ImAdapter for TelegramAdapter {
         if let Some(thread) = target.thread_id {
             params["message_thread_id"] = serde_json::json!(thread.0);
         }
-        self.api_post("editMessageReplyMarkup", &params).await?;
+        self.api_post("editMessageText", &params).await?;
         Ok(())
     }
 
@@ -691,4 +735,58 @@ fn parse_bot_added(mcm: &serde_json::Value) -> Option<ImEvent> {
         },
         kind: ImEventKind::BotAdded { chat_name },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atim_core::card::{ButtonVariant, Card, CardButton};
+
+    #[test]
+    fn test_render_tg_card_degrade() {
+        let card = Card::builder()
+            .header("Choose Agent", "blue")
+            .markdown("Pick an agent")
+            .divider()
+            .list_item(
+                "🚀 claude",
+                "✅ 选择",
+                ButtonVariant::Primary,
+                "cb:t:agent:claude",
+            )
+            .actions_equal(vec![
+                CardButton::primary("✅ Submit", "ui:enter"),
+                CardButton::danger("✖ Cancel", "ui:esc"),
+            ])
+            .note("Click to proceed")
+            .build();
+
+        let (html, keyboard) = render_tg_card(&card);
+
+        // Header renders as a bold HTML line.
+        assert!(html.contains("<b>Choose Agent</b>"));
+        // Markdown body + divider + list-item description + italic note.
+        assert!(html.contains("Pick an agent"));
+        assert!(html.contains("• 🚀 claude"));
+        assert!(html.contains("<i>Click to proceed</i>"));
+
+        // Buttons → inline keyboard rows: list-item button row, then the pair row.
+        assert_eq!(keyboard.len(), 2);
+        assert_eq!(keyboard[0][0]["text"], "✅ 选择");
+        assert_eq!(keyboard[0][0]["callback_data"], "cb:t:agent:claude");
+        assert_eq!(keyboard[1].len(), 2);
+        assert_eq!(keyboard[1][0]["text"], "✅ Submit");
+        assert_eq!(keyboard[1][1]["callback_data"], "ui:esc");
+    }
+
+    #[test]
+    fn test_render_tg_card_empty_body_still_has_text() {
+        let card = Card::builder()
+            .actions(vec![CardButton::default("OK", "ui:ok")])
+            .build();
+        let (html, keyboard) = render_tg_card(&card);
+        assert!(html.trim().is_empty());
+        assert_eq!(keyboard.len(), 1);
+        assert_eq!(keyboard[0][0]["text"], "OK");
+    }
 }

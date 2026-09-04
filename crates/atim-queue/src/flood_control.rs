@@ -10,9 +10,10 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 use async_trait::async_trait;
+use atim_core::card::Card;
 use atim_core::error::Result;
 use atim_core::im::ImAdapter;
-use atim_core::message::{Button, CheckItem, ImEvent, MessageId, MessageTarget};
+use atim_core::message::{CheckItem, ImEvent, MessageId, MessageTarget};
 use tokio::sync::mpsc;
 
 /// Maximum messages per chat within the time window.
@@ -190,22 +191,17 @@ impl ImAdapter for FloodControlledAdapter {
         result
     }
 
-    async fn send_keyboard(
-        &self,
-        target: &MessageTarget,
-        text: &str,
-        buttons: &[Vec<Button>],
-    ) -> Result<MessageId> {
+    async fn send_card(&self, target: &MessageTarget, card: &Card) -> Result<MessageId> {
         let chat_id = Self::get_chat_id(target).await;
-        // Keyboard cards are essential for setup flows (browser, session
-        // picker, agent picker). Dropping them to plain text breaks the UX.
+        // Card UI is essential for setup flows (browser, session picker,
+        // agent picker). Dropping them to plain text breaks the UX.
         // Rate-limit but don't drop — proceed anyway.
         if self.rate_limit(chat_id, false).await {
             tracing::warn!(
-                "Flood control rate-limited send_keyboard to chat {chat_id} — proceeding anyway"
+                "Flood control rate-limited send_card to chat {chat_id} — proceeding anyway"
             );
         }
-        let result = self.inner.send_keyboard(target, text, buttons).await;
+        let result = self.inner.send_card(target, card).await;
         if result.is_ok() {
             self.record_send(chat_id).await;
         }
@@ -217,17 +213,17 @@ impl ImAdapter for FloodControlledAdapter {
         self.inner.delete_message(target, msg_id).await
     }
 
-    async fn edit_keyboard(
+    async fn edit_card(
         &self,
         target: &MessageTarget,
         msg_id: &MessageId,
-        buttons: &[Vec<Button>],
+        card: &Card,
     ) -> Result<()> {
         let chat_id = Self::get_chat_id(target).await;
         if self.rate_limit(chat_id, true).await {
             return Ok(());
         }
-        let result = self.inner.edit_keyboard(target, msg_id, buttons).await;
+        let result = self.inner.edit_card(target, msg_id, card).await;
         if result.is_ok() {
             self.record_send(chat_id).await;
         }
@@ -315,22 +311,17 @@ mod tests {
         ) -> Result<MessageId> {
             Ok(MessageId("mock:1".into()))
         }
-        async fn send_keyboard(
-            &self,
-            _target: &MessageTarget,
-            _text: &str,
-            _buttons: &[Vec<Button>],
-        ) -> Result<MessageId> {
+        async fn send_card(&self, _target: &MessageTarget, _card: &Card) -> Result<MessageId> {
             Ok(MessageId("mock:1".into()))
         }
         async fn delete_message(&self, _target: &MessageTarget, _msg_id: &MessageId) -> Result<()> {
             Ok(())
         }
-        async fn edit_keyboard(
+        async fn edit_card(
             &self,
             _target: &MessageTarget,
             _msg_id: &MessageId,
-            _buttons: &[Vec<Button>],
+            _card: &Card,
         ) -> Result<()> {
             Ok(())
         }

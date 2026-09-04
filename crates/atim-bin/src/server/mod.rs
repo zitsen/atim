@@ -4,12 +4,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use atim_core::agent::types::AgentHandle;
+use atim_core::card::{ButtonVariant, Card, CardButton};
 use atim_core::config::Config;
 use atim_core::error::Result;
 use atim_core::im::ImAdapter;
 use atim_core::message::{
-    Button, ChatId, CheckItem, CheckStatus, ImEvent, ImEventKind, MessageId, MessageTarget,
-    ThreadId, WindowId,
+    ChatId, CheckItem, CheckStatus, ImEvent, ImEventKind, MessageId, MessageTarget, ThreadId,
+    WindowId,
 };
 use atim_core::message::{InteractiveUi, UiKind};
 use atim_core::session::{ChatBinding, RuntimeState, SessionInfo, WindowBinding};
@@ -37,12 +38,6 @@ pub struct PendingAskQuestions {
     answers: Vec<(String, String)>,
     /// The target to send cards to.
     target: MessageTarget,
-}
-
-/// A question card ready to send.
-struct QuestionCard {
-    text: String,
-    buttons: Vec<Vec<Button>>,
 }
 /// Key type for tool_use message tracking: (chat_id, thread_id, tool_use_id).
 type ToolUseMsgKey = (i64, i64, String);
@@ -2130,31 +2125,16 @@ impl Server {
                     let mut ctx_lock = self.callback_contexts.lock().await;
                     let recover_token = Self::make_callback_token(&mut ctx_lock, user_id, tid);
                     let cancel_token = Self::make_callback_token(&mut ctx_lock, user_id, tid);
-                    let buttons = vec![
-                        vec![Button {
-                            text: "🔄 Recover Session".into(),
-                            callback_data: format!("cb:{recover_token}:recover"),
-                        }],
-                        vec![
-                            Button {
-                                text: "🆕 New Session".into(),
-                                callback_data: format!("cb:{recover_token}:new"),
-                            },
-                            Button {
-                                text: "❌ Cancel".into(),
-                                callback_data: format!("cb:{cancel_token}:lifecycle_cancel"),
-                            },
-                        ],
-                    ];
                     drop(ctx_lock);
-                    let _ = self
-                        .im_adapter
-                        .send_keyboard(
-                            &target,
-                            "Session no longer available. What would you like to do?",
-                            &buttons,
-                        )
-                        .await;
+                    let card = lifecycle_prompt_card(
+                        "Session no longer available. What would you like to do?".into(),
+                        "🔄 Recover Session",
+                        format!("cb:{recover_token}:recover"),
+                        "🆕 New Session",
+                        format!("cb:{recover_token}:new"),
+                        format!("cb:{cancel_token}:lifecycle_cancel"),
+                    );
+                    let _ = self.im_adapter.send_card(&target, &card).await;
                     return Ok(());
                 }
                 Ok(info) if info.name != binding.display_name => {
@@ -2175,31 +2155,16 @@ impl Server {
                     let mut ctx_lock = self.callback_contexts.lock().await;
                     let recover_token = Self::make_callback_token(&mut ctx_lock, user_id, tid);
                     let cancel_token = Self::make_callback_token(&mut ctx_lock, user_id, tid);
-                    let buttons = vec![
-                        vec![Button {
-                            text: "🔄 Recover Session".into(),
-                            callback_data: format!("cb:{recover_token}:recover"),
-                        }],
-                        vec![
-                            Button {
-                                text: "🆕 New Session".into(),
-                                callback_data: format!("cb:{recover_token}:new"),
-                            },
-                            Button {
-                                text: "❌ Cancel".into(),
-                                callback_data: format!("cb:{cancel_token}:lifecycle_cancel"),
-                            },
-                        ],
-                    ];
                     drop(ctx_lock);
-                    let _ = self
-                        .im_adapter
-                        .send_keyboard(
-                            &target,
-                            "Session no longer available. What would you like to do?",
-                            &buttons,
-                        )
-                        .await;
+                    let card = lifecycle_prompt_card(
+                        "Session no longer available. What would you like to do?".into(),
+                        "🔄 Recover Session",
+                        format!("cb:{recover_token}:recover"),
+                        "🆕 New Session",
+                        format!("cb:{recover_token}:new"),
+                        format!("cb:{cancel_token}:lifecycle_cancel"),
+                    );
+                    let _ = self.im_adapter.send_card(&target, &card).await;
                     return Ok(());
                 }
                 Ok(info) if is_shell_process(&info.current_command) => {
@@ -2319,34 +2284,19 @@ impl Server {
                             Self::make_callback_token(&mut ctx_lock, user_id, thread_id);
                         let cancel_token =
                             Self::make_callback_token(&mut ctx_lock, user_id, thread_id);
-                        let buttons = vec![
-                            vec![Button {
-                                text: "📝 Rename".into(),
-                                callback_data: format!("cb:{rename_token}:rename"),
-                            }],
-                            vec![
-                                Button {
-                                    text: "🆕 New Session".into(),
-                                    callback_data: format!("cb:{rename_token}:new"),
-                                },
-                                Button {
-                                    text: "❌ Cancel".into(),
-                                    callback_data: format!("cb:{cancel_token}:lifecycle_cancel"),
-                                },
-                            ],
-                        ];
                         drop(ctx_lock);
-                        let _ = self
-                                .im_adapter
-                                .send_keyboard(
-                                    &target,
-                                    &format!(
-                                        "Chat name has changed from '{}' to '{}'. What would you like to do?",
-                                        binding.display_name, chat_name,
-                                    ),
-                                    &buttons,
-                                )
-                                .await;
+                        let card = lifecycle_prompt_card(
+                            format!(
+                                "Chat name has changed from '{}' to '{}'. What would you like to do?",
+                                binding.display_name, chat_name,
+                            ),
+                            "📝 Rename",
+                            format!("cb:{rename_token}:rename"),
+                            "🆕 New Session",
+                            format!("cb:{rename_token}:new"),
+                            format!("cb:{cancel_token}:lifecycle_cancel"),
+                        );
+                        let _ = self.im_adapter.send_card(&target, &card).await;
                         return Ok(());
                     }
 
@@ -2389,36 +2339,19 @@ impl Server {
                                 Self::make_callback_token(&mut ctx_lock, user_id, thread_id);
                             let cancel_token =
                                 Self::make_callback_token(&mut ctx_lock, user_id, thread_id);
-                            let buttons = vec![
-                                vec![Button {
-                                    text: "🔄 Update Binding".into(),
-                                    callback_data: format!("cb:{rebind_token}:rebind"),
-                                }],
-                                vec![
-                                    Button {
-                                        text: "🆕 New Session".into(),
-                                        callback_data: format!("cb:{rebind_token}:new"),
-                                    },
-                                    Button {
-                                        text: "❌ Cancel".into(),
-                                        callback_data: format!(
-                                            "cb:{cancel_token}:lifecycle_cancel"
-                                        ),
-                                    },
-                                ],
-                            ];
                             drop(ctx_lock);
-                            let _ = self
-                                .im_adapter
-                                .send_keyboard(
-                                    &target,
-                                    &format!(
-                                        "Agent type has changed from '{}' to '{}'. What would you like to do?",
-                                        stored_type, running_agent,
-                                    ),
-                                    &buttons,
-                                )
-                                .await;
+                            let card = lifecycle_prompt_card(
+                                format!(
+                                    "Agent type has changed from '{}' to '{}'. What would you like to do?",
+                                    stored_type, running_agent,
+                                ),
+                                "🔄 Update Binding",
+                                format!("cb:{rebind_token}:rebind"),
+                                "🆕 New Session",
+                                format!("cb:{rebind_token}:new"),
+                                format!("cb:{cancel_token}:lifecycle_cancel"),
+                            );
+                            let _ = self.im_adapter.send_card(&target, &card).await;
                             return Ok(());
                         }
                     }
@@ -2563,7 +2496,7 @@ impl Server {
         Ok(())
     }
 
-    /// Show the agent picker inline keyboard with "Choose Agent" title.
+    /// Show the agent picker card: one list row per agent, then Cancel.
     async fn send_agent_picker(
         &self,
         target: &MessageTarget,
@@ -2571,28 +2504,29 @@ impl Server {
         thread_id: i64,
     ) -> Result<()> {
         let mut ctx_lock = self.callback_contexts.lock().await;
-        let mut buttons: Vec<Vec<Button>> = Vec::new();
+        let mut card = Card::builder()
+            .header("🔀 Choose Agent", "blue")
+            .markdown("请选择要使用的 agent：");
 
         for agent in self.config.agent_registry.iter() {
             let token = Self::make_callback_token(&mut ctx_lock, user_id, thread_id);
-            buttons.push(vec![Button {
-                text: format!("🚀 {}", agent.name()),
-                callback_data: format!("cb:{token}:agent:{}", agent.name()),
-            }]);
+            card = card.list_item(
+                format!("🚀 {}", agent.name()),
+                "✅ 选择",
+                ButtonVariant::Primary,
+                format!("cb:{token}:agent:{}", agent.name()),
+            );
         }
 
         let cancel_token = Self::make_callback_token(&mut ctx_lock, user_id, thread_id);
-        buttons.push(vec![Button {
-            text: "❌ Cancel".into(),
-            callback_data: format!("cb:{cancel_token}:cancel"),
-        }]);
+        card = card.actions(vec![CardButton::danger(
+            "❌ Cancel",
+            format!("cb:{cancel_token}:cancel"),
+        )]);
 
         drop(ctx_lock);
 
-        let _ = self
-            .im_adapter
-            .send_keyboard(target, "Choose Agent", &buttons)
-            .await;
+        let _ = self.im_adapter.send_card(target, &card.build()).await;
         Ok(())
     }
 
@@ -2693,10 +2627,7 @@ impl Server {
             // Single question: send directly
             let q = &questions[0];
             let card = Self::build_question_card(q, 0, 1);
-            return self
-                .im_adapter
-                .send_keyboard(target, &card.text, &card.buttons)
-                .await;
+            return self.im_adapter.send_card(target, &card).await;
         }
 
         // Multi-question: send first, store the rest
@@ -2704,10 +2635,7 @@ impl Server {
         let key = (user_id, thread_id);
 
         let first_card = Self::build_question_card(&questions[0], 0, questions.len());
-        let mid = self
-            .im_adapter
-            .send_keyboard(target, &first_card.text, &first_card.buttons)
-            .await?;
+        let mid = self.im_adapter.send_card(target, &first_card).await?;
 
         self.pending_ask_questions.lock().await.insert(
             key,
@@ -2721,7 +2649,7 @@ impl Server {
         Ok(mid)
     }
 
-    fn build_question_card(q: &serde_json::Value, qi: usize, total: usize) -> QuestionCard {
+    fn build_question_card(q: &serde_json::Value, qi: usize, total: usize) -> Card {
         let question = q["question"].as_str().unwrap_or("Choose:");
         let header = q["header"].as_str().unwrap_or("");
 
@@ -2733,7 +2661,7 @@ impl Server {
             format!("**{}**\n", question)
         };
 
-        let mut buttons: Vec<Vec<Button>> = Vec::new();
+        let mut option_btns: Vec<CardButton> = Vec::new();
         if let Some(options) = q["options"].as_array() {
             for (i, opt) in options.iter().enumerate() {
                 let label = opt["label"].as_str().unwrap_or("");
@@ -2758,22 +2686,22 @@ impl Server {
                 } else {
                     btn_text
                 };
-                buttons.push(vec![Button {
-                    text: btn_label,
-                    callback_data: format!("ui:answer-{qi}-{i}"),
-                }]);
+                option_btns.push(CardButton::default(
+                    btn_label,
+                    format!("ui:answer-{qi}-{i}"),
+                ));
             }
         }
 
-        buttons.push(vec![Button {
-            text: "✖ Cancel".into(),
-            callback_data: "ui:esc".into(),
-        }]);
-
-        QuestionCard {
-            text: card_text,
-            buttons,
+        // Options in equal-width pair rows (bisect); single leftover row for odd count.
+        let mut card = Card::builder()
+            .header("❓ Question", "blue")
+            .markdown(card_text);
+        for pair in option_btns.chunks(2) {
+            card = card.actions_equal(pair.to_vec());
         }
+        card.actions_equal(vec![CardButton::danger("✖ Cancel", "ui:esc")])
+            .build()
     }
 
     /// Build and send the current browser keyboard to the user.
@@ -2794,67 +2722,69 @@ impl Server {
 
         let mut ctx_lock = self.callback_contexts.lock().await;
 
-        let (text, buttons) = match &state.mode {
+        let card = match &state.mode {
             BrowserMode::Browsing => {
                 let listing = browser::get_dir_listing(&state);
-                let mut buttons: Vec<Vec<Button>> = Vec::new();
+                let mut card = Card::builder()
+                    .header("📁 选择目录", "blue")
+                    .markdown(format!(
+                        "📁 Select a project directory:\n{}",
+                        listing.current_path.display()
+                    ));
 
-                // Entry rows
+                // Entry rows — description + open button
                 for (i, entry) in listing.entries.iter().enumerate() {
-                    let display = format!("📁 {}", entry.name);
                     let token = Self::make_callback_token(&mut ctx_lock, user_id, thread_id);
-                    buttons.push(vec![Button {
-                        text: display,
-                        callback_data: format!("cb:{token}:browse:dir:{i}"),
-                    }]);
+                    card = card.list_item(
+                        format!("📁 {}", entry.name),
+                        "▶",
+                        ButtonVariant::Default,
+                        format!("cb:{token}:browse:dir:{i}"),
+                    );
                 }
 
                 // Navigation row
-                let mut nav_row = Vec::new();
-                let cancel_token = Self::make_callback_token(&mut ctx_lock, user_id, thread_id);
-                nav_row.push(Button {
-                    text: "❌ Cancel".into(),
-                    callback_data: format!("cb:{cancel_token}:browse:cancel"),
-                });
-
-                if listing.total_pages > 1 {
-                    let page_token = Self::make_callback_token(&mut ctx_lock, user_id, thread_id);
-                    nav_row.push(Button {
-                        text: format!("◀ {}/{} ▶", listing.page + 1, listing.total_pages),
-                        callback_data: format!("cb:{page_token}:browse:page"),
-                    });
-                }
+                let mut nav: Vec<CardButton> = Vec::new();
                 if listing.has_parent {
                     let up_token = Self::make_callback_token(&mut ctx_lock, user_id, thread_id);
-                    nav_row.push(Button {
-                        text: "⬆ Up".into(),
-                        callback_data: format!("cb:{up_token}:browse:up"),
-                    });
+                    nav.push(CardButton::default(
+                        "⬆ Up",
+                        format!("cb:{up_token}:browse:up"),
+                    ));
                 }
                 let sel_token = Self::make_callback_token(&mut ctx_lock, user_id, thread_id);
-                nav_row.push(Button {
-                    text: "✅ Select".into(),
-                    callback_data: format!("cb:{sel_token}:browse:confirm"),
-                });
-                buttons.push(nav_row);
+                nav.push(CardButton::primary(
+                    "✅ Select",
+                    format!("cb:{sel_token}:browse:confirm"),
+                ));
+                if listing.total_pages > 1 {
+                    let page_token = Self::make_callback_token(&mut ctx_lock, user_id, thread_id);
+                    nav.push(CardButton::default(
+                        format!("◀ {}/{} ▶", listing.page + 1, listing.total_pages),
+                        format!("cb:{page_token}:browse:page"),
+                    ));
+                }
+                let cancel_token = Self::make_callback_token(&mut ctx_lock, user_id, thread_id);
+                nav.push(CardButton::danger(
+                    "❌ Cancel",
+                    format!("cb:{cancel_token}:browse:cancel"),
+                ));
+                card = card.actions(nav);
 
                 // "Switch Agent" button to go back to agent picker
                 let agent_token = Self::make_callback_token(&mut ctx_lock, user_id, thread_id);
-                buttons.push(vec![Button {
-                    text: "🤖 Switch Agent".into(),
-                    callback_data: format!("cb:{agent_token}:browse:switch_agent"),
-                }]);
-
-                let text = format!(
-                    "📁 Select a project directory:\n{}",
-                    listing.current_path.display()
-                );
-                (text, buttons)
+                card = card.actions(vec![CardButton::default(
+                    "🤖 Switch Agent",
+                    format!("cb:{agent_token}:browse:switch_agent"),
+                )]);
+                card.build()
             }
             BrowserMode::SessionPick { sessions: _ } => {
                 let page = browser::get_session_picker_page(&state)
                     .expect("state.mode is SessionPick (checked by match arm)");
-                let mut buttons: Vec<Vec<Button>> = Vec::new();
+                let mut card = Card::builder()
+                    .header("🔄 会话选择", "blue")
+                    .markdown(format!("Session Picker\n{}", state.current_path.display()));
 
                 for (i, session) in page.sessions.iter().enumerate() {
                     let relative = relative_time(&session.timestamp);
@@ -2872,47 +2802,46 @@ impl Server {
                         session.summary.clone()
                     };
                     let token = Self::make_callback_token(&mut ctx_lock, user_id, thread_id);
-                    buttons.push(vec![Button {
-                        text: format!("🔄 {} | {}", relative, summary),
-                        callback_data: format!("cb:{token}:browse:sel:{i}"),
-                    }]);
+                    card = card.list_item(
+                        format!("🔄 {} | {}", relative, summary),
+                        "▶",
+                        ButtonVariant::Default,
+                        format!("cb:{token}:browse:sel:{i}"),
+                    );
                 }
 
                 // Navigation row
-                let mut nav_row = Vec::new();
-                let cancel_token = Self::make_callback_token(&mut ctx_lock, user_id, thread_id);
-                nav_row.push(Button {
-                    text: "❌ Cancel".into(),
-                    callback_data: format!("cb:{cancel_token}:browse:cancel"),
-                });
-
+                let mut nav: Vec<CardButton> = Vec::new();
                 let back_token = Self::make_callback_token(&mut ctx_lock, user_id, thread_id);
-                nav_row.push(Button {
-                    text: "📁 Browse".into(),
-                    callback_data: format!("cb:{back_token}:browse:back"),
-                });
-
+                nav.push(CardButton::default(
+                    "📁 Browse",
+                    format!("cb:{back_token}:browse:back"),
+                ));
+                let new_token = Self::make_callback_token(&mut ctx_lock, user_id, thread_id);
+                nav.push(CardButton::default(
+                    "🆕 New",
+                    format!("cb:{new_token}:browse:new"),
+                ));
                 if page.total_pages > 1 {
                     let page_token = Self::make_callback_token(&mut ctx_lock, user_id, thread_id);
-                    nav_row.push(Button {
-                        text: format!("◀ {}/{} ▶", page.page + 1, page.total_pages),
-                        callback_data: format!("cb:{page_token}:browse:page"),
-                    });
+                    nav.push(CardButton::default(
+                        format!("◀ {}/{} ▶", page.page + 1, page.total_pages),
+                        format!("cb:{page_token}:browse:page"),
+                    ));
                 }
-                let new_token = Self::make_callback_token(&mut ctx_lock, user_id, thread_id);
-                nav_row.push(Button {
-                    text: "🆕 New".into(),
-                    callback_data: format!("cb:{new_token}:browse:new"),
-                });
-                buttons.push(nav_row);
-
-                let text = format!("Session Picker\n{}", state.current_path.display());
-                (text, buttons)
+                let cancel_token = Self::make_callback_token(&mut ctx_lock, user_id, thread_id);
+                nav.push(CardButton::danger(
+                    "❌ Cancel",
+                    format!("cb:{cancel_token}:browse:cancel"),
+                ));
+                card.actions(nav).build()
             }
             BrowserMode::WindowPick { windows: _ } => {
                 let page = browser::get_window_picker_page(&state)
                     .expect("state.mode is WindowPick (checked by match arm)");
-                let mut buttons: Vec<Vec<Button>> = Vec::new();
+                let mut card = Card::builder()
+                    .header("💬 窗口选择", "blue")
+                    .markdown("💬 检测到一个未绑定的 tmux 窗口。选择要挂载的窗口，或创建新会话：");
 
                 for (i, win) in page.windows.iter().enumerate() {
                     let agent = if win.agent_type.is_empty() {
@@ -2922,37 +2851,34 @@ impl Server {
                     };
                     let label = format!("💬 {} [{}]", win.name, agent);
                     let token = Self::make_callback_token(&mut ctx_lock, user_id, thread_id);
-                    buttons.push(vec![Button {
-                        text: label,
-                        callback_data: format!("cb:{token}:browse:win:{i}"),
-                    }]);
+                    card = card.list_item(
+                        label,
+                        "▶",
+                        ButtonVariant::Default,
+                        format!("cb:{token}:browse:win:{i}"),
+                    );
                 }
 
                 // Navigation row
-                let mut nav_row = Vec::new();
-                let cancel_token = Self::make_callback_token(&mut ctx_lock, user_id, thread_id);
-                nav_row.push(Button {
-                    text: "❌ Cancel".into(),
-                    callback_data: format!("cb:{cancel_token}:browse:cancel"),
-                });
-
+                let mut nav: Vec<CardButton> = Vec::new();
                 let new_token = Self::make_callback_token(&mut ctx_lock, user_id, thread_id);
-                nav_row.push(Button {
-                    text: "🆕 New Session".into(),
-                    callback_data: format!("cb:{new_token}:browse:new_win"),
-                });
-
+                nav.push(CardButton::default(
+                    "🆕 New Session",
+                    format!("cb:{new_token}:browse:new_win"),
+                ));
                 if page.total_pages > 1 {
                     let page_token = Self::make_callback_token(&mut ctx_lock, user_id, thread_id);
-                    nav_row.push(Button {
-                        text: format!("◀ {}/{} ▶", page.page + 1, page.total_pages),
-                        callback_data: format!("cb:{page_token}:browse:page"),
-                    });
+                    nav.push(CardButton::default(
+                        format!("◀ {}/{} ▶", page.page + 1, page.total_pages),
+                        format!("cb:{page_token}:browse:page"),
+                    ));
                 }
-                buttons.push(nav_row);
-
-                let text = "💬 An unbound tmux window was found. Select one to attach, or create a new session:".to_string();
-                (text, buttons)
+                let cancel_token = Self::make_callback_token(&mut ctx_lock, user_id, thread_id);
+                nav.push(CardButton::danger(
+                    "❌ Cancel",
+                    format!("cb:{cancel_token}:browse:cancel"),
+                ));
+                card.actions(nav).build()
             }
         };
 
@@ -2960,12 +2886,9 @@ impl Server {
 
         if let Some(edit_id) = msg_id {
             // Edit existing card in-place
-            let _ = self
-                .im_adapter
-                .edit_keyboard(target, &edit_id, &buttons)
-                .await;
+            let _ = self.im_adapter.edit_card(target, &edit_id, &card).await;
         } else {
-            let _ = self.im_adapter.send_keyboard(target, &text, &buttons).await;
+            let _ = self.im_adapter.send_card(target, &card).await;
         }
         Ok(())
     }
@@ -4055,21 +3978,16 @@ impl Server {
                         for (q, a) in &pending.answers {
                             summary.push_str(&format!("- {}: **{}**\n", q, a));
                         }
-                        let submit_buttons = vec![
-                            vec![Button {
-                                text: "✅ Submit".into(),
-                                callback_data: "ui:enter".into(),
-                            }],
-                            vec![Button {
-                                text: "✖ Cancel".into(),
-                                callback_data: "ui:esc".into(),
-                            }],
-                        ];
+                        let card = Card::builder()
+                            .header("📝 Answers", "green")
+                            .markdown(summary)
+                            .actions_equal(vec![
+                                CardButton::primary("✅ Submit", "ui:enter"),
+                                CardButton::danger("✖ Cancel", "ui:esc"),
+                            ])
+                            .build();
                         let _ = self.im_adapter.delete_message(&target, &msg_id).await;
-                        let _ = self
-                            .im_adapter
-                            .send_keyboard(&target, &summary, &submit_buttons)
-                            .await;
+                        let _ = self.im_adapter.send_card(&target, &card).await;
                     } else {
                         // More questions: delete old card, send new one
                         let next_q = pending.questions.remove(0);
@@ -4077,10 +3995,7 @@ impl Server {
                         let qi_current = pending.answers.len();
                         let card = Self::build_question_card(&next_q, qi_current, total);
                         let _ = self.im_adapter.delete_message(&target, &msg_id).await;
-                        let _new_mid = self
-                            .im_adapter
-                            .send_keyboard(&target, &card.text, &card.buttons)
-                            .await?;
+                        let _new_mid = self.im_adapter.send_card(&target, &card).await?;
                         // Re-insert with remaining questions
                         pending_map.insert(key, pending);
                     }
@@ -4830,16 +4745,8 @@ impl Server {
                         thread_id: Some(ThreadId(cb.thread_id)),
                         chat_name: None,
                     };
-                    let buttons = ui_to_buttons(&interactive);
-                    let header = format!("🧭 {}:", ui_display_name(interactive.kind));
-                    let text = format!(
-                        "{header}\n{content}",
-                        content = truncate_ui_content(&interactive.content, 200)
-                    );
-                    let _ = self
-                        .im_adapter
-                        .send_keyboard(&target, &text, &buttons)
-                        .await;
+                    let card = ui_to_card(&interactive);
+                    let _ = self.im_adapter.send_card(&target, &card).await;
                 }
             }
         }
@@ -5366,164 +5273,125 @@ fn extract_options(content: &str) -> Vec<String> {
     options
 }
 
-/// Build inline keyboard buttons for an interactive UI.
-fn ui_to_buttons(ui: &InteractiveUi) -> Vec<Vec<Button>> {
+/// Build a session-lifecycle prompt card: a primary action + "New Session"
+/// equal-width pair, then a full-width danger Cancel button.
+fn lifecycle_prompt_card(
+    text: String,
+    main_label: &str,
+    main_cb: String,
+    new_label: &str,
+    new_cb: String,
+    cancel_cb: String,
+) -> Card {
+    Card::builder()
+        .header("⚠️ Session", "orange")
+        .markdown(text)
+        .actions_equal(vec![
+            CardButton::primary(main_label, main_cb),
+            CardButton::primary(new_label, new_cb),
+        ])
+        .actions_equal(vec![CardButton::danger("❌ Cancel", cancel_cb)])
+        .build()
+}
+
+/// Truncate a long option label to ~45 chars, ending on a UTF-8 char boundary.
+fn truncate_btn_label(opt: &str) -> String {
+    if opt.len() <= 45 {
+        return opt.to_string();
+    }
+    format!(
+        "{}…",
+        &opt[..opt
+            .char_indices()
+            .nth(42)
+            .map(|(j, _)| j)
+            .unwrap_or(opt.len())]
+    )
+}
+
+/// Build a card for an interactive UI detected in the agent's terminal.
+fn ui_to_card(ui: &InteractiveUi) -> Card {
+    let mut card = Card::builder()
+        .header(format!("🧭 {}", ui_display_name(ui.kind)), "blue")
+        .markdown(truncate_ui_content(&ui.content, 200));
+
     match ui.kind {
         UiKind::AskUserQuestion => {
             let options = extract_options(&ui.content);
             if options.is_empty() {
-                // Fallback: generic Up/Down/Select buttons
-                vec![
-                    vec![
-                        Button {
-                            text: "⬆ Up".into(),
-                            callback_data: "ui:up".into(),
-                        },
-                        Button {
-                            text: "⬇ Down".into(),
-                            callback_data: "ui:down".into(),
-                        },
-                    ],
-                    vec![
-                        Button {
-                            text: "✔ Select".into(),
-                            callback_data: "ui:enter".into(),
-                        },
-                        Button {
-                            text: "✖ Cancel".into(),
-                            callback_data: "ui:esc".into(),
-                        },
-                    ],
-                ]
+                // Fallback: generic Up/Down + Select/Cancel equals pairs
+                card = card
+                    .actions_equal(vec![
+                        CardButton::default("⬆ Up", "ui:up"),
+                        CardButton::default("⬇ Down", "ui:down"),
+                    ])
+                    .actions_equal(vec![
+                        CardButton::primary("✔ Select", "ui:enter"),
+                        CardButton::danger("✖ Cancel", "ui:esc"),
+                    ]);
             } else {
-                // Each option as a clickable button — send the option text via
-                // ui:select:<index>, which the handler translates to Down×N + Enter.
-                let mut buttons: Vec<Vec<Button>> = options
+                // Each option as an equal-width button pair — ui:select:<index>
+                // is translated by the handler to Down×N + Enter.
+                let option_btns: Vec<CardButton> = options
                     .into_iter()
                     .enumerate()
                     .map(|(i, opt)| {
-                        let label = if opt.len() > 45 {
-                            format!(
-                                "{}…",
-                                &opt[..opt
-                                    .char_indices()
-                                    .nth(42)
-                                    .map(|(j, _)| j)
-                                    .unwrap_or(opt.len())]
-                            )
-                        } else {
-                            opt
-                        };
-                        vec![Button {
-                            text: label,
-                            callback_data: format!("ui:select:{i}"),
-                        }]
+                        CardButton::default(truncate_btn_label(&opt), format!("ui:select:{i}"))
                     })
                     .collect();
-                buttons.push(vec![Button {
-                    text: "✖ Cancel".into(),
-                    callback_data: "ui:esc".into(),
-                }]);
-                buttons
+                for pair in option_btns.chunks(2) {
+                    card = card.actions_equal(pair.to_vec());
+                }
+                card = card.actions(vec![CardButton::danger("✖ Cancel", "ui:esc")]);
             }
         }
         UiKind::ExitPlanMode => {
-            vec![
-                vec![
-                    Button {
-                        text: "⬆ Up".into(),
-                        callback_data: "ui:up".into(),
-                    },
-                    Button {
-                        text: "⬇ Down".into(),
-                        callback_data: "ui:down".into(),
-                    },
-                ],
-                vec![
-                    Button {
-                        text: "✔ Select".into(),
-                        callback_data: "ui:enter".into(),
-                    },
-                    Button {
-                        text: "✖ Cancel".into(),
-                        callback_data: "ui:esc".into(),
-                    },
-                ],
-            ]
+            card = card
+                .actions_equal(vec![
+                    CardButton::default("⬆ Up", "ui:up"),
+                    CardButton::default("⬇ Down", "ui:down"),
+                ])
+                .actions_equal(vec![
+                    CardButton::primary("✔ Select", "ui:enter"),
+                    CardButton::danger("✖ Cancel", "ui:esc"),
+                ]);
         }
         UiKind::PermissionPrompt | UiKind::BashApproval => {
-            vec![
-                vec![
-                    Button {
-                        text: "✔ Yes".into(),
-                        callback_data: "ui:yes".into(),
-                    },
-                    Button {
-                        text: "✖ No".into(),
-                        callback_data: "ui:no".into(),
-                    },
-                ],
-                vec![Button {
-                    text: "✖ Cancel".into(),
-                    callback_data: "ui:esc".into(),
-                }],
-            ]
+            card = card
+                .actions_equal(vec![
+                    CardButton::primary("✔ Yes", "ui:yes"),
+                    CardButton::danger("✖ No", "ui:no"),
+                ])
+                .actions(vec![CardButton::danger("✖ Cancel", "ui:esc")]);
         }
         UiKind::RestoreCheckpoint => {
-            vec![
-                vec![
-                    Button {
-                        text: "⬆ Up".into(),
-                        callback_data: "ui:up".into(),
-                    },
-                    Button {
-                        text: "⬇ Down".into(),
-                        callback_data: "ui:down".into(),
-                    },
-                ],
-                vec![
-                    Button {
-                        text: "✔ Restore".into(),
-                        callback_data: "ui:enter".into(),
-                    },
-                    Button {
-                        text: "✖ Skip".into(),
-                        callback_data: "ui:esc".into(),
-                    },
-                ],
-            ]
+            card = card
+                .actions_equal(vec![
+                    CardButton::default("⬆ Up", "ui:up"),
+                    CardButton::default("⬇ Down", "ui:down"),
+                ])
+                .actions_equal(vec![
+                    CardButton::primary("✔ Restore", "ui:enter"),
+                    CardButton::danger("✖ Skip", "ui:esc"),
+                ]);
         }
         UiKind::Settings => {
-            vec![
-                vec![
-                    Button {
-                        text: "⬆ Up".into(),
-                        callback_data: "ui:up".into(),
-                    },
-                    Button {
-                        text: "⬇ Down".into(),
-                        callback_data: "ui:down".into(),
-                    },
-                ],
-                vec![
-                    Button {
-                        text: "✔ Select".into(),
-                        callback_data: "ui:enter".into(),
-                    },
-                    Button {
-                        text: "Esc".into(),
-                        callback_data: "ui:esc".into(),
-                    },
-                ],
-            ]
+            card = card
+                .actions_equal(vec![
+                    CardButton::default("⬆ Up", "ui:up"),
+                    CardButton::default("⬇ Down", "ui:down"),
+                ])
+                .actions_equal(vec![
+                    CardButton::primary("✔ Select", "ui:enter"),
+                    CardButton::danger("Esc", "ui:esc"),
+                ]);
         }
         UiKind::Unknown => {
-            vec![vec![Button {
-                text: "Esc".into(),
-                callback_data: "ui:esc".into(),
-            }]]
+            card = card.actions(vec![CardButton::danger("Esc", "ui:esc")]);
         }
     }
+
+    card.build()
 }
 
 /// Handle a UI navigation callback by sending the corresponding key to the session.
@@ -5584,6 +5452,7 @@ async fn zoxide_query(text: &str) -> anyhow::Result<Option<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use atim_core::card::{ActionLayout, CardElement};
     use std::collections::HashMap;
 
     #[test]
@@ -5733,41 +5602,50 @@ mod tests {
     }
 
     #[test]
-    fn test_ui_to_buttons_permission() {
+    fn test_ui_to_card_permission() {
         let ui = InteractiveUi {
             kind: UiKind::PermissionPrompt,
             content: "Do you want to proceed?".to_string(),
         };
-        let buttons = ui_to_buttons(&ui);
-        assert_eq!(buttons.len(), 2);
-        assert_eq!(buttons[0][0].text, "✔ Yes");
-        assert_eq!(buttons[0][1].text, "✖ No");
-        assert_eq!(buttons[0][0].callback_data, "ui:yes");
+        let card = ui_to_card(&ui);
+        let CardElement::Actions { buttons, layout } = &card.elements[1] else {
+            panic!("expected Actions element");
+        };
+        assert_eq!(*layout, ActionLayout::EqualColumns);
+        assert_eq!(buttons[0].text, "✔ Yes");
+        assert_eq!(buttons[0].variant, ButtonVariant::Primary);
+        assert_eq!(buttons[0].value, "ui:yes");
+        assert_eq!(buttons[1].text, "✖ No");
+        assert_eq!(buttons[1].variant, ButtonVariant::Danger);
     }
 
     #[test]
-    fn test_ui_to_buttons_ask_question() {
+    fn test_ui_to_card_ask_question() {
         let ui = InteractiveUi {
             kind: UiKind::AskUserQuestion,
             content: "Choose an option:".to_string(),
         };
-        let buttons = ui_to_buttons(&ui);
-        assert_eq!(buttons.len(), 2);
-        assert_eq!(buttons[0][0].text, "⬆ Up");
-        assert_eq!(buttons[0][1].text, "⬇ Down");
-        assert_eq!(buttons[1][0].text, "✔ Select");
-        assert_eq!(buttons[1][1].text, "✖ Cancel");
+        let card = ui_to_card(&ui);
+        let CardElement::Actions { buttons, layout } = &card.elements[1] else {
+            panic!("expected Actions element");
+        };
+        assert_eq!(*layout, ActionLayout::EqualColumns);
+        assert_eq!(buttons[0].text, "⬆ Up");
+        assert_eq!(buttons[1].text, "⬇ Down");
     }
 
     #[test]
-    fn test_ui_to_buttons_unknown() {
+    fn test_ui_to_card_unknown() {
         let ui = InteractiveUi {
             kind: UiKind::Unknown,
             content: "something".to_string(),
         };
-        let buttons = ui_to_buttons(&ui);
-        assert_eq!(buttons.len(), 1);
-        assert_eq!(buttons[0][0].text, "Esc");
+        let card = ui_to_card(&ui);
+        let CardElement::Actions { buttons, layout } = &card.elements[1] else {
+            panic!("expected Actions element");
+        };
+        assert_eq!(*layout, ActionLayout::Row);
+        assert_eq!(buttons[0].text, "Esc");
     }
 
     #[test]

@@ -16,10 +16,11 @@ use async_trait::async_trait;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 
+use atim_core::card::{ActionLayout, Card, CardButton, CardElement};
 use atim_core::error::{Error, Result};
 use atim_core::im::ImAdapter;
 use atim_core::message::{
-    Button, ChatId, CheckItem, ImEvent, ImEventKind, MessageId, MessageTarget, ThreadId, UserId,
+    ChatId, CheckItem, ImEvent, ImEventKind, MessageId, MessageTarget, ThreadId, UserId,
 };
 
 use open_lark::Config;
@@ -808,25 +809,19 @@ impl ImAdapter for FeishuAdapter {
         Ok(MessageId(msg_id))
     }
 
-    async fn send_keyboard(
-        &self,
-        target: &MessageTarget,
-        text: &str,
-        buttons: &[Vec<Button>],
-    ) -> Result<MessageId> {
+    async fn send_card(&self, target: &MessageTarget, card: &Card) -> Result<MessageId> {
         let chat_id = self
             .resolve_chat(&target.chat_id)
             .await
             .ok_or_else(|| Error::Feishu("unknown chat_id".into()))?;
 
         tracing::debug!(
-            "send_keyboard to chat_id={chat_id} target_chat={:?} target_thread={:?} text={}",
+            "send_card to chat_id={chat_id} target_chat={:?} target_thread={:?}",
             target.chat_id.0,
             target.thread_id,
-            &text[..text.floor_char_boundary(text.len().min(50))]
         );
 
-        let card = build_card(text, buttons);
+        let card = render_fs_card(card);
 
         let mut body = serde_json::json!({
             "receive_id": chat_id,
@@ -861,20 +856,20 @@ impl ImAdapter for FeishuAdapter {
         Ok(())
     }
 
-    async fn edit_keyboard(
+    async fn edit_card(
         &self,
         target: &MessageTarget,
         msg_id: &MessageId,
-        buttons: &[Vec<Button>],
+        card: &Card,
     ) -> Result<()> {
         let _chat_id = self
             .resolve_chat(&target.chat_id)
             .await
             .ok_or_else(|| Error::Feishu("unknown chat_id".into()))?;
 
-        let card = build_card("(updated)", buttons);
+        let rendered = render_fs_card(card);
         let body = serde_json::json!({
-            "content": serde_json::to_string(&card)
+            "content": serde_json::to_string(&rendered)
                 .map_err(|e| Error::Feishu(format!("card serialization: {e}")))?,
         });
 
@@ -896,12 +891,10 @@ impl ImAdapter for FeishuAdapter {
 
         if json["code"].as_i64().unwrap_or(-1) != 0 {
             let msg = json["msg"].as_str().unwrap_or("unknown");
-            tracing::warn!(
-                "Feishu edit_keyboard PATCH failed ({msg}), falling back to new message"
-            );
-            let _ = self.send_keyboard(target, "(updated)", buttons).await?;
+            tracing::warn!("Feishu edit_card PATCH failed ({msg}), falling back to new message");
+            let _ = self.send_card(target, card).await?;
         } else {
-            tracing::debug!("Feishu edit_keyboard PATCH ok for msg_id={}", msg_id.0);
+            tracing::debug!("Feishu edit_card PATCH ok for msg_id={}", msg_id.0);
         }
         Ok(())
     }
@@ -1403,64 +1396,151 @@ async fn handle_bot_added_event(
     Ok(())
 }
 
-// ── Card builder ──
+// ── Card renderer ──
 
-/// Build a Feishu interactive card JSON for permission prompts / choices.
-fn build_card(text: &str, buttons: &[Vec<Button>]) -> serde_json::Value {
-    let mut elements: Vec<serde_json::Value> = vec![serde_json::json!({
-        "tag": "markdown",
-        "content": text,
-    })];
+/// Build a Feishu interactive card (v1 schema) from a [`Card`].
+///
+/// Mirrors cc-connect's `renderCardMap`: header → templated title bar,
+/// Markdown → `markdown`, Divider → `hr`, Actions → `action` container or
+/// equal-width `column_set` (bisect for exactly two buttons), ListItem →
+/// description+button row, Note → footnote, Select → `select_static`.
+fn render_fs_card(card: &Card) -> serde_json::Value {
+    let mut card_out = serde_json::json!({
+        "config": { "wide_screen_mode": true },
+    });
 
-    for row in buttons {
-        let actions: Vec<serde_json::Value> = row
-            .iter()
-            .map(|btn| {
-                let btn_type = if btn.callback_data.contains("approve")
-                    || btn.callback_data.contains("yes")
-                    || btn.callback_data.contains("confirm")
-                {
-                    "primary"
-                } else if btn.callback_data.contains("reject") || btn.callback_data.contains("no") {
-                    "danger"
+    if let Some(header) = &card.header {
+        let color = if header.color.is_empty() {
+            "blue"
+        } else {
+            &header.color
+        };
+        card_out["header"] = serde_json::json!({
+            "title": { "tag": "plain_text", "content": header.title },
+            "template": color,
+        });
+    }
+
+    let mut elements: Vec<serde_json::Value> = Vec::new();
+    for element in &card.elements {
+        match element {
+            CardElement::Markdown(content) => elements.push(serde_json::json!({
+                "tag": "markdown",
+                "content": content,
+            })),
+            CardElement::Divider => elements.push(serde_json::json!({"tag": "hr"})),
+            CardElement::Actions { buttons, layout } => {
+                if buttons.is_empty() {
+                    continue;
+                }
+                if *layout == ActionLayout::EqualColumns {
+                    let mut columns: Vec<serde_json::Value> = Vec::new();
+                    for btn in buttons {
+                        let mut action = fs_button(btn);
+                        action["width"] = serde_json::json!("fill");
+                        columns.push(serde_json::json!({
+                            "tag": "column",
+                            "width": "weighted",
+                            "weight": 1,
+                            "vertical_align": "center",
+                            "horizontal_align": "center",
+                            "elements": [action],
+                        }));
+                    }
+                    let mut column_set = serde_json::json!({
+                        "tag": "column_set",
+                        "columns": columns,
+                    });
+                    if buttons.len() == 2 {
+                        column_set["flex_mode"] = serde_json::json!("bisect");
+                    }
+                    elements.push(column_set);
                 } else {
-                    "default"
-                };
-
-                serde_json::json!({
-                    "tag": "button",
-                    "text": {
-                        "tag": "plain_text",
-                        "content": btn.text,
-                    },
-                    "value": {
-                        "action": btn.callback_data,
-                    },
-                    "type": btn_type,
-                })
-            })
-            .collect();
-
-        if !actions.is_empty() {
-            elements.push(serde_json::json!({
-                "tag": "action",
-                "actions": actions,
-            }));
+                    let actions: Vec<serde_json::Value> = buttons.iter().map(fs_button).collect();
+                    elements.push(serde_json::json!({
+                        "tag": "action",
+                        "actions": actions,
+                    }));
+                }
+            }
+            CardElement::ListItem {
+                text,
+                btn_text,
+                btn_variant,
+                btn_value,
+            } => {
+                elements.push(serde_json::json!({
+                    "tag": "column_set",
+                    "flex_mode": "none",
+                    "columns": [
+                        {
+                            "tag": "column",
+                            "width": "weighted",
+                            "weight": 5,
+                            "vertical_align": "center",
+                            "elements": [{ "tag": "markdown", "content": text }],
+                        },
+                        {
+                            "tag": "column",
+                            "width": "auto",
+                            "vertical_align": "center",
+                            "elements": [fs_button(&CardButton {
+                                text: btn_text.clone(),
+                                variant: *btn_variant,
+                                value: btn_value.clone(),
+                            })],
+                        },
+                    ],
+                }));
+            }
+            CardElement::Note(text) => elements.push(serde_json::json!({
+                "tag": "note",
+                "elements": [{ "tag": "plain_text", "content": text }],
+            })),
+            CardElement::Select {
+                placeholder,
+                options,
+                init_value,
+            } => {
+                let opts: Vec<serde_json::Value> = options
+                    .iter()
+                    .map(|(t, v)| {
+                        serde_json::json!({
+                            "text": { "tag": "plain_text", "content": t },
+                            "value": v,
+                        })
+                    })
+                    .collect();
+                let mut select = serde_json::json!({
+                    "tag": "select_static",
+                    "placeholder": { "tag": "plain_text", "content": placeholder },
+                    "options": opts,
+                });
+                if let Some(iv) = init_value {
+                    select["initial_option"] = serde_json::json!(iv);
+                }
+                elements.push(serde_json::json!({
+                    "tag": "action",
+                    "actions": [select],
+                }));
+            }
         }
     }
 
+    if elements.is_empty() {
+        elements.push(serde_json::json!({"tag": "markdown", "content": " "}));
+    }
+    card_out["elements"] = serde_json::Value::Array(elements);
+    card_out
+}
+
+/// Render a single Feishu button element.
+fn fs_button(btn: &CardButton) -> serde_json::Value {
     serde_json::json!({
-        "config": {
-            "wide_screen_mode": true,
-        },
-        "header": {
-            "title": {
-                "tag": "plain_text",
-                "content": "Atim — Agent Response",
-            },
-            "template": "blue",
-        },
-        "elements": elements,
+        "tag": "button",
+        "text": { "tag": "plain_text", "content": btn.text },
+        "type": btn.variant.feishu_type(),
+        "value": { "action": btn.value },
     })
 }
 
@@ -1533,6 +1613,7 @@ fn extract_post_text(post_content: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use atim_core::card::ButtonVariant;
 
     #[test]
     fn test_hash_id_deterministic() {
@@ -1550,28 +1631,78 @@ mod tests {
     }
 
     #[test]
-    fn test_build_card() {
-        let buttons = vec![
-            vec![Button {
-                text: "Yes".into(),
-                callback_data: "approve".into(),
-            }],
-            vec![Button {
-                text: "No".into(),
-                callback_data: "reject".into(),
-            }],
-        ];
+    fn test_render_fs_card_header_and_divider() {
+        let card = Card::builder()
+            .header("Choose Agent", "blue")
+            .markdown("Pick an agent")
+            .divider()
+            .note("Click to proceed")
+            .build();
+        let rendered = render_fs_card(&card);
+        assert_eq!(rendered["header"]["title"]["content"], "Choose Agent");
+        assert_eq!(rendered["header"]["template"], "blue");
+        let elements = rendered["elements"].as_array().unwrap();
+        assert_eq!(elements[0]["tag"], "markdown");
+        assert_eq!(elements[1]["tag"], "hr");
+        assert_eq!(elements[2]["tag"], "note");
+    }
 
-        let card = build_card("Proceed?", &buttons);
-        assert_eq!(card["header"]["title"]["content"], "Atim — Agent Response");
-        assert_eq!(card["elements"].as_array().unwrap().len(), 3);
+    #[test]
+    fn test_render_fs_card_equal_columns_bisect() {
+        let card = Card::builder()
+            .actions_equal(vec![
+                CardButton::primary("✅ Submit", "ui:enter"),
+                CardButton::danger("✖ Cancel", "ui:esc"),
+            ])
+            .build();
+        let rendered = render_fs_card(&card);
+        let elements = rendered["elements"].as_array().unwrap();
+        // two equal-width buttons → column_set with bisect flex_mode
+        assert_eq!(elements[0]["tag"], "column_set");
+        assert_eq!(elements[0]["flex_mode"], "bisect");
+        let columns = elements[0]["columns"].as_array().unwrap();
+        assert_eq!(columns.len(), 2);
+        let first_btn = &columns[0]["elements"][0];
+        assert_eq!(first_btn["type"], "primary");
+        assert_eq!(first_btn["width"], "fill");
+        assert_eq!(first_btn["value"]["action"], "ui:enter");
+        let second_btn = &columns[1]["elements"][0];
+        assert_eq!(second_btn["type"], "danger");
+    }
 
-        let actions_row0 = card["elements"][1]["actions"].as_array().unwrap();
-        assert_eq!(actions_row0[0]["text"]["content"], "Yes");
-        assert_eq!(actions_row0[0]["type"], "primary");
-        let actions_row1 = card["elements"][2]["actions"].as_array().unwrap();
-        assert_eq!(actions_row1[0]["text"]["content"], "No");
-        assert_eq!(actions_row1[0]["type"], "danger");
+    #[test]
+    fn test_render_fs_card_list_item_and_row() {
+        let card = Card::builder()
+            .list_item(
+                "🚀 claude",
+                "✅ Use",
+                ButtonVariant::Primary,
+                "cb:0:agent:claude",
+            )
+            .actions(vec![CardButton::default("More", "cb:0:more")])
+            .build();
+        let rendered = render_fs_card(&card);
+        let elements = rendered["elements"].as_array().unwrap();
+        // list item → column_set with text + trailing button
+        let item_columns = elements[0]["columns"].as_array().unwrap();
+        assert_eq!(elements[0]["tag"], "column_set");
+        assert_eq!(item_columns[0]["elements"][0]["content"], "🚀 claude");
+        assert_eq!(item_columns[1]["elements"][0]["type"], "primary");
+        assert_eq!(
+            item_columns[1]["elements"][0]["value"]["action"],
+            "cb:0:agent:claude"
+        );
+        // plain row → action container
+        assert_eq!(elements[1]["tag"], "action");
+        let row_btns = elements[1]["actions"].as_array().unwrap();
+        assert_eq!(row_btns[0]["type"], "default");
+    }
+
+    #[test]
+    fn test_render_fs_card_defaults_header_blue() {
+        let card = Card::builder().header("Untitled", "carmine").build();
+        let rendered = render_fs_card(&card);
+        assert_eq!(rendered["header"]["template"], "carmine");
     }
 
     #[test]
