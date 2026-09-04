@@ -1545,9 +1545,9 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "openlark"
-version = "0.17.0"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af30991691be4e102c8372fb95a21e4e5104be177d487d3c896e1739b1c42ca2"
+checksum = "363204ee6274b3870dd2ba14c731b13ff3cd69b51bf8327cfe537f5d28489904"
 dependencies = [
  "chrono",
  "openlark-auth",
@@ -1560,9 +1560,9 @@ dependencies = [
 
 [[package]]
 name = "openlark-auth"
-version = "0.17.0"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0724d85baf659b96824202cf55260f4167258639bd9cc294caab0060686d384f"
+checksum = "cb63e1e0367db93892af751a95829535ca811a1b32e3626aec2e84f3fae2fd7e"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1571,31 +1571,27 @@ dependencies = [
  "openlark-core",
  "rand 0.8.7",
  "regex",
- "reqwest 0.13.4",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
- "url",
  "urlencoding",
  "uuid",
 ]
 
 [[package]]
 name = "openlark-client"
-version = "0.17.0"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f26403766465996d52bc18efc8198e61ec4aa74249995e40a459c52ed21eb59e"
+checksum = "88fd85fc848004a294a0ec951f4b53fc100f34797374bbca14e71e91fb869ff5"
 dependencies = [
- "chrono",
  "futures-util",
  "lark-websocket-protobuf",
  "log",
  "openlark-auth",
  "openlark-core",
  "prost",
- "reqwest 0.13.4",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -1603,14 +1599,13 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "url",
- "uuid",
 ]
 
 [[package]]
 name = "openlark-core"
-version = "0.17.0"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec47d6da8a10f540e1713ac92fe467fdfe0aa4beab2e782fe389f4a3c403bd2b"
+checksum = "4680bcf2286294227660b63a174bf3a8529d68ada77552129e0326236079d144"
 dependencies = [
  "base64 0.22.1",
  "chrono",
