@@ -9,6 +9,33 @@ use tokio::process::Command;
 /// Alias for the shared WindowInfo type (defined in atim-core).
 pub use atim_core::terminal::WindowInfo as TmuxWindowInfo;
 
+/// Maximum bytes sent in a single `send-keys -l` invocation.
+///
+/// The text is passed to tmux as one command-line argument; Linux caps a
+/// single argument at `MAX_ARG_STRLEN` (32 pages, typically 128 KiB) and the
+/// whole argv at `ARG_MAX`. A long message (e.g. pasted docx content) would
+/// otherwise fail the exec with E2BIG. Kept well below the limit so every
+/// chunk always fits.
+const MAX_SEND_CHUNK: usize = 32 * 1024;
+
+/// Byte ranges to send `text` in [`MAX_SEND_CHUNK`]-sized chunks.
+///
+/// Every chunk ends on a UTF-8 char boundary so a multi-byte character is
+/// never split across two `send-keys` calls.
+fn chunk_ranges(text: &str) -> Vec<(usize, usize)> {
+    if text.len() <= MAX_SEND_CHUNK {
+        return vec![(0, text.len())];
+    }
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        let end = text.floor_char_boundary((start + MAX_SEND_CHUNK).min(text.len()));
+        ranges.push((start, end));
+        start = end;
+    }
+    ranges
+}
+
 /// Manages tmux windows for agent sessions.
 ///
 /// All operations shell out to the `tmux` CLI via `tokio::process::Command`.
@@ -276,9 +303,23 @@ impl TmuxManager {
     ///
     /// Uses `-l` (literal) to avoid interpreting special characters.
     /// Uses `--` to prevent tmux from parsing text starting with `--` as flags.
+    ///
+    /// Text longer than [`MAX_SEND_CHUNK`] is split across multiple
+    /// `send-keys` calls (chunks never split a multi-byte UTF-8 char). tmux
+    /// appends each chunk to the pane's input line, so the agent still receives
+    /// the full text in one input.
     pub async fn send_text(&self, window_id: &WindowId, text: &str) -> Result<()> {
-        self.tmux(&["send-keys", "-t", &window_id.0, "-l", "--", text])
+        for (start, end) in chunk_ranges(text) {
+            self.tmux(&[
+                "send-keys",
+                "-t",
+                &window_id.0,
+                "-l",
+                "--",
+                &text[start..end],
+            ])
             .await?;
+        }
         Ok(())
     }
 
@@ -579,5 +620,49 @@ impl atim_core::terminal::TerminalManager for TmuxManager {
 
     async fn wait_for_agent_ready(&self, window_id: &WindowId, timeout: Duration) -> Result<()> {
         TmuxManager::wait_for_agent_ready(self, window_id, timeout).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_chunk_ranges_small_text_single_chunk() {
+        let ranges = chunk_ranges("hello");
+        assert_eq!(ranges, vec![(0, 5)]);
+    }
+
+    #[test]
+    fn test_chunk_ranges_splits_large_text() {
+        let text = "x".repeat((MAX_SEND_CHUNK * 2) + 10);
+        let ranges = chunk_ranges(&text);
+        assert_eq!(ranges.len(), 3);
+        // Chunks are contiguous and cover the whole text without gaps.
+        let mut prev_end = 0;
+        for (start, end) in &ranges {
+            assert_eq!(*start, prev_end);
+            assert!(*end > *start);
+            assert!(*end - *start <= MAX_SEND_CHUNK);
+            prev_end = *end;
+        }
+        assert_eq!(prev_end, text.len());
+        // Every chunk reconstructs the original when concatenated.
+        let joined: String = ranges.iter().map(|&(s, e)| &text[s..e]).collect();
+        assert_eq!(joined, text);
+    }
+
+    #[test]
+    fn test_chunk_ranges_never_splits_multibyte_char() {
+        // Docx-style CJK text: 2 UTF-8 *bytes* per *char*. Force a chunk
+        // boundary that would land mid-char if we sliced on bytes alone.
+        let text = "文".repeat(MAX_SEND_CHUNK);
+        let ranges = chunk_ranges(&text);
+        for (start, end) in &ranges {
+            let slice = &text[*start..*end];
+            assert_eq!(slice.len() % "文".len(), 0, "chunk splits a CJK char");
+        }
+        let joined: String = ranges.iter().map(|&(s, e)| &text[s..e]).collect();
+        assert_eq!(joined, text);
     }
 }
