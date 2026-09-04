@@ -597,6 +597,7 @@ KillMode=process
 ExecStart={}
 Restart=on-failure
 RestartSec=5
+TimeoutStopSec=10
 EnvironmentFile=-~/.atim/.env
 {}
 [Install]
