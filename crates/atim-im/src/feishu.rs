@@ -22,9 +22,8 @@ use atim_core::message::{
     Button, ChatId, CheckItem, ImEvent, ImEventKind, MessageId, MessageTarget, ThreadId, UserId,
 };
 
-#[allow(deprecated)]
 use open_lark::Config;
-use open_lark::ws_client::{EventDispatcherHandler, LarkWsClient};
+use open_lark::ws_client::{EventDispatcherHandler, LarkWsClient, WsClientError};
 
 const FEISHU_BASE_URL: &str = "https://open.feishu.cn";
 
@@ -587,17 +586,19 @@ impl ImAdapter for FeishuAdapter {
                 .app_id(&self.app_id)
                 .app_secret(&self.app_secret)
                 .base_url(FEISHU_BASE_URL)
-                .timeout(Duration::from_secs(30))
-                .build()
-                .map_err(|e| Error::Feishu(format!("config build: {e}")))?;
+                .req_timeout(Duration::from_secs(30))
+                .build();
 
             tracing::info!("Connecting to Feishu WS via openlark");
             let result = LarkWsClient::open(Arc::new(cfg), event_handler).await;
 
             match result {
-                Ok(()) => {
+                Ok(()) | Err(WsClientError::ConnectionClosed { .. }) => {
+                    // openlark >=0.20 reports even graceful/peer closes as
+                    // `Err(ConnectionClosed)`. Both mean the WS session ended
+                    // cleanly — reset backoff instead of treating it as an error.
                     backoff = 1;
-                    tracing::info!("Feishu WS disconnected gracefully, reconnecting");
+                    tracing::info!("Feishu WS disconnected, reconnecting");
                 }
                 Err(e) => {
                     tracing::error!("Feishu WS error: {e}, reconnecting in {backoff}s");
