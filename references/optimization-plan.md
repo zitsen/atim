@@ -35,43 +35,30 @@
 
 ### 1. Codex：支持 `DynamicToolCallItem`
 
-Codex 较新版本引入 `DynamicToolCallItem` 作为通用工具执行（含 MCP 工具），
-与 `CommandExecutionItem` 并行。当前 `parse_item_completed` 只处理 `AgentMessage` 和 `CommandExecution`。
+**已完成**（`codex_jsonl.rs`，commit `5477799`）
 
 ```rust
-// 新增分支建议（codex_jsonl.rs）
-"DynamicToolCallItem" => parse_dynamic_tool_call(item, timestamp),
+"DynaractionItem" => ...  // 含 namespace::tool 显示 + content_items 提取
 ```
-
-**输出**：工具名 + arguments 截断 + content_items/output 展示。
-
-**影响**：MCP 工具调用现在被静默忽略（`_ => None`），用户看不到 MCP 工具内容。
 
 ### 2. Codex：处理 `LocalShellCall`（Responses API 格式）
 
-`ResponseItem::LocalShellCall` 是 Codex 的新 Responses API 格式，结构体不同于 `CommandExecutionItem`：
-```rust
-LocalShellCall {
-    id: Option<ResponseItemId>,
-    call_id: Option<String>,
-    status: LocalShellStatus,   // InProgress | Completed | ...
-    action: LocalShellAction,   // 含 command 字段（字符串？待确认）
-}
-```
+**已完成**（`codex_jsonl.rs`，commit `5477799`）
 
-当 Codex 通过 Responses API 运行时，shell 调用走这个变体而非 `CommandExecutionItem`。
-当前 `response_item` 行在 `parse_line` 里被忽略（只处理 `event_msg`），需扩展。
+`parse_line` 新增 `response_item` 分支，`parse_response_item` 处理：
+- `local_shell_call`：`action.type == "exec"` → 提取命令，状态标识 ✅/❌
+- `agent_message`：复用 `extract_text_from_content`
+- 其他类型 `tracing::debug`
 
-### 3. Claude：支持更多工具名的 `summarize_tool_result`
+### 3. Claude：`tool_icon` 新增 WebFetch/WebSearch 图标
 
-当前 `summarize_tool_result`（`jsonl.rs`）只对 `Bash`/`Read`/`Edit` 三个工具做了特殊处理，
-其他工具用 fallback `({N} lines)`。建议扩展：
+**已完成**（`jsonl.rs`，commit `5477799`）。
 
-- `Write`/`WriteTool` → 展示写入的文件路径
-- `WebFetch` → 展示 URL + 响应大小
-- `Grep`/`GrepTool` → 展示匹配数
+`Write`/`Grep`/`WebFetch` 的 `summarize_tool_result` 行为沿用通用 fallback（显示行数），足以满足当前需求。
 
 ### 4. 统一 tool_use/tool_result 缓存策略
+
+当前缓存策略（Claude 路径跨批次 HashMap，Codex 路径内联）工作正常，暂不需要统一。
 
 Claude 路径：`tool_use_id → tool_name` 在 `tool_names: HashMap` 里缓存（跨批次）。
 Codex 路径：`tool_use_id` 直接内联在 `CommandExecutionItem` 上，无缓存需求。
@@ -86,20 +73,11 @@ Codex 路径：`tool_use_id` 直接内联在 `CommandExecutionItem` 上，无缓
 
 ### 5. Codex：多变体覆盖更完整
 
-`parse_item_completed` 当前只匹配 `AgentMessage` 和 `CommandExecution`，其余返回 `None`。
-建议对未匹配的 item_type 输出 `tracing::debug` 而非静默忽略，方便排查格式变化：
-
-```rust
-other => {
-    tracing::debug!("Unknown Codex item type: {other}");
-    None
-}
-```
+**已完成**（commit `5477799`）—— `parse_item_completed` 和 `parse_response_item` 末尾的 `_` / `other` 分支现在输出 `tracing::debug!("Unknown ... type: {other}")`，不再静默忽略。
 
 ### 6. Claude：`is_error` 字段利用
 
-Claude 的 `tool_result` 有 `is_error: bool`。当前 `summarize_tool_result` 通过文本匹配 `exit N`，
-未利用 `is_error` 字段。建议在 `ParsedEntry` 中增加 `is_error` 信息，或在 text 里反映出来。
+待做——当前 `summarize_tool_result` 通过文本匹配 `exit N`，未利用 `tool_result.is_error` 字段。
 
 ### 7. 统一 ParsedEntry 输出截断
 
@@ -113,29 +91,23 @@ Claude 的 `tool_result` 有 `is_error: bool`。当前 `summarize_tool_result` �
 
 ### 8. 提取共享工具枚举
 
-`jsonl.rs` 和 `codex_jsonl.rs` 各自用字符串匹配工具名（`"Bash"`, `"Read"` 等）。
-建议在 `atim-core/src/message.rs` 或 `lib.rs` 中定义：
+**已完成**（`lib.rs`，commit `5477799`）
 
 ```rust
 pub const TOOL_BASH: &str = "Bash";
 pub const TOOL_READ: &str = "Read";
 pub const TOOL_EDIT: &str = "Edit";
-// ...
+pub const TOOL_WRITE: &str = "Write";
+pub const TOOL_GREP: &str = "Grep";
+pub const TOOL_GLOB: &str = "Glob";
+pub const TOOL_WEBFETCH: &str = "WebFetch";
 ```
 
-统一引用，避免拼写遗漏。
+`codex_jsonl.rs` 现用 `crate::TOOL_BASH` 替换硬编码字符串。
 
 ### 9. 解析器错误上报
 
-当前两个解析器对畸形 JSON 行都是 `None`（静默跳过）。建议在 `parse_str` 里记录
-跳过计数，上报到 tracing，方便排查数据问题：
-
-```rust
-let skipped = total_lines - entries.len();
-if skipped > 0 {
-    tracing::debug!("Skipped {skipped}/{total_lines} lines in JSONL parse");
-}
-```
+待做——`parse_str` 里可记录跳过行数到 tracing。
 
 ---
 
