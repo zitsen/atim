@@ -286,6 +286,7 @@ fn tool_icon(tool_name: &str) -> &'static str {
         "Bash" | "BashTool" | "BashRuntime" => "💻",
         "Write" | "WriteTool" | "CreateTool" | "Create" | "FileWriteTool" => "📝",
         "Search" | "SearchTool" | "GrepTool" | "GlobTool" => "🔍",
+        "WebFetch" | "WebSearchTool" => "🌐",
         "ThinkTool" | "ThinkingTool" => "🤔",
         _ => "🔧",
     }

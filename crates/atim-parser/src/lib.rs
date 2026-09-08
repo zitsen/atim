@@ -16,6 +16,16 @@ pub fn truncate_utf8(s: &str, max_chars: usize) -> String {
     }
 }
 
+/// Shared canonical tool names used by both Codex and Claude parsers.
+/// Each canonical name covers the variant spellings each agent may write.
+pub const TOOL_BASH: &str = "Bash";
+pub const TOOL_READ: &str = "Read";
+pub const TOOL_EDIT: &str = "Edit";
+pub const TOOL_WRITE: &str = "Write";
+pub const TOOL_GREP: &str = "Grep";
+pub const TOOL_GLOB: &str = "Glob";
+pub const TOOL_WEBFETCH: &str = "WebFetch";
+
 /// Dispatch JSONL reading to the appropriate parser based on file path.
 ///
 /// Paths containing `.copilot` use `CopilotJsonlParser`; paths under

@@ -95,7 +95,92 @@ impl CodexJsonlParser {
 
         match entry_type {
             "event_msg" => Self::parse_event_msg(&v),
+            "response_item" => Self::parse_response_item(&v),
             _ => None,
+        }
+    }
+
+    /// Parse `response_item` lines (Codex Responses API: LocalShellCall, AgentMessage, etc.)
+    ///
+    /// `response_item` is internally tagged with `#[serde(tag = "type", rename_all = "snake_case")]`,
+    /// so `payload.type` identifies the variant.
+    fn parse_response_item(v: &serde_json::Value) -> Option<Vec<ParsedEntry>> {
+        let payload = v.get("payload")?;
+        let item_type = payload.get("type")?.as_str()?;
+        let timestamp = v
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        match item_type {
+            "local_shell_call" => {
+                let call_id = payload
+                    .get("call_id")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| payload.get("id").and_then(|v| v.as_str()))
+                    .map(String::from);
+                let action = payload.get("action")?;
+                // action is internally tagged: {"type":"exec","command":["cmd"]}
+                if action.get("type").and_then(|v| v.as_str()) != Some("exec") {
+                    return None;
+                }
+                let command = extract_codex_command(action);
+                let summary = format!("💻 Bash:\n```bash\n{command}\n```");
+                let tool_use_id = call_id;
+
+                let mut entries = Vec::new();
+                entries.push(ParsedEntry {
+                    role: "assistant".into(),
+                    text: summary,
+                    content_type: ContentType::ToolUse,
+                    tool_use_id: tool_use_id.clone(),
+                    tool_name: Some(crate::TOOL_BASH.into()),
+                    timestamp: timestamp.clone(),
+                    image_data: None,
+                    raw_input: None,
+                });
+
+                // ToolResult: status only (no output available in response_item)
+                let status = payload.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                let result_text = match status {
+                    "completed" => "✅ ok".to_string(),
+                    "failed" => "❌ failed".to_string(),
+                    s if !s.is_empty() => format!("⏳ {s}"),
+                    _ => String::new(),
+                };
+                entries.push(ParsedEntry {
+                    role: "user".into(),
+                    text: result_text,
+                    content_type: ContentType::ToolResult,
+                    tool_use_id,
+                    tool_name: Some(crate::TOOL_BASH.into()),
+                    timestamp,
+                    image_data: None,
+                    raw_input: None,
+                });
+                Some(entries)
+            }
+            "agent_message" => {
+                let content = payload.get("content")?;
+                let text = extract_text_from_content(content);
+                if text.is_empty() {
+                    return None;
+                }
+                Some(vec![ParsedEntry {
+                    role: "assistant".into(),
+                    text,
+                    content_type: ContentType::Text,
+                    tool_use_id: None,
+                    tool_name: None,
+                    timestamp,
+                    image_data: None,
+                    raw_input: None,
+                }])
+            }
+            other => {
+                tracing::debug!("Unknown Codex response_item type: {other}");
+                None
+            }
         }
     }
 
@@ -157,7 +242,7 @@ impl CodexJsonlParser {
                     text: summary,
                     content_type: ContentType::ToolUse,
                     tool_use_id: tool_use_id.clone(),
-                    tool_name: Some("Bash".into()),
+                    tool_name: Some(crate::TOOL_BASH.into()),
                     timestamp: timestamp.clone(),
                     image_data: None,
                     raw_input: None,
@@ -191,7 +276,7 @@ impl CodexJsonlParser {
                     text: result_text,
                     content_type: ContentType::ToolResult,
                     tool_use_id,
-                    tool_name: Some("Bash".into()),
+                    tool_name: Some(crate::TOOL_BASH.into()),
                     timestamp,
                     image_data: None,
                     raw_input: None,
@@ -199,7 +284,86 @@ impl CodexJsonlParser {
 
                 Some(entries)
             }
-            _ => None,
+            "DynamicToolCallItem" => {
+                // MCP / dynamic tool execution.
+                let tool = item.get("tool").and_then(|v| v.as_str()).unwrap_or("tool");
+                let namespace = item.get("namespace").and_then(|v| v.as_str());
+                let tool_label = match namespace {
+                    Some(ns) => format!("{ns}::{tool}"),
+                    None => tool.to_string(),
+                };
+                let args = item
+                    .get("arguments")
+                    .map(|v| {
+                        let s = v.to_string();
+                        truncate_utf8(&s, MAX_BASH_OUTPUT_CHARS)
+                    })
+                    .unwrap_or_default();
+                let success = item.get("success").and_then(|v| v.as_bool());
+                let error = item.get("error").and_then(|v| v.as_str());
+                let output_items = item.get("content_items").and_then(|v| v.as_array());
+
+                let tool_use_id = item.get("id").and_then(|v| v.as_str()).map(String::from);
+                let mut entries = Vec::new();
+
+                // ToolUse entry
+                let summary = format!("🔧 {tool_label}:\n```\n{args}\n```");
+                entries.push(ParsedEntry {
+                    role: "assistant".into(),
+                    text: summary,
+                    content_type: ContentType::ToolUse,
+                    tool_use_id: tool_use_id.clone(),
+                    tool_name: Some(tool.to_string()),
+                    timestamp: timestamp.clone(),
+                    image_data: None,
+                    raw_input: None,
+                });
+
+                // ToolResult entry — extract text from content_items
+                let mut result_text = String::new();
+                if let Some(items) = output_items {
+                    let mut parts = Vec::new();
+                    for ci in items {
+                        if let Some(t) = ci.get("text").and_then(|v| v.as_str()) {
+                            parts.push(t.to_string());
+                        }
+                    }
+                    let joined = parts.join("\n");
+                    if !joined.is_empty() {
+                        result_text.push_str(&format!(
+                            "```\n{}\n```",
+                            truncate_utf8(&joined, MAX_BASH_OUTPUT_CHARS)
+                        ));
+                    }
+                }
+                if success == Some(false) || error.is_some() {
+                    if !result_text.is_empty() {
+                        result_text.push('\n');
+                    }
+                    result_text.push_str(&format!("❌ {}", error.unwrap_or("failed")));
+                } else if success == Some(true) {
+                    if !result_text.is_empty() {
+                        result_text.push('\n');
+                    }
+                    result_text.push_str("✅ ok");
+                }
+
+                entries.push(ParsedEntry {
+                    role: "user".into(),
+                    text: result_text,
+                    content_type: ContentType::ToolResult,
+                    tool_use_id,
+                    tool_name: Some(tool.to_string()),
+                    timestamp,
+                    image_data: None,
+                    raw_input: None,
+                });
+                Some(entries)
+            }
+            other => {
+                tracing::debug!("Unknown Codex item_completed type: {other}");
+                None
+            }
         }
     }
 }
@@ -327,5 +491,48 @@ mod tests {
     fn test_parse_empty_content() {
         let line = r#"{"timestamp":"2026-08-31T08:43:18.137Z","ordinal":10,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","id":"msg_123","content":[]},"completed_at_ms":1788165798137}}"#;
         assert!(CodexJsonlParser::parse_line(line).is_none());
+    }
+
+    #[test]
+    fn test_parse_dynamic_tool_call_item() {
+        let line = r#"{"timestamp":"2026-09-01T00:00:00Z","ordinal":5,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"DynamicToolCallItem","id":"dtc_1","tool":"web_search","namespace":"mcp","arguments":{"query":"rust macros"},"status":"completed","content_items":[{"type":"inputText","text":"Rust macros explained..."}],"success":true},"completed_at_ms":1788500000000}}"#;
+        let entries = CodexJsonlParser::parse_line(line).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].content_type, ContentType::ToolUse);
+        assert!(entries[0].text.contains("mcp::web_search"));
+        assert_eq!(entries[0].tool_name.as_deref(), Some("web_search"));
+        assert_eq!(entries[1].content_type, ContentType::ToolResult);
+        assert!(entries[1].text.contains("Rust macros explained..."));
+        assert!(entries[1].text.contains("✅"));
+    }
+
+    #[test]
+    fn test_parse_dynamic_tool_call_failed() {
+        let line = r#"{"timestamp":"2026-09-01T00:00:00Z","ordinal":5,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"DynamicToolCallItem","id":"dtc_2","tool":"db_query","arguments":"{}","status":"failed","content_items":null,"success":false,"error":"timeout"},"completed_at_ms":1788500000000}}"#;
+        let entries = CodexJsonlParser::parse_line(line).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries[1].text.contains("❌ timeout"));
+    }
+
+    #[test]
+    fn test_parse_response_item_local_shell_call() {
+        // Codex Responses API: local_shell_call uses internally-tagged action.
+        let line = r#"{"type":"response_item","payload":{"type":"local_shell_call","call_id":"call_789","status":"completed","action":{"type":"exec","command":["/bin/sh","-c","echo ok"]}},"timestamp":"2026-09-01T01:00:00Z"}"#;
+        let entries = CodexJsonlParser::parse_line(line).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].content_type, ContentType::ToolUse);
+        assert!(entries[0].text.contains("echo ok"));
+        assert_eq!(entries[0].tool_use_id.as_deref(), Some("call_789"));
+        assert_eq!(entries[1].content_type, ContentType::ToolResult);
+        assert!(entries[1].text.contains("✅ ok"));
+    }
+
+    #[test]
+    fn test_parse_response_item_agent_message() {
+        let line = r#"{"type":"response_item","payload":{"type":"agent_message","author":"codex","recipient":"user","content":[{"type":"input_text","text":"Here is the result."}]},"timestamp":"2026-09-01T02:00:00Z"}"#;
+        let entries = CodexJsonlParser::parse_line(line).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].role, "assistant");
+        assert_eq!(entries[0].text, "Here is the result.");
     }
 }
