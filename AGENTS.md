@@ -89,3 +89,20 @@ Monitor resolves `session_id → window_id → thread_binding` to determine wher
   - `session_map.json` — window_id → session UUID mapping
   - `monitor_state.json` — session UUID → byte offset for incremental JSONL reading
 - **Session filtering**: canonicalize path first, slug-match exact, fall back to capped scan (25 most recent) across all projects
+
+## JSONL Format Reference
+
+atim 同时解析两种 agent session JSONL 格式（`atim-parser` 包）：
+
+| 格式 | 来源 | 文件路径模式 | 解析器 |
+|------|------|------------|--------|
+| Codex rollout | `openai/codex` (codex-rs) | `~/.codex/sessions/.../rollout-*.jsonl` | `codex_jsonl.rs` |
+| Claude session | Anthropic Claude Code CLI | `~/.claude/projects/<hash>/<uuid>.jsonl` | `jsonl.rs` |
+
+**关键差异**：Codex 的 `command` 是 `Vec<String>`（argv 数组），Claude 的是纯字符串；
+Codex 输出字段是 `aggregated_output`/`stdout`（裸字符串），Claude 是 `tool_result.content[]`（ContentBlock 数组）。
+
+详细字段对照与优化计划见：
+- [`references/codex-jsonl-schema.md`](references/codex-jsonl-schema.md) — Codex rollout 格式权威参考（基于 `openai/codex` 源码）
+- [`references/claude-jsonl-schema.md`](references/claude-jsonl-schema.md) — Claude session 格式参考（基于 atim 逆向分析）
+- [`references/optimization-plan.md`](references/optimization-plan.md) — 解析器后续优化计划（P1/P2/P3 优先级）
