@@ -5,6 +5,12 @@ use atim_core::message::{ContentType, ParsedEntry};
 use tokio::fs;
 use tokio::io::AsyncSeekExt;
 
+use crate::truncate_utf8;
+
+/// Max chars of Bash output included in a ToolResult card (keeps huge logs
+/// from drowning the IM message; the send layer caps at MAX_MSG_LEN too).
+const MAX_BASH_OUTPUT_CHARS: usize = 3000;
+
 /// Reads and parses Codex JSONL session logs.
 ///
 /// Codex writes rollout logs at `~/.codex/sessions/YYYY/MM/DD/rollout-TIMESTAMP-SESSION_ID.jsonl`.
@@ -136,9 +142,9 @@ impl CodexJsonlParser {
                 }])
             }
             "CommandExecution" => {
-                let command = item.get("command").and_then(|v| v.as_str()).unwrap_or("");
+                let command = extract_codex_command(item);
                 let exit_code = item.get("exit_code").and_then(|v| v.as_i64());
-                let _output = item.get("output").and_then(|v| v.as_str()).unwrap_or("");
+                let output = extract_codex_output(item);
 
                 let tool_use_id = item.get("id").and_then(|v| v.as_str()).map(String::from);
 
@@ -157,19 +163,32 @@ impl CodexJsonlParser {
                     raw_input: None,
                 });
 
-                // ToolResult entry
-                let result_suffix = if let Some(code) = exit_code {
-                    if code == 0 {
-                        String::new()
-                    } else {
-                        format!("exit {code}")
+                // ToolResult entry — command output (truncated) + exit status.
+                let mut result_text = String::new();
+                if !output.is_empty() {
+                    let output = output.trim_end();
+                    let line_count = output.lines().count();
+                    let shown = truncate_utf8(output, MAX_BASH_OUTPUT_CHARS);
+                    let truncated = shown.len() < output.len();
+                    result_text.push_str(&format!("```\n{shown}\n```"));
+                    if truncated {
+                        result_text.push_str(&format!("\n({line_count} lines, truncated)"));
                     }
-                } else {
-                    String::new()
-                };
+                }
+                if let Some(code) = exit_code {
+                    if !result_text.is_empty() {
+                        result_text.push('\n');
+                    }
+                    if code == 0 {
+                        result_text.push_str("✅ exit 0");
+                    } else {
+                        result_text.push_str(&format!("❌ exit {code}"));
+                    }
+                }
+
                 entries.push(ParsedEntry {
                     role: "user".into(),
-                    text: result_suffix,
+                    text: result_text,
                     content_type: ContentType::ToolResult,
                     tool_use_id,
                     tool_name: Some("Bash".into()),
@@ -202,6 +221,53 @@ fn extract_text_from_content(content: &serde_json::Value) -> String {
     parts.join("\n")
 }
 
+/// Extract the readable shell command from a Codex `CommandExecution` item.
+///
+/// `command` is usually an *argv array* (`["/bin/zsh", "-lc", "cmd"]`), so
+/// `.as_str()` alone returns nothing. Codex also writes `parsed_cmd` with a
+/// readable `.cmd` — prefer it; fall back to a plain-string command or the
+/// last argv element.
+fn extract_codex_command(item: &serde_json::Value) -> String {
+    if let Some(parsed) = item.get("parsed_cmd").and_then(|v| v.as_array())
+        && let Some(first) = parsed.first()
+        && let Some(cmd) = first.get("cmd").and_then(|v| v.as_str())
+        && !cmd.is_empty()
+    {
+        return cmd.to_string();
+    }
+    match item.get("command") {
+        Some(c) if c.is_string() => c.as_str().unwrap_or("").to_string(),
+        Some(c) if c.is_array() => c
+            .as_array()
+            .and_then(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str())
+                    .next_back()
+                    .map(String::from)
+            })
+            .unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+/// Extract Bash output from a Codex `CommandExecution` item.
+///
+/// Codex stores `stdout`/`stderr` plus the combined `aggregated_output`
+/// (preferred; `formatted_output` as fallback), not a bare `output` field.
+fn extract_codex_output(item: &serde_json::Value) -> String {
+    for key in ["aggregated_output", "formatted_output", "stdout"] {
+        if let Some(s) = item.get(key).and_then(|v| v.as_str())
+            && !s.is_empty()
+        {
+            return s.to_string();
+        }
+    }
+    item.get("stderr")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,22 +284,37 @@ mod tests {
 
     #[test]
     fn test_parse_command_execution() {
-        let line = r#"{"timestamp":"2026-08-31T08:43:20.000Z","ordinal":11,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":"call_456","command":"echo hello","exit_code":0,"output":"hello\n"},"completed_at_ms":1788165799000}}"#;
+        // Real Codex items: command is an argv array, output lives in aggregated_output.
+        let line = r#"{"timestamp":"2026-08-31T08:43:20.000Z","ordinal":11,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":"call_456","command":["/bin/sh","-c","echo hello"],"exit_code":0,"aggregated_output":"hello\n"},"completed_at_ms":1788165799000}}"#;
         let entries = CodexJsonlParser::parse_line(line).unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].content_type, ContentType::ToolUse);
         assert_eq!(entries[0].tool_name.as_deref(), Some("Bash"));
+        // Command is extracted from the argv array.
+        assert!(entries[0].text.contains("echo hello"));
         assert_eq!(entries[1].content_type, ContentType::ToolResult);
-        assert_eq!(entries[1].text, ""); // exit 0 = empty suffix
+        // Output is now included, plus exit status.
+        assert!(entries[1].text.contains("hello"));
+        assert!(entries[1].text.contains("✅ exit 0"));
+    }
+
+    #[test]
+    fn test_parse_command_execution_null_command() {
+        // A `command` that is not a string/array must not produce an empty shell block.
+        let line = r#"{"timestamp":"2026-08-31T08:43:20.000Z","ordinal":11,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":"call_111","command":null,"exit_code":0,"aggregated_output":"ok"},"completed_at_ms":1788165799000}}"#;
+        let entries = CodexJsonlParser::parse_line(line).unwrap();
+        // Command not resolvable → still a usable card, no runaway.
+        assert_eq!(entries[0].content_type, ContentType::ToolUse);
+        assert_eq!(entries[1].text, "```\nok\n```\n✅ exit 0");
     }
 
     #[test]
     fn test_parse_command_execution_failed() {
-        let line = r#"{"timestamp":"2026-08-31T08:43:20.000Z","ordinal":11,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":"call_789","command":"false","exit_code":1,"output":""},"completed_at_ms":1788165799000}}"#;
+        let line = r#"{"timestamp":"2026-08-31T08:43:20.000Z","ordinal":11,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":"call_789","command":"false","exit_code":1,"aggregated_output":""},"completed_at_ms":1788165799000}}"#;
         let entries = CodexJsonlParser::parse_line(line).unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[1].content_type, ContentType::ToolResult);
-        assert_eq!(entries[1].text, "exit 1");
+        assert_eq!(entries[1].text, "❌ exit 1");
     }
 
     #[test]
