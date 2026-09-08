@@ -13,6 +13,21 @@ mod server;
 mod service;
 mod update;
 
+/// Wait for SIGTERM (unix) or hang forever (Windows — ctrl_c handles shutdown).
+#[cfg(unix)]
+async fn wait_for_sigterm() {
+    let kind = tokio::signal::unix::SignalKind::terminate();
+    let mut sigterm =
+        tokio::signal::unix::signal(kind).expect("Failed to register SIGTERM handler");
+    sigterm.recv().await;
+}
+
+#[cfg(not(unix))]
+async fn wait_for_sigterm() {
+    // On Windows SIGTERM doesn't exist — ctrl_c() in the select! covers shutdown.
+    std::future::pending::<()>().await;
+}
+
 #[derive(Parser)]
 #[command(name = "atim", about = "IM-to-Claude-Code bridge via tmux", version)]
 struct Cli {
@@ -431,11 +446,7 @@ async fn main() -> anyhow::Result<()> {
         welcome_sent: Arc::new(Mutex::new(std::collections::HashSet::new())),
     };
 
-    // 8. Enter main event loop — wait for SIGINT or SIGTERM
-    let sigterm = tokio::signal::unix::SignalKind::terminate();
-    let mut sigterm_signal =
-        tokio::signal::unix::signal(sigterm).expect("Failed to register SIGTERM handler");
-
+    // 8. Enter main event loop — wait for SIGINT (or SIGTERM on unix)
     tokio::select! {
         result = server.run(im_rx, &mut monitor_rx) => {
             if let Err(e) = result {
@@ -445,7 +456,7 @@ async fn main() -> anyhow::Result<()> {
         _ = tokio::signal::ctrl_c() => {
             tracing::info!("Received interrupt signal, shutting down...");
         }
-        _ = sigterm_signal.recv() => {
+        _ = wait_for_sigterm() => {
             tracing::info!("Received SIGTERM, shutting down...");
         }
     }
