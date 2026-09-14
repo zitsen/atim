@@ -4908,26 +4908,32 @@ fn format_tool_result(
     let is_bash = matches!(tool_name, Some("Bash" | "BashTool" | "BashRuntime"));
 
     if is_bash {
-        let suffix_part = if result_suffix.is_empty() {
-            String::new()
-        } else {
-            format!(" ({result_suffix})")
-        };
-        // Replace emoji + "Bash:" with "✅ Bash (suffix):" — try both common forms
+        // Replace the 💻 emoji with ✅ to mark completion.
         let replaced = original_tool_use
-            .replacen("💻 Bash:", &format!("✅ Bash{suffix_part}:"), 1)
-            .replacen("💻 Bash: ", &format!("✅ Bash{suffix_part}: "), 1);
-        return replaced;
+            .replacen("💻 Bash:", "✅ Bash:", 1)
+            .replacen("💻 Bash: ", "✅ Bash: ", 1);
+
+        if result_suffix.is_empty() {
+            return replaced;
+        }
+
+        // P0 fix changed Codex result_suffix to a multi-line output block.
+        // Short single-line suffixes (Claude: "exit 1", "(N lines)") go
+        // inline after the command; multi-line blocks are appended as a
+        // separate section to avoid nesting code blocks inside parentheses.
+        if result_suffix.contains('\n') {
+            return format!("{replaced}\n{result_suffix}");
+        }
+        return format!("{replaced} ({result_suffix})");
     }
 
-    // Non-Bash: find and replace the emoji prefix with ✅
+    // Non-Bash: replace tool emoji prefix with ✅
     let result = original_tool_use
         .replacen("💻 ", "✅ ", 1)
         .replacen("📖 ", "✅ ", 1)
         .replacen("✏️ ", "✅ ", 1)
         .replacen("📝 ", "✅ ", 1)
         .replacen("🔍 ", "✅ ", 1);
-    // If no emoji was replaced, prepend ✅
     let result = if result == original_tool_use && !result.starts_with("✅ ") {
         format!("✅ {result}")
     } else {
@@ -4936,14 +4942,12 @@ fn format_tool_result(
 
     if result_suffix.is_empty() {
         result
-    } else if result.starts_with("✅ ") {
-        // Insert suffix after the tool name on the first line
-        if let Some(line_end) = result.find('\n') {
-            let (first_line, rest) = result.split_at(line_end);
-            format!("{first_line} ({result_suffix}){rest}")
-        } else {
-            format!("{result} ({result_suffix})")
-        }
+    } else if result_suffix.contains('\n') {
+        // Multi-line result: append below the tool-use message.
+        format!("{result}\n{result_suffix}")
+    } else if let Some(line_end) = result.find('\n') {
+        let (first_line, rest) = result.split_at(line_end);
+        format!("{first_line} ({result_suffix}){rest}")
     } else {
         format!("{result} ({result_suffix})")
     }
@@ -6145,9 +6149,23 @@ mod tests {
 
     #[test]
     fn test_format_bash_with_code_block_and_suffix() {
+        // Short single-line suffix: appended inline after the command block.
         let original = "💻 Bash:\n```bash\nls -la /tmp\n```";
         let result = format_tool_result(original, "16 lines", Some("Bash"));
-        assert_eq!(result, "✅ Bash (16 lines):\n```bash\nls -la /tmp\n```");
+        assert_eq!(result, "✅ Bash:\n```bash\nls -la /tmp\n``` (16 lines)");
+    }
+
+    #[test]
+    fn test_format_bash_with_multi_line_suffix() {
+        // P0 fix: Codex result_suffix is now a full output block.
+        // Multi-line suffix must NOT be nested in parentheses.
+        let original = "💻 Bash:\n```bash\nls -la /tmp\n```";
+        let suffix = "```\ntotal 48\nfile1\nfile2\n```\n✅ exit 0";
+        let result = format_tool_result(original, suffix, Some("Bash"));
+        assert_eq!(
+            result,
+            "✅ Bash:\n```bash\nls -la /tmp\n```\n```\ntotal 48\nfile1\nfile2\n```\n✅ exit 0"
+        );
     }
 
     #[test]
@@ -6161,7 +6179,7 @@ mod tests {
     fn test_format_bash_simple_inline() {
         let original = "💻 Bash: ls -la /tmp";
         let result = format_tool_result(original, "16 lines", Some("Bash"));
-        assert_eq!(result, "✅ Bash (16 lines): ls -la /tmp");
+        assert_eq!(result, "✅ Bash: ls -la /tmp (16 lines)");
     }
 
     #[test]
@@ -6196,6 +6214,6 @@ mod tests {
     fn test_format_bash_exit_failure() {
         let original = "💻 Bash:\n```bash\ncargo test\n```";
         let result = format_tool_result(original, "exit 1", Some("Bash"));
-        assert_eq!(result, "✅ Bash (exit 1):\n```bash\ncargo test\n```");
+        assert_eq!(result, "✅ Bash:\n```bash\ncargo test\n``` (exit 1)");
     }
 }
