@@ -1514,68 +1514,80 @@ impl Server {
 
                 // Session discovery via /status command — most reliable source.
                 let discovered_sid: Option<String> = if agent.supports_sessions() {
-                    // Capture current pane content first (for baseline).
-                    // strip_ansi is required: capture_pane uses -e (preserve ANSI), so the raw
-                    // output contains escape codes that break UUID regex matching.
-                    let baseline_raw = self
-                        .tmux_mgr
-                        .capture_pane(&window_id)
-                        .await
-                        .ok()
-                        .unwrap_or_default();
-                    let baseline = strip_ansi(&baseline_raw);
-                    let baseline_len = baseline.lines().count();
-
-                    // Send /status to Claude Code
-                    self.tmux_mgr.send_line(&window_id, "/status").await.ok();
-                    tokio::time::sleep(Duration::from_millis(2000)).await;
-
-                    // Capture updated pane, strip ANSI, then extract Session ID.
-                    let captured_raw = self
-                        .tmux_mgr
-                        .capture_pane(&window_id)
-                        .await
-                        .ok()
-                        .unwrap_or_default();
-                    let captured = strip_ansi(&captured_raw);
-                    let lines: Vec<&str> = captured.lines().collect();
-                    let new_text = lines
-                        .iter()
-                        .copied()
-                        .skip(baseline_len)
-                        .collect::<Vec<_>>()
-                        .join("\n");
-
-                    let mut sid = SESSION_ID_RE
-                        .captures(&new_text)
-                        .and_then(|c| c.get(1))
-                        .map(|m| m.as_str().to_string());
-
-                    if sid.is_none() {
-                        // Try full pane as fallback (status modal may replace rather than append)
-                        sid = SESSION_ID_RE
-                            .captures(&captured)
-                            .and_then(|c| c.get(1))
-                            .map(|m| m.as_str().to_string());
-                    }
-
-                    // Dismiss /status modal — send Escape, verify, retry once
-                    self.tmux_mgr.send_key(&window_id, "Escape").await.ok();
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                    {
-                        let pane = self
+                    // If a shell is running instead of the agent (e.g. Claude
+                    // quit or crashed), sending /status would be interpreted as
+                    // a file path lookup — skip session discovery.
+                    if is_shell_process(&win_info.current_command) {
+                        tracing::info!(
+                            "[rebind] window {} running shell '{}', skipping /status session discovery",
+                            window_id_str,
+                            win_info.current_command,
+                        );
+                        None
+                    } else {
+                        // Capture current pane content first (for baseline).
+                        // strip_ansi is required: capture_pane uses -e (preserve ANSI), so the raw
+                        // output contains escape codes that break UUID regex matching.
+                        let baseline_raw = self
                             .tmux_mgr
                             .capture_pane(&window_id)
                             .await
+                            .ok()
                             .unwrap_or_default();
-                        let lower = strip_ansi(&pane).to_lowercase();
-                        if lower.contains("session id") || lower.contains("/status") {
-                            self.tmux_mgr.send_key(&window_id, "Escape").await.ok();
-                            tokio::time::sleep(Duration::from_millis(500)).await;
-                        }
-                    }
+                        let baseline = strip_ansi(&baseline_raw);
+                        let baseline_len = baseline.lines().count();
 
-                    sid
+                        // Send /status to Claude Code
+                        self.tmux_mgr.send_line(&window_id, "/status").await.ok();
+                        tokio::time::sleep(Duration::from_millis(2000)).await;
+
+                        // Capture updated pane, strip ANSI, then extract Session ID.
+                        let captured_raw = self
+                            .tmux_mgr
+                            .capture_pane(&window_id)
+                            .await
+                            .ok()
+                            .unwrap_or_default();
+                        let captured = strip_ansi(&captured_raw);
+                        let lines: Vec<&str> = captured.lines().collect();
+                        let new_text = lines
+                            .iter()
+                            .copied()
+                            .skip(baseline_len)
+                            .collect::<Vec<_>>()
+                            .join("\n");
+
+                        let mut sid = SESSION_ID_RE
+                            .captures(&new_text)
+                            .and_then(|c| c.get(1))
+                            .map(|m| m.as_str().to_string());
+
+                        if sid.is_none() {
+                            // Try full pane as fallback (status modal may replace rather than append)
+                            sid = SESSION_ID_RE
+                                .captures(&captured)
+                                .and_then(|c| c.get(1))
+                                .map(|m| m.as_str().to_string());
+                        }
+
+                        // Dismiss /status modal — send Escape, verify, retry once
+                        self.tmux_mgr.send_key(&window_id, "Escape").await.ok();
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        {
+                            let pane = self
+                                .tmux_mgr
+                                .capture_pane(&window_id)
+                                .await
+                                .unwrap_or_default();
+                            let lower = strip_ansi(&pane).to_lowercase();
+                            if lower.contains("session id") || lower.contains("/status") {
+                                self.tmux_mgr.send_key(&window_id, "Escape").await.ok();
+                                tokio::time::sleep(Duration::from_millis(500)).await;
+                            }
+                        }
+
+                        sid
+                    } // end of `else` (agent is running, proceed with /status)
                 } else {
                     None
                 };
@@ -3164,6 +3176,20 @@ impl Server {
     /// because it queries the running agent directly on demand.
     async fn discover_session_via_status(&self, window_id: &str) -> Option<String> {
         let wid = WindowId(window_id.to_string());
+
+        // Verify the agent is actually running in the pane.
+        // If a shell (zsh/bash) is active, /status would be interpreted as a
+        // file path lookup ("zsh: 没有那个文件或目录: /status") and session
+        // discovery returns garbage — silently skip.
+        if let Ok(info) = self.tmux_mgr.find_window(&wid).await
+            && is_shell_process(&info.current_command)
+        {
+            tracing::debug!(
+                "discover_session_via_status({window_id}): pane running {}, skipping /status",
+                info.current_command,
+            );
+            return None;
+        }
 
         // Capture baseline pane content before sending /status.
         let baseline_raw = self
