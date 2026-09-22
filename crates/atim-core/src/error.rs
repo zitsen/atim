@@ -13,6 +13,12 @@ pub enum Error {
     #[error("Feishu API error: {0}")]
     Feishu(String),
 
+    /// Expendable content (tool chatter) dropped by flood control during a
+    /// send storm. Not a failure of the IM API — the message was deliberately
+    /// discarded to keep the chat usable. Essential replies are never dropped.
+    #[error("message dropped by flood control")]
+    Dropped,
+
     // ── Tmux layer ──
     #[error("Tmux error: {0}")]
     Tmux(String),

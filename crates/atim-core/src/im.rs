@@ -20,7 +20,23 @@ pub trait ImAdapter: Send + Sync {
     async fn run(&self, tx: mpsc::UnboundedSender<ImEvent>) -> Result<()>;
 
     /// Send a text message to a chat/thread.
+    ///
+    /// Essential content — assistant replies, command output the user asked
+    /// for. Never dropped by rate limiting.
     async fn send_message(&self, target: &MessageTarget, text: &str) -> Result<MessageId>;
+
+    /// Send expendable tool chatter (a tool call or a tool result).
+    ///
+    /// Indistinguishable from [`ImAdapter::send_message`] on the wire, but
+    /// marked as droppable so flood control can shed it during a tool storm —
+    /// e.g. hundreds of identical `git status` results a minute — instead of
+    /// burying the chat. Implementations that do not rate limit may simply
+    /// delegate; only the flood-controlled wrapper needs to tell them apart.
+    ///
+    /// Returns [`crate::error::Error::Dropped`] when the message was shed.
+    async fn send_chatter(&self, target: &MessageTarget, text: &str) -> Result<MessageId> {
+        self.send_message(target, text).await
+    }
 
     /// Edit an existing message in-place.
     async fn edit_message(
@@ -29,6 +45,20 @@ pub trait ImAdapter: Send + Sync {
         msg_id: &MessageId,
         text: &str,
     ) -> Result<()>;
+
+    /// Edit an expendable tool chatter message in-place.
+    ///
+    /// The droppable counterpart of [`ImAdapter::edit_message`]; see
+    /// [`ImAdapter::send_chatter`]. Returns [`crate::error::Error::Dropped`]
+    /// when the update was shed.
+    async fn edit_chatter(
+        &self,
+        target: &MessageTarget,
+        msg_id: &MessageId,
+        text: &str,
+    ) -> Result<()> {
+        self.edit_message(target, msg_id, text).await
+    }
 
     /// Send a photo/document to a chat/thread.
     async fn send_photo(

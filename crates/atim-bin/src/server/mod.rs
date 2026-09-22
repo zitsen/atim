@@ -521,8 +521,9 @@ impl Server {
                                 ) && let Some(ref raw) = msg.raw_input
                                 {
                                     let diff_text = build_edit_diff_card(raw, &msg.text);
+                                    // Tool chatter — sheddable under a tool storm.
                                     if let Ok(mid) =
-                                        self.im_adapter.send_message(&target, &diff_text).await
+                                        self.im_adapter.send_chatter(&target, &diff_text).await
                                         && let Some(tuid) = &msg.tool_use_id
                                     {
                                         self.tool_use_msg_ids.lock().await.insert(
@@ -534,7 +535,7 @@ impl Server {
                                 }
                                 if let Some(tuid) = &msg.tool_use_id
                                     && let Ok(mid) =
-                                        self.im_adapter.send_message(&target, &msg.text).await
+                                        self.im_adapter.send_chatter(&target, &msg.text).await
                                 {
                                     self.tool_use_msg_ids.lock().await.insert(
                                         (chat_id, thread_id_val, tuid.clone()),
@@ -568,11 +569,12 @@ impl Server {
                                         );
                                         let _ = self
                                             .im_adapter
-                                            .edit_message(&target, &mid, &combined)
+                                            .edit_chatter(&target, &mid, &combined)
                                             .await;
                                     }
                                 } else {
-                                    let _ = self.im_adapter.send_message(&target, &msg.text).await;
+                                    // Tool chatter — sheddable under a tool storm.
+                                    let _ = self.im_adapter.send_chatter(&target, &msg.text).await;
                                 }
                             }
                             _ => {

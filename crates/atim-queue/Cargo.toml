@@ -15,3 +15,8 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 atim-core = { path = "../atim-core", version = "0.6" }
+
+[dev-dependencies]
+# test-util: paused clock so the rate limiter's timing can be asserted without
+# sleeping out real 30–60s windows in the test suite.
+tokio = { workspace = true, features = ["test-util"] }
