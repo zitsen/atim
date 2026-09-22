@@ -20,6 +20,27 @@ const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// Save byte offsets to disk every N cycles.
 const SAVE_INTERVAL_CYCLES: u32 = 30;
 
+/// Largest batch of messages handed over in one go.
+///
+/// A storm can leave thousands of entries behind a single poll cycle. Handing
+/// those over as one batch makes one delivery call do unbounded work, which
+/// delays the tick that drives repeat counters and storm digests. Batches are
+/// capped here so every delivery call stays bounded; the outbound queue paces
+/// whatever follows.
+const MAX_BATCH: usize = 200;
+
+/// Hand `messages` to the server in batches of at most [`MAX_BATCH`].
+fn send_in_batches(tx: &mpsc::UnboundedSender<MonitorEvent>, messages: Vec<NewMessage>) {
+    let mut rest = messages;
+    while !rest.is_empty() {
+        let take = rest.len().min(MAX_BATCH);
+        let batch: Vec<NewMessage> = rest.drain(..take).collect();
+        if tx.send(MonitorEvent::NewMessages(batch)).is_err() {
+            return; // server is gone; the rest is not going anywhere
+        }
+    }
+}
+
 /// Result produced by the monitor.
 pub enum MonitorEvent {
     /// New messages from a session JSONL.
@@ -523,7 +544,7 @@ impl SessionMonitor {
 
         if !messages.is_empty() {
             tracing::info!("[monitor] Mimo DB: {} new messages", messages.len());
-            let _ = tx.send(MonitorEvent::NewMessages(messages));
+            send_in_batches(tx, messages);
         }
 
         Ok(())
@@ -909,7 +930,7 @@ impl SessionMonitor {
                 }
 
                 if !messages.is_empty() {
-                    let _ = tx.send(MonitorEvent::NewMessages(messages));
+                    send_in_batches(tx, messages);
                 }
             }
         }
@@ -981,5 +1002,86 @@ impl SessionMonitor {
                 tracing::debug!("[monitor] Saved {} byte offsets", offsets.len());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atim_core::message::ContentType;
+
+    fn msg(text: &str) -> NewMessage {
+        NewMessage {
+            session_id: SessionId("sid".to_string()),
+            text: text.to_string(),
+            is_complete: true,
+            content_type: ContentType::ToolUse,
+            tool_use_id: None,
+            role: "assistant".to_string(),
+            tool_name: None,
+            image_data: None,
+            raw_input: None,
+        }
+    }
+
+    /// Drain every batch the sender produced.
+    fn drain(rx: &mut mpsc::UnboundedReceiver<MonitorEvent>) -> Vec<usize> {
+        let mut sizes = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                MonitorEvent::NewMessages(batch) => sizes.push(batch.len()),
+                MonitorEvent::SessionMapChanged => panic!("unexpected event"),
+            }
+        }
+        sizes
+    }
+
+    #[tokio::test]
+    async fn test_no_batch_exceeds_the_cap() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let n = MAX_BATCH * 2 + 7;
+        send_in_batches(&tx, (0..n).map(|i| msg(&i.to_string())).collect());
+
+        let sizes = drain(&mut rx);
+        assert!(
+            sizes.iter().all(|s| *s <= MAX_BATCH),
+            "batches must stay under the cap: {sizes:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_capping_loses_nothing() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let n = MAX_BATCH * 2 + 7;
+        send_in_batches(&tx, (0..n).map(|i| msg(&i.to_string())).collect());
+
+        let sizes = drain(&mut rx);
+        assert_eq!(sizes.iter().sum::<usize>(), n, "every message must arrive");
+        assert_eq!(sizes.len(), 3, "expected ceil({n}/{MAX_BATCH}) batches");
+    }
+
+    #[tokio::test]
+    async fn test_a_small_batch_passes_through_untouched() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        send_in_batches(&tx, vec![msg("a"), msg("b")]);
+        assert_eq!(drain(&mut rx), vec![2]);
+    }
+
+    #[tokio::test]
+    async fn test_nothing_in_means_nothing_out() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        send_in_batches(&tx, Vec::new());
+        assert!(drain(&mut rx).is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_stops_when_the_server_is_gone() {
+        // Dropping the receiver must not loop forever on the remainder.
+        let (tx, rx) = mpsc::unbounded_channel();
+        drop(rx);
+        send_in_batches(
+            &tx,
+            (0..(MAX_BATCH * 3)).map(|i| msg(&i.to_string())).collect(),
+        );
     }
 }

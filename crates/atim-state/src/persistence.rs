@@ -99,6 +99,8 @@ CREATE TABLE IF NOT EXISTS chat_settings (
 pub struct Store {
     db: Mutex<Connection>,
     atim_dir: PathBuf,
+    /// Serialises whole-runtime read-modify-write; see [`Store::lock_runtime`].
+    runtime_lock: tokio::sync::Mutex<()>,
 }
 
 impl Store {
@@ -171,6 +173,7 @@ impl Store {
         }
 
         let store = Self {
+            runtime_lock: tokio::sync::Mutex::new(()),
             db: Mutex::new(connection),
             atim_dir: atim_dir.to_path_buf(),
         };
@@ -666,6 +669,30 @@ impl Store {
     }
 
     /// Save V2 runtime state (sessions + window_bindings + chat_bindings).
+    /// Take the whole-runtime lock and hold it until the save.
+    ///
+    /// `load_runtime` and `save_runtime` are each atomic on their own, but the
+    /// pair is not: two handlers that load, mutate and save would silently drop
+    /// one side's updates. Hold this from the load until the save to make the
+    /// pair atomic.
+    ///
+    /// Reads are safe without it — `save_runtime` commits in one transaction.
+    pub async fn lock_runtime(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.runtime_lock.lock().await
+    }
+
+    /// Save `rt`, releasing the lock taken by [`Store::lock_runtime`].
+    ///
+    /// Consumes the guard so the release point is the save itself rather than
+    /// wherever the enclosing scope happens to end.
+    pub async fn save_runtime_locked(
+        &self,
+        _guard: tokio::sync::MutexGuard<'_, ()>,
+        rt: &RuntimeState,
+    ) -> Result<()> {
+        self.save_runtime(rt).await
+    }
+
     pub async fn save_runtime(&self, rt: &RuntimeState) -> Result<()> {
         let db = self.db.lock().await;
         db.execute_batch("BEGIN")
@@ -1066,6 +1093,88 @@ pub type StateManager = Store;
 mod tests {
     use super::*;
     use atim_core::session::{ChatBinding, RuntimeState, SessionInfo, WindowBinding};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn test_save_runtime_locked_frees_the_lock() {
+        // Regression: the guard is consumed by the save, so a later acquisition
+        // must succeed. This times out if the guard is ever leaked instead.
+        let store = test_store("rt-release").await;
+        let guard = store.lock_runtime().await;
+        let rt = store.load_runtime().await.expect("load");
+        store
+            .save_runtime_locked(guard, &rt)
+            .await
+            .expect("save under lock");
+
+        let second =
+            tokio::time::timeout(std::time::Duration::from_secs(1), store.lock_runtime()).await;
+        assert!(second.is_ok(), "save_runtime_locked must release the lock");
+    }
+
+    #[tokio::test]
+    async fn test_save_under_lock_round_trips() {
+        let store = test_store("rt-roundtrip").await;
+        let guard = store.lock_runtime().await;
+        let mut rt = store.load_runtime().await.expect("load");
+        rt.chat_bindings.push(ChatBinding {
+            chat_id: 42,
+            group_chat_id: None,
+            thread_id: 7,
+            user_id: 1,
+            display_name: "t".to_string(),
+            topic_name: None,
+            session_id: "sid".to_string(),
+            reply_at_only: false,
+        });
+        store
+            .save_runtime_locked(guard, &rt)
+            .await
+            .expect("save under lock");
+
+        let after = store.load_runtime().await.expect("reload");
+        assert_eq!(after.chat_bindings.len(), 1);
+        assert_eq!(after.chat_bindings[0].chat_id, 42);
+    }
+
+    #[tokio::test]
+    async fn test_the_runtime_lock_is_exclusive() {
+        // Two whole-runtime read-modify-writes must not interleave — that is
+        // the whole point of the lock, and losing an update here would be
+        // silent.
+        let store = Arc::new(test_store("rt-exclusive").await);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<&'static str>();
+
+        let holder = tokio::spawn({
+            let store = Arc::clone(&store);
+            let tx = tx.clone();
+            async move {
+                let guard = store.lock_runtime().await;
+                tx.send("first-acquired").unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                drop(guard);
+                tx.send("first-released").unwrap();
+            }
+        });
+        let waiter = tokio::spawn({
+            let store = Arc::clone(&store);
+            async move {
+                let _guard = store.lock_runtime().await;
+                tx.send("second-acquired").unwrap();
+            }
+        });
+
+        holder.await.unwrap();
+        waiter.await.unwrap();
+        let mut order: Vec<&'static str> = Vec::new();
+        while let Ok(step) = rx.try_recv() {
+            order.push(step);
+        }
+        assert_eq!(
+            order,
+            vec!["first-acquired", "first-released", "second-acquired"]
+        );
+    }
 
     /// Open a fresh in-memory-ish store in a unique temp directory.
     async fn test_store(suffix: &str) -> Store {

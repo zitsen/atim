@@ -22,6 +22,7 @@ use atim_queue::outbound_queue::OutboundQueue;
 use atim_queue::tool_governor::{self, StormNotice, ToolDecision, ToolStormGuard};
 use atim_state::persistence::StateManager;
 use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 
 use crate::browser;
 use crate::browser::{BrowserMode, DirectoryBrowser};
@@ -44,7 +45,35 @@ pub struct PendingAskQuestions {
 }
 /// Key type for tool_use message tracking: (chat_id, thread_id, tool_use_id).
 type ToolUseMsgKey = (i64, i64, String);
-type ToolUseMsgVal = (MessageId, String);
+
+/// A forwarded tool call, held until its result edits it in place.
+pub struct ToolUseMsg {
+    msg_id: MessageId,
+    original_text: String,
+    /// When the call was forwarded.
+    ///
+    /// An agent that is interrupted mid-call never sends a result, so these are
+    /// swept out on age — otherwise the map grows for as long as the process
+    /// runs. See [`TOOL_USE_MSG_TTL`].
+    forwarded: std::time::Instant,
+}
+
+impl ToolUseMsg {
+    fn new(msg_id: MessageId, original_text: String) -> Self {
+        Self {
+            msg_id,
+            original_text,
+            forwarded: std::time::Instant::now(),
+        }
+    }
+}
+
+/// How long to wait for a tool result before giving up on its message.
+const TOOL_USE_MSG_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Hard ceiling on tracked tool calls, so a storm of unanswered calls cannot
+/// grow the map without limit even inside [`TOOL_USE_MSG_TTL`].
+const TOOL_USE_MSG_CAP: usize = 4096;
 
 /// Terminal manager type used by the server.
 ///
@@ -92,7 +121,7 @@ pub struct Server {
     /// Directory browser for session creation with project navigation.
     pub browser: DirectoryBrowser,
     /// Tool_use message tracking for in-place editing:
-    pub tool_use_msg_ids: Arc<Mutex<HashMap<ToolUseMsgKey, ToolUseMsgVal>>>,
+    pub tool_use_msg_ids: Arc<Mutex<HashMap<ToolUseMsgKey, ToolUseMsg>>>,
     /// Status message tracking for status→content conversion:
     /// key = (chat_id, thread_id) -> whether status has been consumed by first content.
     pub status_consumed: Arc<Mutex<HashSet<(i64, i64)>>>,
@@ -230,6 +259,16 @@ impl Server {
             });
         }
 
+        // Inbound events are handled one task per chat: strictly in order within
+        // a conversation, but concurrently across conversations. Without this a
+        // slow command delays the next message no matter which chat it is for.
+        //
+        // Safe to run concurrently because every whole-runtime read-modify-write
+        // is bracketed by `StateManager::lock_runtime` (see the `save_runtime_locked`
+        // call sites). Those spans were checked to be flat and free of nested
+        // read-modify-write, so the lock cannot deadlock against itself.
+        let lanes: InboundLanes = Arc::new(Mutex::new(HashMap::new()));
+
         // Periodic housekeeping runs on its own task too. Probing every bound
         // window is pure I/O — a `send_chat_action` per forum topic and a tmux
         // capture per window — and doing that on the main loop stalled inbound
@@ -283,9 +322,7 @@ impl Server {
                 // poll over timers and over queued monitor work.
                 biased;
                 Some(event) = im_rx.recv() => {
-                    if let Err(e) = self.handle_im_event(event).await {
-                        tracing::error!("handle_im_event error: {e}");
-                    }
+                    dispatch_inbound(&self, &lanes, event).await;
                 }
                 Some(job) = house_rx.recv() => {
                     if let Err(e) = self.apply_housekeeping(job).await {
@@ -664,7 +701,7 @@ impl Server {
                             if let Some(tuid) = &msg.tool_use_id {
                                 self.tool_use_msg_ids.lock().await.insert(
                                     (chat_id, thread_id_val, tuid.clone()),
-                                    (mid, msg.text.clone()),
+                                    ToolUseMsg::new(mid, msg.text.clone()),
                                 );
                             }
                             continue;
@@ -687,7 +724,7 @@ impl Server {
                             {
                                 self.tool_use_msg_ids.lock().await.insert(
                                     (chat_id, thread_id_val, tuid.clone()),
-                                    (mid, diff_text),
+                                    ToolUseMsg::new(mid, diff_text),
                                 );
                             }
                             continue;
@@ -697,7 +734,7 @@ impl Server {
                         {
                             self.tool_use_msg_ids.lock().await.insert(
                                 (chat_id, thread_id_val, tuid.clone()),
-                                (mid, msg.text.clone()),
+                                ToolUseMsg::new(mid, msg.text.clone()),
                             );
                         }
                     }
@@ -734,7 +771,12 @@ impl Server {
                         } else {
                             None
                         };
-                        if let Some((mid, original_text)) = tracked {
+                        if let Some(ToolUseMsg {
+                            msg_id: mid,
+                            original_text,
+                            ..
+                        }) = tracked
+                        {
                             let is_edit = matches!(
                                 msg.tool_name.as_deref(),
                                 Some("Edit" | "EditTool" | "TextEditTool")
@@ -885,6 +927,7 @@ impl Server {
     async fn apply_session_map_change(&self) -> Result<()> {
         tracing::info!("[pipe] SessionMapChanged — syncing session IDs to window bindings");
         let session_map = self.state_mgr.consume_hook_session_map().await?;
+        let _rt_guard = self.state_mgr.lock_runtime().await;
         let mut rt = self.state_mgr.load_runtime().await?;
         let mut synced = 0;
         for (window_id, session_id) in &session_map {
@@ -944,7 +987,7 @@ impl Server {
             }
         }
         tracing::info!("[pipe] SessionMapChanged: synced {synced} entries");
-        self.state_mgr.save_runtime(&rt).await?;
+        self.state_mgr.save_runtime_locked(_rt_guard, &rt).await?;
         Ok(())
     }
 
@@ -1124,6 +1167,7 @@ impl Server {
                         && !wb.map(|w| w.session_id.is_empty()).unwrap_or(true)
                     {
                         let old_sid = wb.map(|w| w.session_id.clone()).unwrap_or_default();
+                        let _rt_guard = self.state_mgr.lock_runtime().await;
                         let mut rt = self.state_mgr.load_runtime().await?;
                         if let Some(wb2) = rt.window_bindings.get_mut(&wid_str_owned) {
                             wb2.session_id.clear();
@@ -1133,7 +1177,7 @@ impl Server {
                                 cb.session_id.clear();
                             }
                         }
-                        self.state_mgr.save_runtime(&rt).await?;
+                        self.state_mgr.save_runtime_locked(_rt_guard, &rt).await?;
                         if let Ok(mut map) = self.state_mgr.load_session_map().await {
                             map.remove(&wid_str_owned);
                             if let Err(e) = self.state_mgr.save_session_map(&map).await {
@@ -1160,6 +1204,7 @@ impl Server {
 
                     // Phase 4: update bindings with new UUID
                     if let Some(ref sid) = new_sid {
+                        let _rt_guard = self.state_mgr.lock_runtime().await;
                         let mut rt = self.state_mgr.load_runtime().await?;
                         if let Some(wb2) = rt.window_bindings.get_mut(&wid_str_owned) {
                             wb2.session_id = sid.clone();
@@ -1169,7 +1214,7 @@ impl Server {
                                 cb.session_id = sid.clone();
                             }
                         }
-                        self.state_mgr.save_runtime(&rt).await?;
+                        self.state_mgr.save_runtime_locked(_rt_guard, &rt).await?;
                         if let Ok(mut map) = self.state_mgr.load_session_map().await {
                             map.insert(wid_str_owned.clone(), sid.clone());
                             if let Err(e) = self.state_mgr.save_session_map(&map).await {
@@ -1312,12 +1357,13 @@ impl Server {
                 }
 
                 // Update window binding via V2
+                let _rt_guard = self.state_mgr.lock_runtime().await;
                 let mut rt = self.state_mgr.load_runtime().await?;
                 if let Some(wb) = rt.window_bindings.get_mut(wid_str) {
                     wb.agent_type = agent.name().to_string();
                     wb.session_id = String::new();
                 }
-                self.state_mgr.save_runtime(&rt).await?;
+                self.state_mgr.save_runtime_locked(_rt_guard, &rt).await?;
                 // Also clear session_id from session_map so SessionMapChanged won't re-fill
                 if let Ok(mut map) = self.state_mgr.load_session_map().await
                     && map.remove(wid_str).is_some()
@@ -1446,6 +1492,7 @@ impl Server {
                 }
 
                 // 3. Load mutable runtime and remove bindings
+                let _rt_guard = self.state_mgr.lock_runtime().await;
                 let mut rt = self.state_mgr.load_runtime().await?;
 
                 // Remove chat binding by (user_id, thread_id)
@@ -1465,7 +1512,7 @@ impl Server {
                     }
                 }
 
-                self.state_mgr.save_runtime(&rt).await?;
+                self.state_mgr.save_runtime_locked(_rt_guard, &rt).await?;
 
                 let _ = self
                     .im_adapter
@@ -1738,6 +1785,7 @@ impl Server {
 
                 // Load a fresh mutable runtime snapshot for all reads and mutations in this handler.
                 // Using a single rt avoids lost-update bugs from multiple load/save pairs.
+                let _rt_guard = self.state_mgr.lock_runtime().await;
                 let mut rebind_rt = self.state_mgr.load_runtime().await?;
 
                 // Detect running agent (owned Strings to avoid borrow issues during later mutations)
@@ -1965,7 +2013,9 @@ impl Server {
                 }
 
                 // Single save — all mutations above are on the same rebind_rt snapshot.
-                self.state_mgr.save_runtime(&rebind_rt).await?;
+                self.state_mgr
+                    .save_runtime_locked(_rt_guard, &rebind_rt)
+                    .await?;
 
                 // Sync session_map
                 if let Some(ref sid) = discovered_sid {
@@ -2305,6 +2355,7 @@ impl Server {
                 );
                 // Update V2 runtime so future lookups work without retrying name search
                 if !binding.session_id.is_empty() {
+                    let _rt_guard = self.state_mgr.lock_runtime().await;
                     let mut rt = self.state_mgr.load_runtime().await?;
                     // Remove stale window_binding if we had one
                     if !window_id_str.is_empty() {
@@ -2331,7 +2382,7 @@ impl Server {
                             window_name: binding.display_name.clone(),
                         },
                     );
-                    self.state_mgr.save_runtime(&rt).await?;
+                    self.state_mgr.save_runtime_locked(_rt_guard, &rt).await?;
                 }
                 window_id_str = real_wid;
             }
@@ -2498,6 +2549,7 @@ impl Server {
                                     != wb_opt.map(|wb| wb.session_id.as_str())
                             {
                                 if let Some(sid) = map.get(&window_id_str) {
+                                    let _rt_guard = self.state_mgr.lock_runtime().await;
                                     let mut rt = self.state_mgr.load_runtime().await?;
                                     if let Some(wb) = rt.window_bindings.get_mut(&window_id_str) {
                                         wb.session_id = sid.clone();
@@ -2506,7 +2558,7 @@ impl Server {
                                             window_id_str,
                                         );
                                     }
-                                    self.state_mgr.save_runtime(&rt).await?;
+                                    self.state_mgr.save_runtime_locked(_rt_guard, &rt).await?;
                                 }
                                 break;
                             }
@@ -2590,11 +2642,14 @@ impl Server {
                                 "[handle_text_message] Fixing empty agent_type → '{running_agent}' for window {}",
                                 window_id_str,
                             );
+                            let _rt_guard = self.state_mgr.lock_runtime().await;
                             if let Ok(mut rt) = self.state_mgr.load_runtime().await
                                 && let Some(wb) = rt.window_bindings.get_mut(&window_id_str)
                             {
                                 wb.agent_type = running_agent.to_string();
-                                if let Err(e) = self.state_mgr.save_runtime(&rt).await {
+                                if let Err(e) =
+                                    self.state_mgr.save_runtime_locked(_rt_guard, &rt).await
+                                {
                                     tracing::warn!(
                                         "[handle_text_message] Failed to save runtime after agent_type fix: {e}"
                                     );
@@ -2638,6 +2693,7 @@ impl Server {
                         && let Some(agent) = self.config.agent_registry.get("copilot")
                         && let Ok(Some(sid)) = agent.discover_session_by_pid(&window_id.0)
                     {
+                        let _rt_guard = self.state_mgr.lock_runtime().await;
                         let mut rt = self.state_mgr.load_runtime().await?;
                         if let Some(wb) = rt.window_bindings.get_mut(&window_id_str) {
                             wb.session_id = sid.clone();
@@ -2646,7 +2702,7 @@ impl Server {
                                 window_id_str,
                             );
                         }
-                        self.state_mgr.save_runtime(&rt).await?;
+                        self.state_mgr.save_runtime_locked(_rt_guard, &rt).await?;
                     }
 
                     let is_copilot = wb_opt.map(|wb| wb.agent_type == "copilot").unwrap_or(false);
@@ -4685,6 +4741,7 @@ impl Server {
         drop(pending);
 
         // Find and kill the associated tmux window, then remove binding
+        let _rt_guard = self.state_mgr.lock_runtime().await;
         let mut rt = self.state_mgr.load_runtime().await?;
         // Collect window_ids matching this (chat_id, thread_id) across all users
         let window_ids: Vec<String> = rt
@@ -4714,7 +4771,7 @@ impl Server {
             .collect();
         rt.window_bindings
             .retain(|_, wb| active_sessions.contains(&wb.session_id));
-        self.state_mgr.save_runtime(&rt).await?;
+        self.state_mgr.save_runtime_locked(_rt_guard, &rt).await?;
         Ok(())
     }
 
@@ -4731,6 +4788,7 @@ impl Server {
         drop(names);
 
         // Update in persisted binding and rename tmux window
+        let _rt_guard = self.state_mgr.lock_runtime().await;
         let mut rt = self.state_mgr.load_runtime().await?;
 
         // Collect session_ids before mutating to avoid borrow conflict
@@ -4759,7 +4817,7 @@ impl Server {
                 }
             }
         }
-        self.state_mgr.save_runtime(&rt).await?;
+        self.state_mgr.save_runtime_locked(_rt_guard, &rt).await?;
         Ok(())
     }
 
@@ -4828,6 +4886,7 @@ impl Server {
     /// main loop: the IM handlers do their own load-modify-save cycles and would
     /// otherwise silently lose whichever of the two saved last.
     async fn cleanup_deleted_topics(&self, deleted: &[DeletedTopic]) -> Result<()> {
+        let _rt_guard = self.state_mgr.lock_runtime().await;
         let mut rt = self.state_mgr.load_runtime().await?;
         for topic in deleted {
             let (chat_id, thread_id, session_id) =
@@ -4860,7 +4919,7 @@ impl Server {
             .collect();
         rt.window_bindings
             .retain(|_, wb| active_sessions.contains(&wb.session_id));
-        self.state_mgr.save_runtime(&rt).await?;
+        self.state_mgr.save_runtime_locked(_rt_guard, &rt).await?;
 
         Ok(())
     }
@@ -4889,17 +4948,31 @@ impl Server {
             .retain(|wid, _| live_windows.contains(wid));
 
         // Clean up tool_use message tracking for bindings that are gone
-        // (e.g. session unbound), preventing unbounded growth when an agent
-        // is interrupted before a ToolResult arrives.
+        // (e.g. session unbound) and for calls whose result never arrived
+        // (e.g. an agent interrupted mid-call), preventing unbounded growth.
         let live_chats: HashSet<(i64, i64)> = rt
             .chat_bindings
             .iter()
             .map(|cb| (cb.group_chat_id.unwrap_or(cb.chat_id), cb.thread_id))
             .collect();
-        self.tool_use_msg_ids
-            .lock()
-            .await
-            .retain(|(chat_id, tid, _), _| live_chats.contains(&(*chat_id, *tid)));
+        {
+            let mut tracked = self.tool_use_msg_ids.lock().await;
+            tracked.retain(|(chat_id, tid, _), m| {
+                live_chats.contains(&(*chat_id, *tid)) && m.forwarded.elapsed() < TOOL_USE_MSG_TTL
+            });
+            // Still over the ceiling after ageing out? Drop the oldest calls —
+            // the worst case is a tool result that edits nothing, not a leak.
+            while tracked.len() > TOOL_USE_MSG_CAP {
+                let Some(oldest) = tracked
+                    .iter()
+                    .min_by_key(|(_, m)| m.forwarded)
+                    .map(|(k, _)| k.clone())
+                else {
+                    break;
+                };
+                tracked.remove(&oldest);
+            }
+        }
 
         // Deduplicate by window_id: when multiple chat bindings share the same
         // session, only probe the last binding per window to avoid sending
@@ -5430,6 +5503,12 @@ const BOX_DRAWING: &[char] = &[
 ];
 
 /// Transcribe an OGG voice message using OpenAI's gpt-4o-transcribe model.
+/// Inbound lanes, one per chat: `(sender, last used)`.
+type InboundLanes = Arc<Mutex<HashMap<i64, (mpsc::UnboundedSender<ImEvent>, std::time::Instant)>>>;
+
+/// How long an idle lane is kept before its worker is allowed to finish.
+const LANE_IDLE: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// Bucket a chat for the tool-output governor.
 ///
 /// Both ends derive it from the same `MessageTarget` — the session output side
@@ -5437,6 +5516,41 @@ const BOX_DRAWING: &[char] = &[
 /// the user speaking up ends the run that is holding their output back.
 fn storm_key(target: &MessageTarget) -> (i64, i64) {
     (target.chat_id.0, target.thread_id.map(|t| t.0).unwrap_or(0))
+}
+
+/// Hand `event` to its chat's lane, starting one on first use.
+///
+/// A chat gets exactly one worker draining its events in arrival order, so
+/// ordering within a conversation is preserved while different conversations
+/// proceed independently. Evicting an idle lane drops its sender, which lets
+/// the worker finish.
+async fn dispatch_inbound(server: &Arc<Server>, lanes: &InboundLanes, event: ImEvent) {
+    let chat = event.target.chat_id.0;
+    let now = std::time::Instant::now();
+    let tx = {
+        let mut map = lanes.lock().await;
+        map.retain(|_, (_, seen)| now.duration_since(*seen) < LANE_IDLE);
+        if let Some((tx, seen)) = map.get_mut(&chat) {
+            *seen = now;
+            tx.clone()
+        } else {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let server = Arc::clone(server);
+            tokio::spawn(async move {
+                while let Some(ev) = rx.recv().await {
+                    if let Err(e) = server.handle_im_event(ev).await {
+                        tracing::error!("handle_im_event error: {e}");
+                    }
+                }
+                // Ends when the lane is evicted and its sender dropped.
+            });
+            map.insert(chat, (tx.clone(), now));
+            tx
+        }
+    };
+    if tx.send(event).is_err() {
+        tracing::warn!("[pipe] inbound lane for chat {chat} is gone; dropping event");
+    }
 }
 
 /// Transcribe a voice note and report it back to the chat.

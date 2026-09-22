@@ -48,6 +48,7 @@ impl super::Server {
         text: &str,
         msg_id: &MessageId,
     ) -> Result<()> {
+        let _rt_guard = self.state_mgr.lock_runtime().await;
         let mut rt = self.state_mgr.load_runtime().await?;
 
         // Match by chat_id — the only stable Feishu session identifier.
@@ -309,7 +310,7 @@ impl super::Server {
             self.byte_offsets.lock().await.remove(&session_id);
         }
 
-        self.state_mgr.save_runtime(&rt).await?;
+        self.state_mgr.save_runtime_locked(_rt_guard, &rt).await?;
 
         // For fresh sessions, resolve session_id FIRST (like create_and_bind_in_dir).
         // This both establishes routing AND gives the agent time to initialize
@@ -388,6 +389,7 @@ impl super::Server {
             return Ok(());
         }
 
+        let _rt_guard = self.state_mgr.lock_runtime().await;
         let mut rt = self.state_mgr.load_runtime().await?;
         if let Some(cb) = rt
             .chat_bindings
@@ -408,7 +410,7 @@ impl super::Server {
                 let wid = WindowId(wb.window_id.clone());
                 let _ = self.tmux_mgr.rename_window(&wid, new_name).await;
             }
-            self.state_mgr.save_runtime(&rt).await?;
+            self.state_mgr.save_runtime_locked(_rt_guard, &rt).await?;
         }
         Ok(())
     }
@@ -421,6 +423,7 @@ impl super::Server {
         thread_id: i64,
         agent_name: &str,
     ) -> Result<()> {
+        let _rt_guard = self.state_mgr.lock_runtime().await;
         let mut rt = self.state_mgr.load_runtime().await?;
         if let Some(cb) = rt
             .chat_bindings
@@ -433,7 +436,7 @@ impl super::Server {
                 .find(|wb| wb.session_id == cb.session_id)
         {
             wb.agent_type = agent_name.to_string();
-            self.state_mgr.save_runtime(&rt).await?;
+            self.state_mgr.save_runtime_locked(_rt_guard, &rt).await?;
         }
         Ok(())
     }
@@ -810,6 +813,7 @@ impl super::Server {
                         .send_message(target, "Usage: `/atim chdir <name> <dir>`")
                         .await;
                 } else {
+                    let _rt_guard = self.state_mgr.lock_runtime().await;
                     let mut rt = self.state_mgr.load_runtime().await?;
                     let found = rt
                         .window_bindings
@@ -819,7 +823,7 @@ impl super::Server {
                         Some(wb) => {
                             let old = wb.cwd.clone();
                             wb.cwd = dir.to_string();
-                            self.state_mgr.save_runtime(&rt).await?;
+                            self.state_mgr.save_runtime_locked(_rt_guard, &rt).await?;
                             let _ = self
                                 .im_adapter
                                 .send_message(
@@ -848,6 +852,7 @@ impl super::Server {
                         .send_message(target, "Usage: `/atim rm <name>`")
                         .await;
                 } else {
+                    let _rt_guard = self.state_mgr.lock_runtime().await;
                     let mut rt = self.state_mgr.load_runtime().await?;
                     // Find window binding by name
                     let wid = rt
@@ -869,7 +874,7 @@ impl super::Server {
                             if let Err(e) = self.state_mgr.save_session_map(&map).await {
                                 tracing::warn!("[rm] Failed to save session_map: {e}");
                             }
-                            self.state_mgr.save_runtime(&rt).await?;
+                            self.state_mgr.save_runtime_locked(_rt_guard, &rt).await?;
                             // Close tmux window if it still exists
                             let window_id = atim_core::message::WindowId(wid.clone());
                             if self.tmux_mgr.window_exists(&window_id).await {
@@ -1100,6 +1105,7 @@ impl super::Server {
                     }
                 };
                 let thread_id = target.thread_id.map(|t| t.0).unwrap_or(0);
+                let _rt_guard = self.state_mgr.lock_runtime().await;
                 let mut rt = match self.state_mgr.load_runtime().await {
                     Ok(rt) => rt,
                     Err(e) => {
@@ -1116,7 +1122,7 @@ impl super::Server {
                     .find(|b| b.user_id == user_id && b.thread_id == thread_id)
                 {
                     cb.reply_at_only = val;
-                    if let Err(e) = self.state_mgr.save_runtime(&rt).await {
+                    if let Err(e) = self.state_mgr.save_runtime_locked(_rt_guard, &rt).await {
                         let _ = self
                             .im_adapter
                             .send_message(target, &format!("Failed to save config: {e}"))
