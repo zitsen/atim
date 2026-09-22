@@ -445,6 +445,7 @@ async fn main() -> anyhow::Result<()> {
         pending_ask_questions: Arc::new(Mutex::new(std::collections::HashMap::new())),
         welcome_sent: Arc::new(Mutex::new(std::collections::HashSet::new())),
         fold: Arc::new(Mutex::new(atim_queue::chatter_folder::ChatterFolder::new())),
+        tool_governor: Arc::new(Mutex::new(atim_queue::tool_governor::ToolStormGuard::new())),
     });
 
     // 8. Enter main event loop — wait for SIGINT (or SIGTERM on unix)

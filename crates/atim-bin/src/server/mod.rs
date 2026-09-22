@@ -19,6 +19,7 @@ use atim_monitor::monitor::{MonitorEvent, resolve_jsonl};
 use atim_queue::chatter_folder::{ChatterFolder, CounterUpdate, FoldKey, FoldPlan, foldable};
 use atim_queue::message_queue::MessageQueue;
 use atim_queue::outbound_queue::OutboundQueue;
+use atim_queue::tool_governor::{self, StormNotice, ToolDecision, ToolStormGuard};
 use atim_state::persistence::StateManager;
 use tokio::sync::Mutex;
 
@@ -116,6 +117,8 @@ pub struct Server {
     pub welcome_sent: Arc<Mutex<HashSet<i64>>>,
     /// Folds repeated identical tool calls into one message with a counter.
     pub fold: Arc<Mutex<ChatterFolder>>,
+    /// Holds tool output back when a chat is being flooded, and summarises it.
+    pub tool_governor: Arc<Mutex<ToolStormGuard>>,
 }
 
 /// Maximum Telegram message length for merged content.
@@ -198,16 +201,17 @@ impl Server {
             let server = Arc::clone(&self);
             let out = Arc::clone(&out);
             tokio::spawn(async move {
-                // Also drives the repeat-counter backstop: a folded run that
-                // stops needs its true total written out, and that is IM I/O so
-                // it must not happen on the main event loop either.
-                let mut idle = tokio::time::interval(Duration::from_secs(
-                    atim_queue::chatter_folder::IDLE_FLUSH_SECS,
-                ));
+                // Also drives the upkeep that has to happen even when nothing
+                // is arriving: rewriting folded call counters that have gone
+                // quiet, and ending tool-output runs (which is where their
+                // digest and closing summary come from).
+                //
+                // No `biased` here on purpose: with one the tick starves exactly
+                // during a storm, which is when the run's digest is wanted.
+                let mut idle = tokio::time::interval(Duration::from_secs(5));
                 idle.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
                     tokio::select! {
-                        biased;
                         batch = out.pop() => match batch {
                             Some(messages) => {
                                 if let Err(e) = server.handle_session_output(messages).await {
@@ -216,7 +220,10 @@ impl Server {
                             }
                             None => break,
                         },
-                        _ = idle.tick() => server.flush_fold_counters().await,
+                        _ = idle.tick() => {
+                            server.flush_fold_counters().await;
+                            server.poll_storm_runs().await;
+                        }
                     }
                 }
                 // Ends when `run` closes the queue on shutdown.
@@ -336,6 +343,13 @@ impl Server {
                 is_group,
                 message_id,
             } => {
+                // The user is engaging, so end any tool-output run for this chat.
+                // A run that got hard-locked — a storm too long to end on its
+                // own — only ever ends this way.
+                self.tool_governor
+                    .lock()
+                    .await
+                    .note_inbound(storm_key(&event.target));
                 self.handle_text_message(
                     event.target,
                     event.user_id.0,
@@ -619,6 +633,26 @@ impl Server {
                         {
                             continue;
                         }
+                        // A flood of tool output is held back and summarised
+                        // rather than drowning the chat. Interactive prompts are
+                        // exempt — the user has to be able to answer them.
+                        if msg.tool_name.as_deref() != Some("AskUserQuestion") {
+                            let (decision, notice) = {
+                                let mut governor = self.tool_governor.lock().await;
+                                governor.observe(
+                                    storm_key(&target),
+                                    &tool_governor::label_from_summary(&msg.text),
+                                    msg.tool_use_id.as_deref(),
+                                    std::time::Instant::now(),
+                                )
+                            };
+                            if let Some(notice) = notice {
+                                self.post_storm_notice(&target, notice).await;
+                            }
+                            if decision == ToolDecision::Hold {
+                                continue;
+                            }
+                        }
                         flush!();
                         // AskUserQuestion: send interactive card with option buttons
                         if msg.tool_name.as_deref() == Some("AskUserQuestion")
@@ -673,6 +707,18 @@ impl Server {
                             .tool_use_id
                             .as_deref()
                             .is_some_and(|t| folded.contains(t))
+                        {
+                            continue;
+                        }
+                        // …and so does the output of a call the storm guard held
+                        // back, otherwise the chat gets a result with no call in
+                        // front of it.
+                        if let Some(tuid) = msg.tool_use_id.as_deref()
+                            && self
+                                .tool_governor
+                                .lock()
+                                .await
+                                .take_held_result(storm_key(&target), tuid)
                         {
                             continue;
                         }
@@ -756,6 +802,43 @@ impl Server {
             }
         }
         Ok(())
+    }
+
+    /// Tell the chat that the tool-output policy changed.
+    ///
+    /// Goes out as a normal message, never as chatter: if output is being
+    /// withheld the user has to know, so this is not something flood control
+    /// may shed.
+    async fn post_storm_notice(&self, target: &MessageTarget, notice: StormNotice) {
+        if let Err(e) = self
+            .im_adapter
+            .send_message(target, &tool_governor::render(&notice))
+            .await
+        {
+            tracing::warn!("[pipe] Failed to post tool-output notice: {e}");
+        }
+    }
+
+    /// Close tool-output runs that have gone quiet, and summarise them.
+    ///
+    /// Driven by the delivery task's tick so it never runs on the main loop.
+    async fn poll_storm_runs(&self) {
+        let notices = {
+            let mut governor = self.tool_governor.lock().await;
+            governor.poll_all(std::time::Instant::now())
+        };
+        for ((chat_id, thread_id_val), notice) in notices {
+            let target = MessageTarget {
+                chat_id: ChatId(chat_id),
+                thread_id: if thread_id_val != 0 {
+                    Some(ThreadId(thread_id_val))
+                } else {
+                    None
+                },
+                chat_name: None,
+            };
+            self.post_storm_notice(&target, notice).await;
+        }
     }
 
     /// Write out a folded call's repeat counter.
@@ -5347,6 +5430,15 @@ const BOX_DRAWING: &[char] = &[
 ];
 
 /// Transcribe an OGG voice message using OpenAI's gpt-4o-transcribe model.
+/// Bucket a chat for the tool-output governor.
+///
+/// Both ends derive it from the same `MessageTarget` — the session output side
+/// builds one from the chat binding, the inbound side has one from the IM — so
+/// the user speaking up ends the run that is holding their output back.
+fn storm_key(target: &MessageTarget) -> (i64, i64) {
+    (target.chat_id.0, target.thread_id.map(|t| t.0).unwrap_or(0))
+}
+
 /// Transcribe a voice note and report it back to the chat.
 ///
 /// Runs off the main event loop: the OpenAI call takes seconds, and holding the

@@ -2,3 +2,4 @@ pub mod chatter_folder;
 pub mod flood_control;
 pub mod message_queue;
 pub mod outbound_queue;
+pub mod tool_governor;
