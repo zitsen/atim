@@ -55,6 +55,23 @@ pub type TerminalMgr = Arc<dyn TerminalManager>;
 /// (user_id, thread_id, created_at). Created_at enables stale-token cleanup.
 type CallbackCtx = (i64, i64, std::time::Instant);
 
+/// A forum topic that answered the existence probe as gone.
+pub struct DeletedTopic {
+    chat_id: i64,
+    thread_id: i64,
+    session_id: String,
+}
+
+/// Work the housekeeping task found that has to be applied on the main loop.
+///
+/// The probes themselves are pure I/O and run in the background, but acting on
+/// their findings means rewriting the whole runtime state. That must stay
+/// serialized with the IM handlers — which also load-modify-save — or one side
+/// silently loses the other's updates.
+pub enum Housekeeping {
+    TopicsDeleted(Vec<DeletedTopic>),
+}
+
 /// The main application server — routes IM events to tmux and monitor
 /// events back to IM.
 pub struct Server {
@@ -206,16 +223,52 @@ impl Server {
             });
         }
 
-        // Periodically probe for deleted topics (every 60s)
-        let mut probe_interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        probe_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        // Periodically check for interactive UIs (every 5s)
-        let mut ui_interval = tokio::time::interval(std::time::Duration::from_secs(5));
-        ui_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        // Periodically clean up stale callback tokens (every 10 min) to prevent
-        // unbounded growth when users never tap the inline keyboard buttons.
-        let mut cleanup_interval = tokio::time::interval(std::time::Duration::from_secs(600));
-        cleanup_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Periodic housekeeping runs on its own task too. Probing every bound
+        // window is pure I/O — a `send_chat_action` per forum topic and a tmux
+        // capture per window — and doing that on the main loop stalled inbound
+        // messages every few seconds. Acting on the findings is not pure, so
+        // those come back here via `house_rx` (see `Housekeeping`).
+        let (house_tx, mut house_rx) = tokio::sync::mpsc::unbounded_channel::<Housekeeping>();
+        {
+            let server = Arc::clone(&self);
+            tokio::spawn(async move {
+                let mut topic_interval = tokio::time::interval(Duration::from_secs(60));
+                let mut ui_interval = tokio::time::interval(Duration::from_secs(5));
+                // Clean up stale callback tokens (every 10 min) to prevent
+                // unbounded growth when users never tap the inline keyboard buttons.
+                let mut cleanup_interval = tokio::time::interval(Duration::from_secs(600));
+                for i in [&mut topic_interval, &mut ui_interval, &mut cleanup_interval] {
+                    i.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                }
+                loop {
+                    tokio::select! {
+                        _ = topic_interval.tick() => {
+                            let deleted = server.probe_topic_deletions().await;
+                            if !deleted.is_empty()
+                                && house_tx.send(Housekeeping::TopicsDeleted(deleted)).is_err()
+                            {
+                                break; // main loop is gone; nothing left to serve
+                            }
+                        }
+                        _ = ui_interval.tick() => {
+                            if let Err(e) = server.probe_interactive_uis().await {
+                                tracing::error!("probe_interactive_uis error: {e}");
+                            }
+                        }
+                        _ = cleanup_interval.tick() => {
+                            let mut guard = server.callback_contexts.lock().await;
+                            let removed = Self::cleanup_stale_callback_tokens(
+                                &mut guard,
+                                Duration::from_secs(600),
+                            );
+                            if removed > 0 {
+                                tracing::info!("Cleaned up {removed} stale callback tokens");
+                            }
+                        }
+                    }
+                }
+            });
+        }
 
         loop {
             tokio::select! {
@@ -227,29 +280,14 @@ impl Server {
                         tracing::error!("handle_im_event error: {e}");
                     }
                 }
+                Some(job) = house_rx.recv() => {
+                    if let Err(e) = self.apply_housekeeping(job).await {
+                        tracing::error!("apply_housekeeping error: {e}");
+                    }
+                }
                 Some(event) = monitor_rx.recv() => {
                     if let Err(e) = self.handle_monitor_event(event, &out).await {
                         tracing::error!("handle_monitor_event error: {e}");
-                    }
-                }
-                _ = probe_interval.tick() => {
-                    if let Err(e) = self.probe_topic_deletions().await {
-                        tracing::error!("probe_topic_deletions error: {e}");
-                    }
-                }
-                _ = ui_interval.tick() => {
-                    if let Err(e) = self.probe_interactive_uis().await {
-                        tracing::error!("probe_interactive_uis error: {e}");
-                    }
-                }
-                _ = cleanup_interval.tick() => {
-                    let mut guard = self.callback_contexts.lock().await;
-                    let removed = Self::cleanup_stale_callback_tokens(
-                        &mut guard,
-                        std::time::Duration::from_secs(600),
-                    );
-                    if removed > 0 {
-                        tracing::info!("Cleaned up {removed} stale callback tokens");
                     }
                 }
                 else => break,
@@ -330,56 +368,16 @@ impl Server {
                     tracing::warn!("Empty voice data, skipping");
                     return Ok(());
                 }
-                let status_msg = self
-                    .im_adapter
-                    .send_message(&event.target, "🎤 Transcribing voice message...")
-                    .await;
-                match transcribe_voice(
-                    &self.config.openai_api_key,
-                    &self.config.openai_base_url,
-                    &data,
-                )
-                .await
-                {
-                    Ok(text) => {
-                        if text.is_empty() {
-                            if let Ok(ref mid) = status_msg {
-                                let _ = self
-                                    .im_adapter
-                                    .edit_message(
-                                        &event.target,
-                                        mid,
-                                        "🎤 Transcription returned empty text.",
-                                    )
-                                    .await;
-                            }
-                        } else {
-                            if let Ok(ref mid) = status_msg {
-                                let _ = self
-                                    .im_adapter
-                                    .edit_message(
-                                        &event.target,
-                                        mid,
-                                        &format!("🎤 *Transcribed:*\n{text}"),
-                                    )
-                                    .await;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("Voice transcription failed: {e}");
-                        if let Ok(ref mid) = status_msg {
-                            let _ = self
-                                .im_adapter
-                                .edit_message(
-                                    &event.target,
-                                    mid,
-                                    &format!("🎤 Transcription failed: {e}"),
-                                )
-                                .await;
-                        }
-                    }
-                }
+                // Transcription is a multi-second HTTP call and touches no
+                // runtime state. Running it here would stall every other
+                // inbound message behind it.
+                tokio::spawn(run_voice_transcription(
+                    self.im_adapter.clone(),
+                    event.target.clone(),
+                    self.config.openai_api_key.clone(),
+                    self.config.openai_base_url.clone(),
+                    data,
+                ));
             }
             ImEventKind::TopicCreated { name } => {
                 let mut names = self.topic_names.lock().await;
@@ -948,23 +946,15 @@ impl Server {
                 }
                 let window_id = atim_core::message::WindowId(wid_str.to_string());
                 if self.tmux_mgr.window_exists(&window_id).await {
-                    let _ = self.im_adapter.send_chat_action(&target).await;
-                    match self.tmux_mgr.screenshot(&window_id).await {
-                        Ok(png_data) => {
-                            tracing::info!("Screenshot generated: {} bytes", png_data.len());
-                            if let Err(e) = self
-                                .im_adapter
-                                .send_photo(&target, "terminal.png", &png_data)
-                                .await
-                            {
-                                tracing::error!("Failed to send screenshot: {e}");
-                            }
-                        }
-                        Err(e) => {
-                            let msg = format!("Screenshot failed: {e}");
-                            let _ = self.im_adapter.send_message(&target, &msg).await;
-                        }
-                    }
+                    // Rendering and uploading a terminal PNG takes long enough
+                    // to stall other inbound messages, and it touches no
+                    // runtime state — so run it off the main loop.
+                    tokio::spawn(send_screenshot(
+                        self.tmux_mgr.clone(),
+                        self.im_adapter.clone(),
+                        target.clone(),
+                        window_id,
+                    ));
                 } else {
                     let _ = self
                         .im_adapter
@@ -4694,9 +4684,19 @@ impl Server {
     ///
     /// Uses `send_chat_action` as a lightweight probe. If the topic was
     /// deleted, Telegram returns an error and we treat it as a topic close.
-    async fn probe_topic_deletions(&self) -> Result<()> {
-        let rt = self.state_mgr.load_runtime().await?;
-        let mut deleted: Vec<(i64, i64, String)> = Vec::new();
+    ///
+    /// Pure I/O — one round trip per forum topic — so it runs on the housekeeping
+    /// task. Findings are reported back and applied on the main loop, where
+    /// they cannot interleave with the handlers' own load-modify-save cycles.
+    async fn probe_topic_deletions(&self) -> Vec<DeletedTopic> {
+        let rt = match self.state_mgr.load_runtime().await {
+            Ok(rt) => rt,
+            Err(e) => {
+                tracing::warn!("probe_topic_deletions: load_runtime failed: {e}");
+                return Vec::new();
+            }
+        };
+        let mut deleted: Vec<DeletedTopic> = Vec::new();
 
         for binding in &rt.chat_bindings {
             if binding.thread_id == 0 {
@@ -4720,49 +4720,64 @@ impl Server {
                         chat_id,
                         binding.thread_id,
                     );
-                    deleted.push((
-                        binding.chat_id,
-                        binding.thread_id,
-                        binding.session_id.clone(),
-                    ));
+                    deleted.push(DeletedTopic {
+                        chat_id: binding.chat_id,
+                        thread_id: binding.thread_id,
+                        session_id: binding.session_id.clone(),
+                    });
                 }
             }
         }
 
-        // Clean up deleted topics
-        if !deleted.is_empty() {
-            let mut rt = self.state_mgr.load_runtime().await?;
-            for (chat_id, thread_id, session_id) in &deleted {
-                // Kill the window if we can find it
-                if !session_id.is_empty() {
-                    let dead_windows: Vec<String> = rt
-                        .window_bindings
-                        .values()
-                        .filter(|wb| &wb.session_id == session_id)
-                        .map(|wb| wb.window_id.clone())
-                        .collect();
-                    for wid_str in &dead_windows {
-                        let wid = WindowId(wid_str.clone());
-                        if let Err(e) = self.tmux_mgr.kill_window(&wid).await {
-                            tracing::debug!("Error killing stale window {}: {e}", wid.0);
-                        }
+        deleted
+    }
+
+    /// Apply a finding from the housekeeping task. Runs on the main event loop.
+    async fn apply_housekeeping(&self, job: Housekeeping) -> Result<()> {
+        match job {
+            Housekeeping::TopicsDeleted(deleted) => self.cleanup_deleted_topics(&deleted).await,
+        }
+    }
+
+    /// Drop bindings for forum topics that no longer exist.
+    ///
+    /// This rewrites the whole runtime state, so it deliberately runs on the
+    /// main loop: the IM handlers do their own load-modify-save cycles and would
+    /// otherwise silently lose whichever of the two saved last.
+    async fn cleanup_deleted_topics(&self, deleted: &[DeletedTopic]) -> Result<()> {
+        let mut rt = self.state_mgr.load_runtime().await?;
+        for topic in deleted {
+            let (chat_id, thread_id, session_id) =
+                (topic.chat_id, topic.thread_id, &topic.session_id);
+            // Kill the window if we can find it
+            if !session_id.is_empty() {
+                let dead_windows: Vec<String> = rt
+                    .window_bindings
+                    .values()
+                    .filter(|wb| &wb.session_id == session_id)
+                    .map(|wb| wb.window_id.clone())
+                    .collect();
+                for wid_str in &dead_windows {
+                    let wid = WindowId(wid_str.clone());
+                    if let Err(e) = self.tmux_mgr.kill_window(&wid).await {
+                        tracing::debug!("Error killing stale window {}: {e}", wid.0);
                     }
                 }
-                rt.chat_bindings
-                    .retain(|b| !(b.chat_id == *chat_id && b.thread_id == *thread_id));
-                tracing::info!("Cleaned up deleted topic: chat={chat_id} thread={thread_id}");
             }
-            // Clean up orphaned window_bindings
-            let active_sessions: std::collections::HashSet<String> = rt
-                .chat_bindings
-                .iter()
-                .map(|b| b.session_id.clone())
-                .filter(|s| !s.is_empty())
-                .collect();
-            rt.window_bindings
-                .retain(|_, wb| active_sessions.contains(&wb.session_id));
-            self.state_mgr.save_runtime(&rt).await?;
+            rt.chat_bindings
+                .retain(|b| !(b.chat_id == chat_id && b.thread_id == thread_id));
+            tracing::info!("Cleaned up deleted topic: chat={chat_id} thread={thread_id}");
         }
+        // Clean up orphaned window_bindings
+        let active_sessions: std::collections::HashSet<String> = rt
+            .chat_bindings
+            .iter()
+            .map(|b| b.session_id.clone())
+            .filter(|s| !s.is_empty())
+            .collect();
+        rt.window_bindings
+            .retain(|_, wb| active_sessions.contains(&wb.session_id));
+        self.state_mgr.save_runtime(&rt).await?;
 
         Ok(())
     }
@@ -5332,6 +5347,64 @@ const BOX_DRAWING: &[char] = &[
 ];
 
 /// Transcribe an OGG voice message using OpenAI's gpt-4o-transcribe model.
+/// Transcribe a voice note and report it back to the chat.
+///
+/// Runs off the main event loop: the OpenAI call takes seconds, and holding the
+/// loop open for it would stall every other inbound message. Nothing here
+/// touches the runtime state, so it is safe alongside the event loop. Takes
+/// cloned handles rather than `Arc<Server>` so the caller can spawn it from a
+/// `&self` method.
+async fn run_voice_transcription(
+    im: Arc<dyn ImAdapter>,
+    target: MessageTarget,
+    api_key: String,
+    base_url: String,
+    audio_data: Vec<u8>,
+) {
+    let status_msg = im
+        .send_message(&target, "🎤 Transcribing voice message...")
+        .await;
+
+    let body = match transcribe_voice(&api_key, &base_url, &audio_data).await {
+        Ok(text) if text.is_empty() => "🎤 Transcription returned empty text.".to_string(),
+        Ok(text) => format!("🎤 *Transcribed:*\n{text}"),
+        Err(e) => {
+            tracing::error!("Voice transcription failed: {e}");
+            format!("🎤 Transcription failed: {e}")
+        }
+    };
+
+    if let Ok(mid) = status_msg {
+        let _ = im.edit_message(&target, &mid, &body).await;
+    }
+}
+
+/// Capture a terminal window and send it to the chat as a photo.
+///
+/// Runs off the main event loop for the same reason as
+/// [`run_voice_transcription`]: rendering and uploading a terminal PNG is slow,
+/// and it touches no runtime state.
+async fn send_screenshot(
+    tmux: TerminalMgr,
+    im: Arc<dyn ImAdapter>,
+    target: MessageTarget,
+    window_id: WindowId,
+) {
+    let _ = im.send_chat_action(&target).await;
+    match tmux.screenshot(&window_id).await {
+        Ok(png_data) => {
+            tracing::info!("Screenshot generated: {} bytes", png_data.len());
+            if let Err(e) = im.send_photo(&target, "terminal.png", &png_data).await {
+                tracing::error!("Failed to send screenshot: {e}");
+            }
+        }
+        Err(e) => {
+            let msg = format!("Screenshot failed: {e}");
+            let _ = im.send_message(&target, &msg).await;
+        }
+    }
+}
+
 async fn transcribe_voice(api_key: &str, base_url: &str, audio_data: &[u8]) -> Result<String> {
     let url = format!("{}/audio/transcriptions", base_url.trim_end_matches('/'));
 
