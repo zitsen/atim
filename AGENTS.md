@@ -2,6 +2,13 @@
 
 ## Commit Style
 
+**Language: English only.** Both the subject line and the body must be written
+in English. This is a hard rule, not a preference: commit messages in Chinese or
+any other language are not acceptable and must be rewritten before the branch
+lands. Do not mix languages within a message — a Chinese subject with an English
+body (or the reverse) is equally wrong. Keep history greppable and readable for
+every contributor.
+
 Use [Conventional Commits](https://www.conventionalcommits.org/):
 
 | Type       | Usage                                  |
