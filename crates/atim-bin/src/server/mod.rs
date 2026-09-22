@@ -3268,13 +3268,7 @@ impl Server {
     ///
     /// `cwd_hint` is the working directory of the pane — used for the
     /// project-slug fallback when lsof fails (Claude only).
-    async fn resolve_session_id(
-        &self,
-        window_id: &str,
-        timeout: Duration,
-        cwd_hint: Option<&str>,
-        min_mtime: std::time::SystemTime,
-    ) -> Option<String> {
+    async fn resolve_session_id(&self, window_id: &str, timeout: Duration) -> Option<String> {
         // Determine the agent for this window to dispatch session discovery.
         let agent = self
             .state_mgr
@@ -3296,69 +3290,25 @@ impl Server {
             return None;
         }
 
+        // /status is the only reliable session discovery method.
+        // PID/lsof and JSONL file scanning can return stale sessions;
+        // session_map is populated by the SessionStart hook but may lag.
+        // /status queries the running agent directly and always returns
+        // the current session_id.
         let deadline = std::time::Instant::now() + timeout;
-        let mut status_retries = 0u32;
-
-        // Phase 1: Active retry loop — tries all discovery methods until
-        // we find the session_id or run out of time.
         loop {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
                 break;
             }
 
-            // a) PID-based discovery (non-intrusive, works for Copilot/Codex)
-            if let Ok(Some(sid)) = agent.discover_session_by_pid(window_id) {
-                tracing::info!("Found session {sid} for window {window_id} via PID discovery");
+            if let Some(sid) = self.discover_session_via_status(window_id).await {
                 return Some(sid);
             }
 
-            // b) session_map.json (SessionStart hook, Claude only)
-            if agent.has_session_start_hook()
-                && let Ok(map) = self.state_mgr.load_session_map().await
-                && let Some(sid) = map.get(window_id)
-                && !sid.is_empty()
-            {
-                tracing::info!("Found session {sid} for window {window_id} via session_map");
-                return Some(sid.clone());
-            }
-
-            // c) /status command (Claude only — sends command, needs 2s
-            //    wait for response). Do this every other iteration to
-            //    avoid spamming the agent.
-            status_retries += 1;
-            if status_retries.is_multiple_of(2) {
-                if let Some(sid) = self.discover_session_via_status(window_id).await {
-                    return Some(sid);
-                }
-                continue; // discover_session_via_status already waited ~2s
-            }
-
-            tokio::time::sleep(Duration::from_millis(1000)).await;
-        }
-
-        // Phase 2: Fallback — working-directory based discovery (one-shot)
-        if let Some(cwd) = cwd_hint {
-            tracing::warn!(
-                "Active discovery timed out for window {window_id}, trying path-based discovery with cwd={cwd}"
-            );
-            let state = self.state_mgr.load_runtime().await.ok()?;
-            let mut known_ids: std::collections::HashSet<String> = state
-                .window_bindings
-                .values()
-                .map(|wb| wb.session_id.clone())
-                .filter(|sid| !sid.is_empty())
-                .collect();
-            if let Ok(map) = self.state_mgr.load_session_map().await {
-                for sid in map.values() {
-                    if !sid.is_empty() {
-                        known_ids.insert(sid.clone());
-                    }
-                }
-            }
-            if let Ok(Some(sid)) = agent.discover_session(cwd, &known_ids, min_mtime) {
-                return Some(sid);
-            }
+            // discover_session_via_status already waited ~2s; brief pause
+            // before retrying to avoid spamming the agent with /status.
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
         None
@@ -3408,7 +3358,6 @@ impl Server {
         let agent = self
             .resolve_agent(user_id, target.thread_id.map(|t| t.0).unwrap_or(0))
             .await;
-        let launch_time = std::time::SystemTime::now();
         let launch_cmd = agent_launch_cmd(&agent);
         self.tmux_mgr.send_line(&window_id, &launch_cmd).await?;
 
@@ -3518,15 +3467,7 @@ impl Server {
         // case where the message lands in the input box while the /status
         // modal is still open (which would consume Enter as "dismiss" rather
         // than "submit").
-        if let Some(sid) = self
-            .resolve_session_id(
-                &wid,
-                Duration::from_secs(15),
-                Some(cwd.to_str().unwrap_or_default()),
-                launch_time,
-            )
-            .await
-        {
+        if let Some(sid) = self.resolve_session_id(&wid, Duration::from_secs(15)).await {
             self.state_mgr
                 .upsert_window_binding(&WindowBinding {
                     window_id: wid.clone(),
@@ -3761,12 +3702,7 @@ impl Server {
         // responses. Sending /status before the user's message avoids
         // the modal being open when the message's Enter is sent.
         if let Some(sid) = self
-            .resolve_session_id(
-                window_id,
-                Duration::from_secs(15),
-                Some(&cwd),
-                std::time::SystemTime::now(),
-            )
+            .resolve_session_id(window_id, Duration::from_secs(15))
             .await
         {
             self.state_mgr
@@ -3897,15 +3833,7 @@ impl Server {
             .await?;
 
         // Try to resolve session_id so the monitor can track responses.
-        if let Some(sid) = self
-            .resolve_session_id(
-                &wid,
-                Duration::from_secs(15),
-                Some(&cwd),
-                std::time::SystemTime::now(),
-            )
-            .await
-        {
+        if let Some(sid) = self.resolve_session_id(&wid, Duration::from_secs(15)).await {
             self.state_mgr
                 .upsert_window_binding(&WindowBinding {
                     window_id: wid.clone(),

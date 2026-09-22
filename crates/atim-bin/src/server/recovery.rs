@@ -316,15 +316,7 @@ impl super::Server {
         // its TUI input handler before we forward the pending message.
         if new_session_id.is_empty() && agent.supports_sessions() {
             let wid = new_window_id.0.clone();
-            if let Some(sid) = self
-                .resolve_session_id(
-                    &wid,
-                    Duration::from_secs(15),
-                    Some(&cwd),
-                    std::time::SystemTime::now(),
-                )
-                .await
-            {
+            if let Some(sid) = self.resolve_session_id(&wid, Duration::from_secs(15)).await {
                 self.state_mgr
                     .upsert_window_binding(&WindowBinding {
                         window_id: wid.clone(),
