@@ -16,6 +16,7 @@ use atim_core::message::{InteractiveUi, UiKind};
 use atim_core::session::{ChatBinding, RuntimeState, SessionInfo, WindowBinding};
 use atim_core::terminal::TerminalManager;
 use atim_monitor::monitor::{MonitorEvent, resolve_jsonl};
+use atim_queue::chatter_folder::{ChatterFolder, CounterUpdate, FoldKey, FoldPlan, foldable};
 use atim_queue::message_queue::MessageQueue;
 use atim_queue::outbound_queue::OutboundQueue;
 use atim_state::persistence::StateManager;
@@ -96,6 +97,8 @@ pub struct Server {
     pub callback_contexts: Arc<Mutex<HashMap<String, CallbackCtx>>>,
     /// Track which chat_ids have received the welcome message (in-memory, resets on restart).
     pub welcome_sent: Arc<Mutex<HashSet<i64>>>,
+    /// Folds repeated identical tool calls into one message with a counter.
+    pub fold: Arc<Mutex<ChatterFolder>>,
 }
 
 /// Maximum Telegram message length for merged content.
@@ -178,9 +181,25 @@ impl Server {
             let server = Arc::clone(&self);
             let out = Arc::clone(&out);
             tokio::spawn(async move {
-                while let Some(messages) = out.pop().await {
-                    if let Err(e) = server.handle_session_output(messages).await {
-                        tracing::error!("handle_session_output error: {e}");
+                // Also drives the repeat-counter backstop: a folded run that
+                // stops needs its true total written out, and that is IM I/O so
+                // it must not happen on the main event loop either.
+                let mut idle = tokio::time::interval(Duration::from_secs(
+                    atim_queue::chatter_folder::IDLE_FLUSH_SECS,
+                ));
+                idle.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tokio::select! {
+                        biased;
+                        batch = out.pop() => match batch {
+                            Some(messages) => {
+                                if let Err(e) = server.handle_session_output(messages).await {
+                                    tracing::error!("handle_session_output error: {e}");
+                                }
+                            }
+                            None => break,
+                        },
+                        _ = idle.tick() => server.flush_fold_counters().await,
                     }
                 }
                 // Ends when `run` closes the queue on shutdown.
@@ -471,6 +490,62 @@ impl Server {
                 chat_name: None,
             };
 
+            // ── Fold repeated tool calls ──
+            //
+            // Decided before anything is sent: folding a run of identical calls
+            // into one message means the rest must never reach the IM at all.
+            // Only complete call+result pairs fold, and only when both halves
+            // match — a call whose output changed is news, not a repeat.
+            let mut result_at: HashMap<&str, usize> = HashMap::new();
+            for (i, m) in group.iter().enumerate() {
+                if m.content_type == atim_core::message::ContentType::ToolResult
+                    && !m.text.is_empty()
+                    && let Some(tuid) = m.tool_use_id.as_deref()
+                {
+                    result_at.entry(tuid).or_insert(i);
+                }
+            }
+
+            let mut fold_keys: HashMap<String, FoldKey> = HashMap::new();
+            let mut by_key: HashMap<FoldKey, Vec<String>> = HashMap::new();
+            for m in group.iter() {
+                if m.content_type != atim_core::message::ContentType::ToolUse
+                    || !foldable(m.tool_name.as_deref())
+                {
+                    continue;
+                }
+                let Some(tuid) = m.tool_use_id.as_deref() else {
+                    continue;
+                };
+                let Some(&ri) = result_at.get(tuid) else {
+                    continue;
+                };
+                let key = FoldKey::new(
+                    (chat_id, thread_id_val),
+                    m.tool_name.as_deref(),
+                    &m.text,
+                    &group[ri].text,
+                );
+                fold_keys.insert(tuid.to_string(), key.clone());
+                by_key.entry(key).or_default().push(tuid.to_string());
+            }
+
+            // Show the first of each run of identical calls, fold the rest.
+            let mut folded: HashSet<String> = HashSet::new();
+            let mut touched: Vec<FoldKey> = Vec::new();
+            {
+                let mut folder = self.fold.lock().await;
+                for (key, use_ids) in &by_key {
+                    touched.push(key.clone());
+                    let show_first =
+                        matches!(folder.observe(key, use_ids.len()), FoldPlan::ShowFirst);
+                    let skip = if show_first { 1 } else { 0 };
+                    for tuid in use_ids.iter().skip(skip) {
+                        folded.insert(tuid.clone());
+                    }
+                }
+            }
+
             // ── P1.3 Status→Content + P1.4 Message Merging ──
             //
             // 1. If this batch has text entries and no status was sent yet
@@ -536,6 +611,16 @@ impl Server {
                 use atim_core::message::ContentType;
                 match msg.content_type {
                     ContentType::ToolUse => {
+                        // Folded into an earlier identical call — never sent, and
+                        // invisible to the reader, so it must not break the text
+                        // merge chain the way a shown tool call does.
+                        if msg
+                            .tool_use_id
+                            .as_deref()
+                            .is_some_and(|t| folded.contains(t))
+                        {
+                            continue;
+                        }
                         flush!();
                         // AskUserQuestion: send interactive card with option buttons
                         if msg.tool_name.as_deref() == Some("AskUserQuestion")
@@ -585,6 +670,14 @@ impl Server {
                         }
                     }
                     ContentType::ToolResult => {
+                        // The matching call was folded — its output goes with it.
+                        if msg
+                            .tool_use_id
+                            .as_deref()
+                            .is_some_and(|t| folded.contains(t))
+                        {
+                            continue;
+                        }
                         flush!();
                         // Take the tracked (message_id, original_text) out of the map
                         // BEFORE awaiting, so we don't hold the lock across network I/O.
@@ -610,6 +703,13 @@ impl Server {
                                 );
                                 let _ =
                                     self.im_adapter.edit_chatter(&target, &mid, &combined).await;
+                                // This message now displays the call and its
+                                // output — later identical ones fold onto it.
+                                if let Some(key) =
+                                    msg.tool_use_id.as_deref().and_then(|t| fold_keys.get(t))
+                                {
+                                    self.fold.lock().await.bind(key, mid, combined);
+                                }
                             }
                         } else {
                             // Tool chatter — sheddable under a tool storm.
@@ -632,6 +732,17 @@ impl Server {
             }
 
             flush!();
+
+            // Rewrite counters that have fallen far enough behind the true
+            // total to be worth an edit. Doubles each time (×2, ×4, …) so a
+            // thousand repeats cost about ten edits, not a thousand.
+            let updates: Vec<CounterUpdate> = {
+                let mut folder = self.fold.lock().await;
+                touched.iter().filter_map(|k| folder.refresh(k)).collect()
+            };
+            for update in updates {
+                let _ = self.edit_fold_counter(&target, &update).await;
+            }
         }
 
         // Persist the updated byte offsets to SQLite so they survive restarts.
@@ -647,6 +758,42 @@ impl Server {
             }
         }
         Ok(())
+    }
+
+    /// Write out a folded call's repeat counter.
+    async fn edit_fold_counter(
+        &self,
+        target: &MessageTarget,
+        update: &CounterUpdate,
+    ) -> Result<()> {
+        self.im_adapter
+            .edit_chatter(target, &update.msg_id, &update.text)
+            .await
+    }
+
+    /// Flush repeat counters for runs that have gone quiet.
+    ///
+    /// The counter is refreshed on a doubling schedule while repeats stream in,
+    /// so the display trails the true total by up to a factor of two. Once a
+    /// run stops, this writes the real number. Driven by the delivery task's
+    /// tick so it never runs on the main event loop.
+    async fn flush_fold_counters(&self) {
+        let updates = { self.fold.lock().await.flush_stale() };
+        for update in updates {
+            let (chat_id, thread_id_val) = update.chat;
+            let target = MessageTarget {
+                chat_id: ChatId(chat_id),
+                thread_id: if thread_id_val != 0 {
+                    Some(ThreadId(thread_id_val))
+                } else {
+                    None
+                },
+                chat_name: None,
+            };
+            if let Err(e) = self.edit_fold_counter(&target, &update).await {
+                tracing::warn!("[pipe] Failed to flush repeat counter: {e}");
+            }
+        }
     }
 
     /// Assign freshly created session IDs to their window and chat bindings.
