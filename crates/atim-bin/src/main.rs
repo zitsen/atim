@@ -425,7 +425,7 @@ async fn main() -> anyhow::Result<()> {
     let tmux_keep_running = config.tmux_keep_running;
 
     // 8. Enter main event loop
-    let server = server::Server {
+    let server = Arc::new(server::Server {
         config,
         state_mgr,
         tmux_mgr,
@@ -444,11 +444,11 @@ async fn main() -> anyhow::Result<()> {
         pending_rename_names: Arc::new(Mutex::new(std::collections::HashMap::new())),
         pending_ask_questions: Arc::new(Mutex::new(std::collections::HashMap::new())),
         welcome_sent: Arc::new(Mutex::new(std::collections::HashSet::new())),
-    };
+    });
 
     // 8. Enter main event loop — wait for SIGINT (or SIGTERM on unix)
     tokio::select! {
-        result = server.run(im_rx, &mut monitor_rx) => {
+        result = server.clone().run(im_rx, &mut monitor_rx) => {
             if let Err(e) = result {
                 tracing::error!("Server exited with error: {e}");
             }

@@ -9,14 +9,15 @@ use atim_core::config::Config;
 use atim_core::error::Result;
 use atim_core::im::ImAdapter;
 use atim_core::message::{
-    ChatId, CheckItem, CheckStatus, ImEvent, ImEventKind, MessageId, MessageTarget, ThreadId,
-    WindowId,
+    ChatId, CheckItem, CheckStatus, ImEvent, ImEventKind, MessageId, MessageTarget, NewMessage,
+    ThreadId, WindowId,
 };
 use atim_core::message::{InteractiveUi, UiKind};
 use atim_core::session::{ChatBinding, RuntimeState, SessionInfo, WindowBinding};
 use atim_core::terminal::TerminalManager;
 use atim_monitor::monitor::{MonitorEvent, resolve_jsonl};
 use atim_queue::message_queue::MessageQueue;
+use atim_queue::outbound_queue::OutboundQueue;
 use atim_state::persistence::StateManager;
 use tokio::sync::Mutex;
 
@@ -100,6 +101,13 @@ pub struct Server {
 /// Maximum Telegram message length for merged content.
 const MAX_MSG_LEN: usize = 3800;
 
+/// Capacity of the outbound delivery queue (in session-output batches).
+///
+/// Bounded so a tool storm cannot grow it without limit. One batch is one poll
+/// cycle of one session's output, so this is a lot of headroom while still
+/// giving `enqueue_session_output` a defined overflow point.
+const OUTBOUND_QUEUE_CAP: usize = 256;
+
 /// Pre-compiled regex for extracting the Session ID from `/status` output.
 static SESSION_ID_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
     regex::Regex::new(
@@ -157,10 +165,28 @@ impl Server {
 
     /// Run the main event loop, processing IM and monitor events.
     pub async fn run(
-        &self,
+        self: Arc<Self>,
         mut im_rx: tokio::sync::mpsc::UnboundedReceiver<ImEvent>,
         monitor_rx: &mut tokio::sync::mpsc::UnboundedReceiver<MonitorEvent>,
     ) -> Result<()> {
+        // Session output is rendered and sent on a dedicated task. The main
+        // event loop must never block on IM I/O: during a tool storm each send
+        // is paced or shed on the delivery task, and every inbound message
+        // would otherwise sit unanswered behind the whole storm.
+        let out = Arc::new(OutboundQueue::new(OUTBOUND_QUEUE_CAP));
+        {
+            let server = Arc::clone(&self);
+            let out = Arc::clone(&out);
+            tokio::spawn(async move {
+                while let Some(messages) = out.pop().await {
+                    if let Err(e) = server.handle_session_output(messages).await {
+                        tracing::error!("handle_session_output error: {e}");
+                    }
+                }
+                // Ends when `run` closes the queue on shutdown.
+            });
+        }
+
         // Periodically probe for deleted topics (every 60s)
         let mut probe_interval = tokio::time::interval(std::time::Duration::from_secs(60));
         probe_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -174,13 +200,16 @@ impl Server {
 
         loop {
             tokio::select! {
+                // `biased` + inbound first: a user's message always wins the
+                // poll over timers and over queued monitor work.
+                biased;
                 Some(event) = im_rx.recv() => {
                     if let Err(e) = self.handle_im_event(event).await {
                         tracing::error!("handle_im_event error: {e}");
                     }
                 }
                 Some(event) = monitor_rx.recv() => {
-                    if let Err(e) = self.handle_monitor_event(event).await {
+                    if let Err(e) = self.handle_monitor_event(event, &out).await {
                         tracing::error!("handle_monitor_event error: {e}");
                     }
                 }
@@ -207,6 +236,8 @@ impl Server {
                 else => break,
             }
         }
+        // Let the delivery task drain what is queued and exit.
+        out.close();
         Ok(())
     }
 
@@ -355,326 +386,337 @@ impl Server {
         Ok(())
     }
 
-    async fn handle_monitor_event(&self, event: MonitorEvent) -> Result<()> {
+    /// Route a monitor event.
+    ///
+    /// Session output is handed to the delivery task and rendered there — off
+    /// the main event loop — so a tool storm cannot starve inbound IM events.
+    /// `SessionMapChanged` stays inline: it is a read-modify-write of the whole
+    /// runtime state and must not interleave with the IM handlers that do the
+    /// same.
+    async fn handle_monitor_event(&self, event: MonitorEvent, out: &OutboundQueue) -> Result<()> {
         match event {
             MonitorEvent::NewMessages(messages) => {
-                let rt = self.state_mgr.load_runtime().await?;
+                // In-memory only: the queue sheds tool chatter itself when it
+                // overflows, and never blocks the event loop on IM I/O.
+                out.push(messages).await;
+                Ok(())
+            }
+            MonitorEvent::SessionMapChanged => self.apply_session_map_change().await,
+        }
+    }
 
-                // Filter and group messages by session_id
-                let mut by_session: HashMap<String, Vec<&atim_core::message::NewMessage>> =
-                    HashMap::new();
-                for msg in &messages {
-                    tracing::debug!(
-                        "[pipe] NewMessage: session_id={}, role={}, content_type={:?}, complete={}, text_len={}",
-                        msg.session_id.0,
-                        msg.role,
-                        msg.content_type,
-                        msg.is_complete,
-                        msg.text.len(),
+    /// Render and send one batch of session output.
+    ///
+    /// Runs on the delivery task, never on the main event loop.
+    async fn handle_session_output(&self, messages: Vec<NewMessage>) -> Result<()> {
+        let rt = self.state_mgr.load_runtime().await?;
+
+        // Filter and group messages by session_id
+        let mut by_session: HashMap<String, Vec<&atim_core::message::NewMessage>> = HashMap::new();
+        for msg in &messages {
+            tracing::debug!(
+                "[pipe] NewMessage: session_id={}, role={}, content_type={:?}, complete={}, text_len={}",
+                msg.session_id.0,
+                msg.role,
+                msg.content_type,
+                msg.is_complete,
+                msg.text.len(),
+            );
+
+            if msg.role != "assistant"
+                && msg.content_type != atim_core::message::ContentType::ToolResult
+            {
+                continue;
+            }
+            if !msg.is_complete {
+                continue;
+            }
+            if msg.text.trim().is_empty()
+                && msg.content_type != atim_core::message::ContentType::ToolResult
+            {
+                continue;
+            }
+            if msg.content_type == atim_core::message::ContentType::Thinking {
+                continue;
+            }
+            by_session
+                .entry(msg.session_id.0.clone())
+                .or_default()
+                .push(msg);
+        }
+
+        for (_sid, group) in &by_session {
+            // Resolve to chat binding by session_id directly (V2)
+            let binding = match rt.chat_bindings.iter().find(|cb| cb.session_id == *_sid) {
+                Some(cb) => cb.clone(),
+                None => {
+                    tracing::warn!(
+                        "[pipe] No chat_binding for session_id={} (have {} bindings)",
+                        _sid,
+                        rt.chat_bindings.len(),
                     );
-
-                    if msg.role != "assistant"
-                        && msg.content_type != atim_core::message::ContentType::ToolResult
-                    {
-                        continue;
-                    }
-                    if !msg.is_complete {
-                        continue;
-                    }
-                    if msg.text.trim().is_empty()
-                        && msg.content_type != atim_core::message::ContentType::ToolResult
-                    {
-                        continue;
-                    }
-                    if msg.content_type == atim_core::message::ContentType::Thinking {
-                        continue;
-                    }
-                    by_session
-                        .entry(msg.session_id.0.clone())
-                        .or_default()
-                        .push(msg);
+                    continue;
                 }
+            };
 
-                for (_sid, group) in &by_session {
-                    // Resolve to chat binding by session_id directly (V2)
-                    let binding = match rt.chat_bindings.iter().find(|cb| cb.session_id == *_sid) {
-                        Some(cb) => cb.clone(),
-                        None => {
-                            tracing::warn!(
-                                "[pipe] No chat_binding for session_id={} (have {} bindings)",
-                                _sid,
-                                rt.chat_bindings.len(),
-                            );
+            let chat_id = binding.group_chat_id.unwrap_or(binding.chat_id);
+            let thread_id_val = binding.thread_id;
+            let target = MessageTarget {
+                chat_id: ChatId(chat_id),
+                thread_id: if thread_id_val != 0 {
+                    Some(ThreadId(thread_id_val))
+                } else {
+                    None
+                },
+                chat_name: None,
+            };
+
+            // ── P1.3 Status→Content + P1.4 Message Merging ──
+            //
+            // 1. If this batch has text entries and no status was sent yet
+            //    for this response cycle, send "Claude is working..."
+            // 2. Merge consecutive Text entries into a single message.
+            // 3. The first text flush edits the status message in-place.
+            // 4. ToolUse / ToolResult break the merge chain.
+
+            let has_text = group
+                .iter()
+                .any(|m| m.content_type == atim_core::message::ContentType::Text);
+            let status_key = (chat_id, thread_id_val);
+
+            let mut status_msg_id = if has_text {
+                let consumed = self.status_consumed.lock().await;
+                if !consumed.contains(&status_key) {
+                    drop(consumed);
+                    self.im_adapter
+                        .send_message(&target, "🤖 Claude is working...")
+                        .await
+                        .ok()
+                } else {
+                    drop(consumed);
+                    None
+                }
+            } else {
+                None
+            };
+
+            let mut merged = String::new();
+
+            macro_rules! flush {
+                () => {
+                    if !merged.is_empty() {
+                        if let Some(mid) = status_msg_id.take() {
+                            // First content batch → edit status in-place
+                            if let Err(e) =
+                                self.im_adapter.edit_message(&target, &mid, &merged).await
+                            {
+                                tracing::error!("[pipe] Failed to edit status: {e}");
+                            }
+                            self.status_consumed.lock().await.insert(status_key);
+                        } else {
+                            if let Err(e) = self.im_adapter.send_message(&target, &merged).await {
+                                tracing::error!("[pipe] Failed to send: {e}");
+                            }
+                        }
+                        merged.clear();
+                    }
+                };
+            }
+
+            for msg in group {
+                tracing::info!(
+                    "[pipe] chat={} thread={:?} content_type={:?} tool_use_id={:?}: {}",
+                    target.chat_id.0,
+                    target.thread_id,
+                    msg.content_type,
+                    msg.tool_use_id,
+                    msg.text.chars().take(60).collect::<String>(),
+                );
+
+                use atim_core::message::ContentType;
+                match msg.content_type {
+                    ContentType::ToolUse => {
+                        flush!();
+                        // AskUserQuestion: send interactive card with option buttons
+                        if msg.tool_name.as_deref() == Some("AskUserQuestion")
+                            && let Some(ref raw) = msg.raw_input
+                            && let Ok(mid) = self
+                                .send_ask_user_card(&target, binding.user_id, raw, &msg.text)
+                                .await
+                        {
+                            if let Some(tuid) = &msg.tool_use_id {
+                                self.tool_use_msg_ids.lock().await.insert(
+                                    (chat_id, thread_id_val, tuid.clone()),
+                                    (mid, msg.text.clone()),
+                                );
+                            }
                             continue;
                         }
-                    };
-
-                    let chat_id = binding.group_chat_id.unwrap_or(binding.chat_id);
-                    let thread_id_val = binding.thread_id;
-                    let target = MessageTarget {
-                        chat_id: ChatId(chat_id),
-                        thread_id: if thread_id_val != 0 {
-                            Some(ThreadId(thread_id_val))
-                        } else {
-                            None
-                        },
-                        chat_name: None,
-                    };
-
-                    // ── P1.3 Status→Content + P1.4 Message Merging ──
-                    //
-                    // 1. If this batch has text entries and no status was sent yet
-                    //    for this response cycle, send "Claude is working..."
-                    // 2. Merge consecutive Text entries into a single message.
-                    // 3. The first text flush edits the status message in-place.
-                    // 4. ToolUse / ToolResult break the merge chain.
-
-                    let has_text = group
-                        .iter()
-                        .any(|m| m.content_type == atim_core::message::ContentType::Text);
-                    let status_key = (chat_id, thread_id_val);
-
-                    let mut status_msg_id = if has_text {
-                        let consumed = self.status_consumed.lock().await;
-                        if !consumed.contains(&status_key) {
-                            drop(consumed);
-                            self.im_adapter
-                                .send_message(&target, "🤖 Claude is working...")
-                                .await
-                                .ok()
-                        } else {
-                            drop(consumed);
-                            None
+                        // AskUserQuestion without raw_input: skip text summary
+                        // (the interactive card already contains all the content)
+                        if msg.tool_name.as_deref() == Some("AskUserQuestion") {
+                            continue;
                         }
-                    } else {
-                        None
-                    };
-
-                    let mut merged = String::new();
-
-                    macro_rules! flush {
-                        () => {
-                            if !merged.is_empty() {
-                                if let Some(mid) = status_msg_id.take() {
-                                    // First content batch → edit status in-place
-                                    if let Err(e) =
-                                        self.im_adapter.edit_message(&target, &mid, &merged).await
-                                    {
-                                        tracing::error!("[pipe] Failed to edit status: {e}");
-                                    }
-                                    self.status_consumed.lock().await.insert(status_key);
-                                } else {
-                                    if let Err(e) =
-                                        self.im_adapter.send_message(&target, &merged).await
-                                    {
-                                        tracing::error!("[pipe] Failed to send: {e}");
-                                    }
-                                }
-                                merged.clear();
+                        // Edit: include diff content in the card
+                        if matches!(
+                            msg.tool_name.as_deref(),
+                            Some("Edit" | "EditTool" | "TextEditTool")
+                        ) && let Some(ref raw) = msg.raw_input
+                        {
+                            let diff_text = build_edit_diff_card(raw, &msg.text);
+                            // Tool chatter — sheddable under a tool storm.
+                            if let Ok(mid) = self.im_adapter.send_chatter(&target, &diff_text).await
+                                && let Some(tuid) = &msg.tool_use_id
+                            {
+                                self.tool_use_msg_ids.lock().await.insert(
+                                    (chat_id, thread_id_val, tuid.clone()),
+                                    (mid, diff_text),
+                                );
                             }
+                            continue;
+                        }
+                        if let Some(tuid) = &msg.tool_use_id
+                            && let Ok(mid) = self.im_adapter.send_chatter(&target, &msg.text).await
+                        {
+                            self.tool_use_msg_ids.lock().await.insert(
+                                (chat_id, thread_id_val, tuid.clone()),
+                                (mid, msg.text.clone()),
+                            );
+                        }
+                    }
+                    ContentType::ToolResult => {
+                        flush!();
+                        // Take the tracked (message_id, original_text) out of the map
+                        // BEFORE awaiting, so we don't hold the lock across network I/O.
+                        let tracked = if let Some(tuid) = &msg.tool_use_id {
+                            self.tool_use_msg_ids.lock().await.remove(&(
+                                chat_id,
+                                thread_id_val,
+                                tuid.clone(),
+                            ))
+                        } else {
+                            None
                         };
-                    }
-
-                    for msg in group {
-                        tracing::info!(
-                            "[pipe] chat={} thread={:?} content_type={:?} tool_use_id={:?}: {}",
-                            target.chat_id.0,
-                            target.thread_id,
-                            msg.content_type,
-                            msg.tool_use_id,
-                            msg.text.chars().take(60).collect::<String>(),
-                        );
-
-                        use atim_core::message::ContentType;
-                        match msg.content_type {
-                            ContentType::ToolUse => {
-                                flush!();
-                                // AskUserQuestion: send interactive card with option buttons
-                                if msg.tool_name.as_deref() == Some("AskUserQuestion")
-                                    && let Some(ref raw) = msg.raw_input
-                                    && let Ok(mid) = self
-                                        .send_ask_user_card(
-                                            &target,
-                                            binding.user_id,
-                                            raw,
-                                            &msg.text,
-                                        )
-                                        .await
-                                {
-                                    if let Some(tuid) = &msg.tool_use_id {
-                                        self.tool_use_msg_ids.lock().await.insert(
-                                            (chat_id, thread_id_val, tuid.clone()),
-                                            (mid, msg.text.clone()),
-                                        );
-                                    }
-                                    continue;
-                                }
-                                // AskUserQuestion without raw_input: skip text summary
-                                // (the interactive card already contains all the content)
-                                if msg.tool_name.as_deref() == Some("AskUserQuestion") {
-                                    continue;
-                                }
-                                // Edit: include diff content in the card
-                                if matches!(
+                        if let Some((mid, original_text)) = tracked {
+                            let is_edit = matches!(
+                                msg.tool_name.as_deref(),
+                                Some("Edit" | "EditTool" | "TextEditTool")
+                            );
+                            if !is_edit {
+                                let combined = format_tool_result(
+                                    &original_text,
+                                    &msg.text,
                                     msg.tool_name.as_deref(),
-                                    Some("Edit" | "EditTool" | "TextEditTool")
-                                ) && let Some(ref raw) = msg.raw_input
-                                {
-                                    let diff_text = build_edit_diff_card(raw, &msg.text);
-                                    // Tool chatter — sheddable under a tool storm.
-                                    if let Ok(mid) =
-                                        self.im_adapter.send_chatter(&target, &diff_text).await
-                                        && let Some(tuid) = &msg.tool_use_id
-                                    {
-                                        self.tool_use_msg_ids.lock().await.insert(
-                                            (chat_id, thread_id_val, tuid.clone()),
-                                            (mid, diff_text),
-                                        );
-                                    }
-                                    continue;
-                                }
-                                if let Some(tuid) = &msg.tool_use_id
-                                    && let Ok(mid) =
-                                        self.im_adapter.send_chatter(&target, &msg.text).await
-                                {
-                                    self.tool_use_msg_ids.lock().await.insert(
-                                        (chat_id, thread_id_val, tuid.clone()),
-                                        (mid, msg.text.clone()),
-                                    );
-                                }
+                                );
+                                let _ =
+                                    self.im_adapter.edit_chatter(&target, &mid, &combined).await;
                             }
-                            ContentType::ToolResult => {
-                                flush!();
-                                // Take the tracked (message_id, original_text) out of the map
-                                // BEFORE awaiting, so we don't hold the lock across network I/O.
-                                let tracked = if let Some(tuid) = &msg.tool_use_id {
-                                    self.tool_use_msg_ids.lock().await.remove(&(
-                                        chat_id,
-                                        thread_id_val,
-                                        tuid.clone(),
-                                    ))
-                                } else {
-                                    None
-                                };
-                                if let Some((mid, original_text)) = tracked {
-                                    let is_edit = matches!(
-                                        msg.tool_name.as_deref(),
-                                        Some("Edit" | "EditTool" | "TextEditTool")
-                                    );
-                                    if !is_edit {
-                                        let combined = format_tool_result(
-                                            &original_text,
-                                            &msg.text,
-                                            msg.tool_name.as_deref(),
-                                        );
-                                        let _ = self
-                                            .im_adapter
-                                            .edit_chatter(&target, &mid, &combined)
-                                            .await;
-                                    }
-                                } else {
-                                    // Tool chatter — sheddable under a tool storm.
-                                    let _ = self.im_adapter.send_chatter(&target, &msg.text).await;
-                                }
-                            }
-                            _ => {
-                                // Text — accumulate for merging.
-                                // Tables are handled by each adapter separately:
-                                // Telegram converts to card-style, Feishu renders natively.
-                                if !merged.is_empty() {
-                                    merged.push('\n');
-                                }
-                                merged.push_str(&msg.text);
-                                if merged.len() >= MAX_MSG_LEN {
-                                    flush!();
-                                }
-                            }
+                        } else {
+                            // Tool chatter — sheddable under a tool storm.
+                            let _ = self.im_adapter.send_chatter(&target, &msg.text).await;
                         }
                     }
-
-                    flush!();
-                }
-
-                // Persist the updated byte offsets to SQLite so they survive restarts.
-                // The monitor updates `byte_offsets` in memory after reading each JSONL
-                // batch; this syncs those updates to the DB on every processed event so
-                // the server never re-reads already-delivered messages after a restart.
-                {
-                    let offsets = self.byte_offsets.lock().await;
-                    for sid in by_session.keys() {
-                        if let Some(&offset) = offsets.get(sid) {
-                            let _ = self.state_mgr.upsert_offset(sid, offset).await;
+                    _ => {
+                        // Text — accumulate for merging.
+                        // Tables are handled by each adapter separately:
+                        // Telegram converts to card-style, Feishu renders natively.
+                        if !merged.is_empty() {
+                            merged.push('\n');
+                        }
+                        merged.push_str(&msg.text);
+                        if merged.len() >= MAX_MSG_LEN {
+                            flush!();
                         }
                     }
                 }
             }
-            MonitorEvent::SessionMapChanged => {
-                tracing::info!("[pipe] SessionMapChanged — syncing session IDs to window bindings");
-                let session_map = self.state_mgr.consume_hook_session_map().await?;
-                let mut rt = self.state_mgr.load_runtime().await?;
-                let mut synced = 0;
-                for (window_id, session_id) in &session_map {
-                    // Find window_binding by window_id
-                    if let Some(wb) = rt.window_bindings.get_mut(window_id) {
-                        // Only assign session_ids for agents that support
-                        // tracked sessions — skip agents with no JSONL logs.
-                        if let Some(agent) = self.config.agent_registry.get(&wb.agent_type)
-                            && !agent.supports_sessions()
-                        {
-                            continue;
-                        }
-                        if wb.session_id.is_empty() {
-                            wb.session_id = session_id.clone();
-                            synced += 1;
-                            tracing::info!(
-                                "[pipe] Assigned session {session_id} to window {window_id}"
-                            );
-                        } else if wb.session_id != *session_id {
-                            tracing::debug!(
-                                "[pipe] Window {window_id} has session {} but map says {session_id} — updating",
-                                wb.session_id,
-                            );
-                            wb.session_id = session_id.clone();
-                            synced += 1;
-                        }
-                    } else {
-                        tracing::warn!(
-                            "[pipe] Session map has window {window_id} but no WindowBinding exists for it",
-                        );
-                    }
-                    // Also sync the chat binding's session_id so find_cb() works.
-                    // Match by display_name == window_name (stable link across session changes).
-                    // Update when empty (first assignment) or stale (session UUID changed).
-                    if let Some(wb) = rt.window_bindings.get(window_id) {
-                        let window_name = wb.window_name.clone();
-                        if let Some(cb) = rt.chat_bindings.iter_mut().find(|cb| {
-                            cb.display_name == window_name
-                                && (cb.session_id.is_empty() || cb.session_id != *session_id)
-                        }) {
-                            if cb.session_id.is_empty() {
-                                tracing::info!(
-                                    "[pipe] Assigned session {session_id} to chat binding '{}' (user={} thread={})",
-                                    cb.display_name,
-                                    cb.user_id,
-                                    cb.thread_id,
-                                );
-                            } else {
-                                tracing::info!(
-                                    "[pipe] Updated stale session {} → {session_id} for chat binding '{}' (user={} thread={})",
-                                    cb.session_id,
-                                    cb.display_name,
-                                    cb.user_id,
-                                    cb.thread_id,
-                                );
-                            }
-                            cb.session_id = session_id.clone();
-                        }
-                    }
+
+            flush!();
+        }
+
+        // Persist the updated byte offsets to SQLite so they survive restarts.
+        // The monitor updates `byte_offsets` in memory after reading each JSONL
+        // batch; this syncs those updates to the DB on every processed event so
+        // the server never re-reads already-delivered messages after a restart.
+        {
+            let offsets = self.byte_offsets.lock().await;
+            for sid in by_session.keys() {
+                if let Some(&offset) = offsets.get(sid) {
+                    let _ = self.state_mgr.upsert_offset(sid, offset).await;
                 }
-                tracing::info!("[pipe] SessionMapChanged: synced {synced} entries");
-                self.state_mgr.save_runtime(&rt).await?;
             }
         }
+        Ok(())
+    }
+
+    /// Assign freshly created session IDs to their window and chat bindings.
+    ///
+    /// Deliberately runs on the main event loop: this is a read-modify-write of
+    /// the whole runtime state (`save_runtime` rewrites every table), so it must
+    /// not interleave with the IM handlers that do the same.
+    async fn apply_session_map_change(&self) -> Result<()> {
+        tracing::info!("[pipe] SessionMapChanged — syncing session IDs to window bindings");
+        let session_map = self.state_mgr.consume_hook_session_map().await?;
+        let mut rt = self.state_mgr.load_runtime().await?;
+        let mut synced = 0;
+        for (window_id, session_id) in &session_map {
+            // Find window_binding by window_id
+            if let Some(wb) = rt.window_bindings.get_mut(window_id) {
+                // Only assign session_ids for agents that support
+                // tracked sessions — skip agents with no JSONL logs.
+                if let Some(agent) = self.config.agent_registry.get(&wb.agent_type)
+                    && !agent.supports_sessions()
+                {
+                    continue;
+                }
+                if wb.session_id.is_empty() {
+                    wb.session_id = session_id.clone();
+                    synced += 1;
+                    tracing::info!("[pipe] Assigned session {session_id} to window {window_id}");
+                } else if wb.session_id != *session_id {
+                    tracing::debug!(
+                        "[pipe] Window {window_id} has session {} but map says {session_id} — updating",
+                        wb.session_id,
+                    );
+                    wb.session_id = session_id.clone();
+                    synced += 1;
+                }
+            } else {
+                tracing::warn!(
+                    "[pipe] Session map has window {window_id} but no WindowBinding exists for it",
+                );
+            }
+            // Also sync the chat binding's session_id so find_cb() works.
+            // Match by display_name == window_name (stable link across session changes).
+            // Update when empty (first assignment) or stale (session UUID changed).
+            if let Some(wb) = rt.window_bindings.get(window_id) {
+                let window_name = wb.window_name.clone();
+                if let Some(cb) = rt.chat_bindings.iter_mut().find(|cb| {
+                    cb.display_name == window_name
+                        && (cb.session_id.is_empty() || cb.session_id != *session_id)
+                }) {
+                    if cb.session_id.is_empty() {
+                        tracing::info!(
+                            "[pipe] Assigned session {session_id} to chat binding '{}' (user={} thread={})",
+                            cb.display_name,
+                            cb.user_id,
+                            cb.thread_id,
+                        );
+                    } else {
+                        tracing::info!(
+                            "[pipe] Updated stale session {} → {session_id} for chat binding '{}' (user={} thread={})",
+                            cb.session_id,
+                            cb.display_name,
+                            cb.user_id,
+                            cb.thread_id,
+                        );
+                    }
+                    cb.session_id = session_id.clone();
+                }
+            }
+        }
+        tracing::info!("[pipe] SessionMapChanged: synced {synced} entries");
+        self.state_mgr.save_runtime(&rt).await?;
         Ok(())
     }
 
