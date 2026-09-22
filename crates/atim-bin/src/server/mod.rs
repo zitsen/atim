@@ -3273,6 +3273,7 @@ impl Server {
         window_id: &str,
         timeout: Duration,
         cwd_hint: Option<&str>,
+        min_mtime: std::time::SystemTime,
     ) -> Option<String> {
         // Determine the agent for this window to dispatch session discovery.
         let agent = self
@@ -3355,7 +3356,7 @@ impl Server {
                     }
                 }
             }
-            if let Ok(Some(sid)) = agent.discover_session(cwd, &known_ids) {
+            if let Ok(Some(sid)) = agent.discover_session(cwd, &known_ids, min_mtime) {
                 return Some(sid);
             }
         }
@@ -3407,6 +3408,7 @@ impl Server {
         let agent = self
             .resolve_agent(user_id, target.thread_id.map(|t| t.0).unwrap_or(0))
             .await;
+        let launch_time = std::time::SystemTime::now();
         let launch_cmd = agent_launch_cmd(&agent);
         self.tmux_mgr.send_line(&window_id, &launch_cmd).await?;
 
@@ -3521,6 +3523,7 @@ impl Server {
                 &wid,
                 Duration::from_secs(15),
                 Some(cwd.to_str().unwrap_or_default()),
+                launch_time,
             )
             .await
         {
@@ -3758,7 +3761,12 @@ impl Server {
         // responses. Sending /status before the user's message avoids
         // the modal being open when the message's Enter is sent.
         if let Some(sid) = self
-            .resolve_session_id(window_id, Duration::from_secs(15), Some(&cwd))
+            .resolve_session_id(
+                window_id,
+                Duration::from_secs(15),
+                Some(&cwd),
+                std::time::SystemTime::now(),
+            )
             .await
         {
             self.state_mgr
@@ -3890,7 +3898,12 @@ impl Server {
 
         // Try to resolve session_id so the monitor can track responses.
         if let Some(sid) = self
-            .resolve_session_id(&wid, Duration::from_secs(15), Some(&cwd))
+            .resolve_session_id(
+                &wid,
+                Duration::from_secs(15),
+                Some(&cwd),
+                std::time::SystemTime::now(),
+            )
             .await
         {
             self.state_mgr

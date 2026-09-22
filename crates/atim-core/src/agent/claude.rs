@@ -224,8 +224,9 @@ impl Agent for ClaudeAgent {
         &self,
         cwd: &str,
         known_ids: &std::collections::HashSet<String>,
+        min_mtime: std::time::SystemTime,
     ) -> Result<Option<String>> {
-        discover_session_by_slug(cwd, known_ids)
+        discover_session_by_slug(cwd, known_ids, min_mtime)
     }
 
     fn discover_session_by_pid(&self, window_id: &str) -> Result<Option<String>> {
@@ -245,6 +246,7 @@ impl Agent for ClaudeAgent {
 pub(crate) fn discover_session_by_slug(
     cwd: &str,
     known_ids: &std::collections::HashSet<String>,
+    min_mtime: std::time::SystemTime,
 ) -> Result<Option<String>> {
     let slug: String = cwd.split('/').collect::<Vec<_>>().join("-");
     let proj_dir = claude_projects_dir()
@@ -279,6 +281,9 @@ pub(crate) fn discover_session_by_slug(
             .ok()
             .and_then(|m| m.modified().ok())
             .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        if mtime < min_mtime {
+            continue;
+        }
         candidates.push((mtime, stem));
     }
 

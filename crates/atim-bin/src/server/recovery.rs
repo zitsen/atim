@@ -317,7 +317,12 @@ impl super::Server {
         if new_session_id.is_empty() && agent.supports_sessions() {
             let wid = new_window_id.0.clone();
             if let Some(sid) = self
-                .resolve_session_id(&wid, Duration::from_secs(15), Some(&cwd))
+                .resolve_session_id(
+                    &wid,
+                    Duration::from_secs(15),
+                    Some(&cwd),
+                    std::time::SystemTime::now(),
+                )
                 .await
             {
                 self.state_mgr

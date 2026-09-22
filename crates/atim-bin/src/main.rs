@@ -501,7 +501,8 @@ fn discover_session_for_window(
         tracing::info!(
             "lsof failed for window {window_id}, trying project-slug matching (cwd={cwd})"
         );
-        if let Ok(Some(sid)) = agent.discover_session(cwd, known_ids) {
+        if let Ok(Some(sid)) = agent.discover_session(cwd, known_ids, std::time::SystemTime::now())
+        {
             return Some(sid);
         }
     }

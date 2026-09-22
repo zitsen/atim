@@ -85,8 +85,9 @@ impl AgentHandle {
         &self,
         cwd: &str,
         known_ids: &std::collections::HashSet<String>,
+        min_mtime: std::time::SystemTime,
     ) -> crate::error::Result<Option<String>> {
-        self.inner.discover_session(cwd, known_ids)
+        self.inner.discover_session(cwd, known_ids, min_mtime)
     }
     pub fn discover_session_by_pid(&self, window_id: &str) -> crate::error::Result<Option<String>> {
         self.inner.discover_session_by_pid(window_id)

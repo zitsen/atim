@@ -200,8 +200,9 @@ impl Agent for CopilotAgent {
         &self,
         cwd: &str,
         known_ids: &std::collections::HashSet<String>,
+        min_mtime: std::time::SystemTime,
     ) -> Result<Option<String>> {
-        discover_by_cwd(cwd, known_ids)
+        discover_by_cwd(cwd, known_ids, min_mtime)
     }
 
     fn discover_session_by_pid(&self, window_id: &str) -> Result<Option<String>> {
@@ -315,6 +316,7 @@ fn discover_by_pid_lsof(window_id: &str) -> Result<Option<String>> {
 fn discover_by_cwd(
     cwd: &str,
     known_ids: &std::collections::HashSet<String>,
+    _min_mtime: std::time::SystemTime,
 ) -> Result<Option<String>> {
     let sess_dir = match copilot_sessions_dir() {
         Some(d) => d,

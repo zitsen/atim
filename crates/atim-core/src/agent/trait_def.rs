@@ -136,6 +136,7 @@ pub trait Agent: Send + Sync {
         &self,
         _cwd: &str,
         _known_ids: &std::collections::HashSet<String>,
+        _min_mtime: std::time::SystemTime,
     ) -> Result<Option<String>> {
         Err(crate::error::Error::Unsupported(
             "session discovery not supported for this agent".into(),

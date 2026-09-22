@@ -42,6 +42,7 @@ impl Agent for MimoAgent {
         &self,
         cwd: &str,
         known_ids: &std::collections::HashSet<String>,
+        _min_mtime: std::time::SystemTime,
     ) -> Result<Option<String>> {
         // Query mimo SQLite DB for the most recent session in this directory.
         let db_path = match mimo_db_path() {
