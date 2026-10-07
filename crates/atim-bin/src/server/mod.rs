@@ -3410,9 +3410,16 @@ impl Server {
     }
 
     /// If the pane shows a "trust this folder" confirmation dialog (first
-    /// run of Claude Code in a new directory), auto-confirm it by sending
-    /// Enter.  Waits for the dialog to disappear before returning.
-    /// Returns `true` if a trust dialog was detected and (attempted) dismissed.
+    /// run of Claude Code in a new directory), auto-confirm it.
+    ///
+    /// The dialog is a cursor list, not a prompt where Enter means yes: on
+    /// Claude Code 2.1.x the cursor starts on "No, exit" and a bare Enter
+    /// declines, killing the agent that was just started. So the cursor is
+    /// moved onto the trusting option first — see [`trust_cursor_steps`], which
+    /// reads the options rather than assuming a version's layout.
+    ///
+    /// Waits for the dialog to disappear before returning. Returns `true` if a
+    /// trust dialog was detected and (attempted) dismissed.
     async fn auto_confirm_trust_dialog(&self, window_id: &WindowId) -> bool {
         let pane = self
             .tmux_mgr
@@ -3424,11 +3431,35 @@ impl Server {
         if !lower.contains("trust") && !lower.contains("safety") {
             return false;
         }
+
+        let steps = match trust_cursor_steps(&clean) {
+            Some(steps) => steps,
+            None => {
+                // Unreadable option list. Fall back to the current version's
+                // shape — the trusting option is the second entry — and let the
+                // caller's post-launch check report it if that was wrong.
+                tracing::warn!(
+                    "Trust dialog in window {} has an unreadable option list; assuming the \
+                     trusting option is one step down",
+                    window_id.0
+                );
+                1
+            }
+        };
+
         tracing::info!(
-            "Detected trust folder dialog in window {}, auto-confirming",
+            "Detected trust folder dialog in window {}, moving cursor {steps:+} step(s) onto \
+             the trusting option",
             window_id.0
         );
-        // Send Enter to confirm "Yes, I trust this folder"
+
+        // One keypress per step: the TUI needs a frame to move the cursor, and a
+        // coalesced burst of them moves it once.
+        let key = if steps < 0 { "Up" } else { "Down" };
+        for _ in 0..steps.unsigned_abs() {
+            self.tmux_mgr.send_key(window_id, key).await.ok();
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
         self.tmux_mgr.send_key(window_id, "Enter").await.ok();
         // Wait for the dialog to disappear
         tokio::time::sleep(Duration::from_millis(1500)).await;
@@ -3440,7 +3471,7 @@ impl Server {
             .unwrap_or_default();
         let clean = strip_ansi(&pane).to_lowercase();
         if clean.contains("trust") || clean.contains("safety") {
-            tracing::warn!("Trust dialog still present after Enter, retrying");
+            tracing::warn!("Trust dialog still present after confirming, retrying");
             self.tmux_mgr.send_key(window_id, "Enter").await.ok();
             tokio::time::sleep(Duration::from_millis(1500)).await;
         }
@@ -5541,6 +5572,61 @@ type InboundLanes = Arc<Mutex<HashMap<i64, (mpsc::UnboundedSender<ImEvent>, std:
 /// How long an idle lane is kept before its worker is allowed to finish.
 const LANE_IDLE: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// Steps to move the cursor onto the option that trusts the folder.
+///
+/// Positive means Down, negative Up, `0` that it is already selected. `None`
+/// when the options cannot be read out of the pane.
+///
+/// Claude Code's layout is not stable across versions. 2.1.x lists "No, exit"
+/// first and parks the cursor on it, so a bare Enter *declines* and kills the
+/// agent that was just started. Older builds listed the trusting option first,
+/// where a bare Enter was right. Reading the options instead of assuming a
+/// version covers both — and survives the next reshuffle.
+fn trust_cursor_steps(pane: &str) -> Option<i32> {
+    let lines: Vec<&str> = pane.lines().collect();
+
+    // The hint line under the options is the most stable anchor this dialog
+    // has; everything else above it is prose that may change.
+    let footer = lines.iter().position(|l| l.contains("Enter to confirm"))?;
+
+    // The options are the last run of non-empty lines above it. Blank lines
+    // between the options and the footer are padding, not the end of the block.
+    let mut options: Vec<&str> = Vec::new();
+    for line in lines[..footer].iter().rev() {
+        if line.trim().is_empty() {
+            if options.is_empty() {
+                continue;
+            }
+            break;
+        }
+        options.push(line);
+    }
+    // Collected bottom-up; the cursor arithmetic below needs top-down.
+    options.reverse();
+    if options.len() < 2 {
+        return None;
+    }
+
+    let cursor = options.iter().position(|l| l.contains('❯'))?;
+    let trusting = options.iter().position(|l| is_affirmative_option(l))?;
+
+    Some(i32::try_from(trusting).ok()? - i32::try_from(cursor).ok()?)
+}
+
+/// Whether an option line is the one that trusts the folder.
+///
+/// The block above the options may be collected along with them (there is no
+/// blank line separating the prose from the list), and that prose can contain
+/// the word "yes" too. So require the line to *start* with it, once the cursor
+/// marker and any list numbering are out of the way.
+fn is_affirmative_option(line: &str) -> bool {
+    let s = line.trim_start_matches(['❯', ' ', '\t']);
+    let s = s
+        .trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ')')
+        .trim_start();
+    s.to_lowercase().starts_with("yes")
+}
+
 /// Bucket a chat for the tool-output governor.
 ///
 /// Both ends derive it from the same `MessageTarget` — the session output side
@@ -7038,6 +7124,91 @@ mod tests {
         assert!(
             map.get(&7).expect("lane for chat 7").1 > aged,
             "the stale entry was replaced, not reused"
+        );
+    }
+
+    // ── trust dialog cursor ──
+
+    /// Captured verbatim from Claude Code 2.1.284 (`tmux capture-pane` in a
+    /// fresh directory). The cursor starts on "No, exit", so the old
+    /// send-Enter-and-hope behaviour declined and killed the agent.
+    const NEW_TRUST_PANE: &str = "\
+ Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or\n\
+ work from your team). If not, take a moment to review what's in this folder first.\n\
+ Claude Code'll be able to read, edit, and execute files here.\n\
+ Security guide\n\
+ ❯ No, exit\n\
+   Yes, I trust this folder\n\
+\n\
+ Enter to confirm · Esc to cancel\n";
+
+    /// The shape older builds used: the trusting option listed first, where a
+    /// bare Enter was already correct.
+    const OLD_TRUST_PANE: &str = "\
+ Do you trust the files in this folder?\n\
+\n\
+ ❯ 1. Yes, I trust this folder\n\
+   2. No, exit\n\
+\n\
+ Enter to confirm · Esc to cancel\n";
+
+    #[test]
+    fn test_the_current_layout_needs_one_step_down() {
+        assert_eq!(trust_cursor_steps(NEW_TRUST_PANE), Some(1));
+    }
+
+    #[test]
+    fn test_the_older_layout_needs_no_step() {
+        assert_eq!(trust_cursor_steps(OLD_TRUST_PANE), Some(0));
+    }
+
+    #[test]
+    fn test_a_cursor_below_the_trusting_option_steps_up() {
+        // Third layout, just in case: trusting option first, cursor second.
+        let pane = " Quick safety check\n ❯ No, exit\n\n Enter to confirm · Esc to cancel\n";
+        let pane = pane.replace("❯ No, exit", "   Yes, I trust this folder\n ❯ No, exit");
+        assert_eq!(trust_cursor_steps(&pane), Some(-1));
+    }
+
+    #[test]
+    fn test_prose_above_the_options_is_not_mistaken_for_an_option() {
+        // The prompt itself says "trust", and on a narrow terminal it wraps.
+        // Only the block below it may be read as options.
+        assert_eq!(trust_cursor_steps(NEW_TRUST_PANE), Some(1));
+        let noisy = " Is this a project you created or one you trust? If you are unsure, yes, review it first.\n ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel\n";
+        assert_eq!(trust_cursor_steps(noisy), Some(1));
+    }
+
+    #[test]
+    fn test_an_unreadable_dialog_is_reported_rather_than_guessed() {
+        // No hint line to anchor on.
+        assert_eq!(
+            trust_cursor_steps(" ❯ No, exit\n   Yes, I trust this folder\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_a_dialog_without_a_cursor_is_unreadable() {
+        assert_eq!(
+            trust_cursor_steps(" No, exit\n Yes, I trust this folder\n\n Enter to confirm\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_a_dialog_without_a_choice_is_unreadable() {
+        assert_eq!(
+            trust_cursor_steps(" ❯ Yes, I trust this folder\n\n Enter to confirm\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_an_option_list_with_no_yes_is_unreadable() {
+        assert_eq!(
+            trust_cursor_steps(" ❯ No, exit\n   Maybe later\n\n Enter to confirm\n"),
+            None
         );
     }
 }
