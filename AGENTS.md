@@ -47,11 +47,49 @@ Check service health: `systemctl --user is-active atim`
 
 ## Release
 
-1. Bump `version` in workspace `Cargo.toml`.
+1. Bump `version` in the workspace `Cargo.toml` **and the intra-workspace
+   dependency pins** in every `crates/*/Cargo.toml` (e.g.
+   `atim-core = { path = "../atim-core", version = "0.6" }`). The pins are
+   versioned separately from the workspace version, and a stale one fails the
+   build with `candidate versions found which didn't match`.
 2. Commit with `chore: bump version to <x.y.z>`.
-3. Tag: `git tag v<x.y.z>`.
-4. Push: `git push origin main --tags`.
-5. Create GitHub release: `gh release create v<x.y.z> --title "v<x.y.z>" --notes "<changelog>"`.
+3. Tag: `git tag -a v<x.y.z> -m "v<x.y.z>"`.
+4. Push main and the tag, with explicit refspecs:
+
+   ```bash
+   git push origin main:main
+   git push origin v<x.y.z>
+   ```
+
+Pushing the tag *is* the release. `.github/workflows/release.yml` fires on `v*`
+and:
+
+- builds `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` and
+  `x86_64-pc-windows-msvc`;
+- uploads the three tarballs and their `.sha256` files to the release;
+- generates a Homebrew formula and an AUR PKGBUILD as **workflow artifacts** —
+  they are not release assets, and nothing is pushed to a tap;
+- creates the GitHub release.
+
+**Do not run `gh release create`.** The workflow has already created the release
+by the time the tag lands, so the command fails with
+`HTTP 422: Release.tag_name already exists`.
+
+5. Replace the workflow's auto-generated notes with a curated changelog:
+
+   ```bash
+   gh release edit v<x.y.z> --notes-file /tmp/notes.md
+   ```
+
+   Match the shape previous releases use: `## What's Changed`, then
+   `### Highlights` (a short paragraph per item, explaining *why* it matters),
+   then `### Features` / `### Fixes` / `### Docs` / `### Tests` listing the
+   commit subjects.
+
+The auto-generated changelog groups commits by Conventional Commits prefix, so
+an accurate prefix is what gets each change filed correctly — a `chore:` bullet
+lands under "Chores", not "Fixes". This is also why commit messages are
+English-only: the same subjects end up in the published release notes.
 
 ## Project Overview
 
