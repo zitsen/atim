@@ -322,7 +322,14 @@ impl Server {
                 // poll over timers and over queued monitor work.
                 biased;
                 Some(event) = im_rx.recv() => {
-                    dispatch_inbound(&self, &lanes, event).await;
+                    {
+                        let server = Arc::clone(&self);
+                        let handle = move |ev: ImEvent| {
+                            let server = Arc::clone(&server);
+                            async move { server.handle_im_event(ev).await }
+                        };
+                        dispatch_inbound(&lanes, event, handle).await;
+                    }
                 }
                 Some(job) = house_rx.recv() => {
                     if let Err(e) = self.apply_housekeeping(job).await {
@@ -539,61 +546,12 @@ impl Server {
                 chat_name: None,
             };
 
-            // ── Fold repeated tool calls ──
-            //
-            // Decided before anything is sent: folding a run of identical calls
-            // into one message means the rest must never reach the IM at all.
-            // Only complete call+result pairs fold, and only when both halves
-            // match — a call whose output changed is news, not a repeat.
-            let mut result_at: HashMap<&str, usize> = HashMap::new();
-            for (i, m) in group.iter().enumerate() {
-                if m.content_type == atim_core::message::ContentType::ToolResult
-                    && !m.text.is_empty()
-                    && let Some(tuid) = m.tool_use_id.as_deref()
-                {
-                    result_at.entry(tuid).or_insert(i);
-                }
-            }
-
-            let mut fold_keys: HashMap<String, FoldKey> = HashMap::new();
-            let mut by_key: HashMap<FoldKey, Vec<String>> = HashMap::new();
-            for m in group.iter() {
-                if m.content_type != atim_core::message::ContentType::ToolUse
-                    || !foldable(m.tool_name.as_deref())
-                {
-                    continue;
-                }
-                let Some(tuid) = m.tool_use_id.as_deref() else {
-                    continue;
-                };
-                let Some(&ri) = result_at.get(tuid) else {
-                    continue;
-                };
-                let key = FoldKey::new(
-                    (chat_id, thread_id_val),
-                    m.tool_name.as_deref(),
-                    &m.text,
-                    &group[ri].text,
-                );
-                fold_keys.insert(tuid.to_string(), key.clone());
-                by_key.entry(key).or_default().push(tuid.to_string());
-            }
-
-            // Show the first of each run of identical calls, fold the rest.
-            let mut folded: HashSet<String> = HashSet::new();
-            let mut touched: Vec<FoldKey> = Vec::new();
-            {
+            // Fold repeated tool calls before anything is sent: the repeats
+            // must never reach the IM at all. See `plan_folds`.
+            let folds = {
                 let mut folder = self.fold.lock().await;
-                for (key, use_ids) in &by_key {
-                    touched.push(key.clone());
-                    let show_first =
-                        matches!(folder.observe(key, use_ids.len()), FoldPlan::ShowFirst);
-                    let skip = if show_first { 1 } else { 0 };
-                    for tuid in use_ids.iter().skip(skip) {
-                        folded.insert(tuid.clone());
-                    }
-                }
-            }
+                plan_folds(group, &mut folder, (chat_id, thread_id_val))
+            };
 
             // ── P1.3 Status→Content + P1.4 Message Merging ──
             //
@@ -666,7 +624,7 @@ impl Server {
                         if msg
                             .tool_use_id
                             .as_deref()
-                            .is_some_and(|t| folded.contains(t))
+                            .is_some_and(|t| folds.skip.contains(t))
                         {
                             continue;
                         }
@@ -743,7 +701,7 @@ impl Server {
                         if msg
                             .tool_use_id
                             .as_deref()
-                            .is_some_and(|t| folded.contains(t))
+                            .is_some_and(|t| folds.skip.contains(t))
                         {
                             continue;
                         }
@@ -792,7 +750,7 @@ impl Server {
                                 // This message now displays the call and its
                                 // output — later identical ones fold onto it.
                                 if let Some(key) =
-                                    msg.tool_use_id.as_deref().and_then(|t| fold_keys.get(t))
+                                    msg.tool_use_id.as_deref().and_then(|t| folds.keys.get(t))
                                 {
                                     self.fold.lock().await.bind(key, mid, combined);
                                 }
@@ -824,7 +782,11 @@ impl Server {
             // thousand repeats cost about ten edits, not a thousand.
             let updates: Vec<CounterUpdate> = {
                 let mut folder = self.fold.lock().await;
-                touched.iter().filter_map(|k| folder.refresh(k)).collect()
+                folds
+                    .touched
+                    .iter()
+                    .filter_map(|k| folder.refresh(k))
+                    .collect()
             };
             for update in updates {
                 let _ = self.edit_fold_counter(&target, &update).await;
@@ -5503,6 +5465,76 @@ const BOX_DRAWING: &[char] = &[
 ];
 
 /// Transcribe an OGG voice message using OpenAI's gpt-4o-transcribe model.
+/// What the fold planner decided about one batch of session output.
+struct BatchFolds {
+    /// `tool_use_id`s to skip — a folded call's result goes with it.
+    skip: HashSet<String>,
+    /// Groups this batch touched, for counter refreshes afterwards.
+    touched: Vec<FoldKey>,
+    /// Fold key per complete call, so an anchor can be bound to its message.
+    keys: HashMap<String, FoldKey>,
+}
+
+/// Decide which tool calls of `group` are repeats of one already on the chat.
+///
+/// Folding is decided up front because the repeats must never reach the IM at
+/// all — once sent they cannot be taken back. Only complete call+result pairs
+/// fold: a call whose result has not arrived yet cannot be compared on both
+/// halves, and a call whose output changed is news rather than a repeat.
+///
+/// Pure apart from the folder bookkeeping, so the pairing and skip rules can be
+/// tested without standing up a server or an IM.
+fn plan_folds(group: &[&NewMessage], folder: &mut ChatterFolder, chat: (i64, i64)) -> BatchFolds {
+    use atim_core::message::ContentType;
+
+    // First non-empty result per call id — a result with no text carries
+    // nothing to compare, and images come through on their own entry.
+    let mut result_at: HashMap<&str, usize> = HashMap::new();
+    for (i, m) in group.iter().enumerate() {
+        if m.content_type == ContentType::ToolResult
+            && !m.text.is_empty()
+            && let Some(tuid) = m.tool_use_id.as_deref()
+        {
+            result_at.entry(tuid).or_insert(i);
+        }
+    }
+
+    // Group the complete pairs, in batch order so "the first" is the earliest.
+    let mut keys: HashMap<String, FoldKey> = HashMap::new();
+    let mut by_key: HashMap<FoldKey, Vec<String>> = HashMap::new();
+    for m in group {
+        if m.content_type != ContentType::ToolUse || !foldable(m.tool_name.as_deref()) {
+            continue;
+        }
+        let Some(tuid) = m.tool_use_id.as_deref() else {
+            continue;
+        };
+        let Some(&ri) = result_at.get(tuid) else {
+            continue;
+        };
+        let key = FoldKey::new(chat, m.tool_name.as_deref(), &m.text, &group[ri].text);
+        keys.insert(tuid.to_string(), key.clone());
+        by_key.entry(key).or_default().push(tuid.to_string());
+    }
+
+    // Show the first of each run of identical calls, fold the rest.
+    let mut skip = HashSet::new();
+    let mut touched = Vec::new();
+    for (key, use_ids) in &by_key {
+        touched.push(key.clone());
+        let show_first = matches!(folder.observe(key, use_ids.len()), FoldPlan::ShowFirst);
+        for tuid in use_ids.iter().skip(if show_first { 1 } else { 0 }) {
+            skip.insert(tuid.clone());
+        }
+    }
+
+    BatchFolds {
+        skip,
+        touched,
+        keys,
+    }
+}
+
 /// Inbound lanes, one per chat: `(sender, last used)`.
 type InboundLanes = Arc<Mutex<HashMap<i64, (mpsc::UnboundedSender<ImEvent>, std::time::Instant)>>>;
 
@@ -5524,7 +5556,15 @@ fn storm_key(target: &MessageTarget) -> (i64, i64) {
 /// ordering within a conversation is preserved while different conversations
 /// proceed independently. Evicting an idle lane drops its sender, which lets
 /// the worker finish.
-async fn dispatch_inbound(server: &Arc<Server>, lanes: &InboundLanes, event: ImEvent) {
+///
+/// The handler is passed in rather than reaching for `Server` so the lane
+/// behaviour — one worker per chat, FIFO within it, eviction — can be tested on
+/// its own.
+async fn dispatch_inbound<H, F>(lanes: &InboundLanes, event: ImEvent, handle: H)
+where
+    H: Fn(ImEvent) -> F + Clone + Send + Sync + 'static,
+    F: std::future::Future<Output = Result<()>> + Send + 'static,
+{
     let chat = event.target.chat_id.0;
     let now = std::time::Instant::now();
     let tx = {
@@ -5535,10 +5575,10 @@ async fn dispatch_inbound(server: &Arc<Server>, lanes: &InboundLanes, event: ImE
             tx.clone()
         } else {
             let (tx, mut rx) = mpsc::unbounded_channel();
-            let server = Arc::clone(server);
+            let handle = handle.clone();
             tokio::spawn(async move {
                 while let Some(ev) = rx.recv().await {
-                    if let Err(e) = server.handle_im_event(ev).await {
+                    if let Err(e) = handle(ev).await {
                         tracing::error!("handle_im_event error: {e}");
                     }
                 }
@@ -6652,5 +6692,352 @@ mod tests {
         let original = "💻 Bash:\n```bash\ncargo test\n```";
         let result = format_tool_result(original, "exit 1", Some("Bash"));
         assert_eq!(result, "✅ Bash:\n```bash\ncargo test\n``` (exit 1)");
+    }
+
+    // ── plan_folds: the fold wiring, without a server or an IM ──
+
+    use atim_core::message::ContentType;
+    use atim_core::message::SessionId;
+
+    fn entry(content_type: ContentType, tool_use_id: &str, text: &str, tool: &str) -> NewMessage {
+        NewMessage {
+            session_id: SessionId("sid".to_string()),
+            text: text.to_string(),
+            is_complete: true,
+            content_type,
+            tool_use_id: (!tool_use_id.is_empty()).then(|| tool_use_id.to_string()),
+            role: "assistant".to_string(),
+            tool_name: (!tool.is_empty()).then(|| tool.to_string()),
+            image_data: None,
+            raw_input: None,
+        }
+    }
+
+    /// One complete Bash call: the call and its result.
+    fn pair(id: &str, cmd: &str, out: &str) -> [NewMessage; 2] {
+        [
+            entry(
+                ContentType::ToolUse,
+                id,
+                &format!("💻 Bash:\n```bash\n{cmd}\n```"),
+                "Bash",
+            ),
+            entry(ContentType::ToolResult, id, out, "Bash"),
+        ]
+    }
+
+    #[test]
+    fn test_a_run_of_identical_calls_skips_all_but_the_first() {
+        let mut folder = ChatterFolder::new();
+        let batch: Vec<NewMessage> = (0..3)
+            .flat_map(|i| pair(&format!("u{i}"), "git status", "clean"))
+            .collect();
+        let refs: Vec<&NewMessage> = batch.iter().collect();
+
+        let plan = plan_folds(&refs, &mut folder, (1, 2));
+        assert_eq!(plan.skip.len(), 2, "two of the three identical calls fold");
+        assert!(
+            !plan.skip.contains("u0"),
+            "the earliest call is the one shown"
+        );
+    }
+
+    #[test]
+    fn test_a_folded_result_is_skipped_with_its_call() {
+        // A result with no call in front of it would post output the reader
+        // cannot place, so both halves fold together.
+        let mut folder = ChatterFolder::new();
+        let batch: Vec<NewMessage> = (0..2)
+            .flat_map(|i| pair(&format!("u{i}"), "git status", "clean"))
+            .collect();
+        let refs: Vec<&NewMessage> = batch.iter().collect();
+
+        let plan = plan_folds(&refs, &mut folder, (1, 2));
+        assert!(plan.skip.contains("u1"));
+    }
+
+    #[test]
+    fn test_a_call_whose_result_is_missing_is_never_folded() {
+        // Nothing to compare both halves on — the normal send+edit path takes it.
+        let mut folder = ChatterFolder::new();
+        let batch: Vec<NewMessage> = (0..3)
+            .map(|i| {
+                entry(
+                    ContentType::ToolUse,
+                    &format!("u{i}"),
+                    "💻 Bash:\n```bash\ngit status\n```",
+                    "Bash",
+                )
+            })
+            .collect();
+        let refs: Vec<&NewMessage> = batch.iter().collect();
+
+        let plan = plan_folds(&refs, &mut folder, (1, 2));
+        assert!(plan.skip.is_empty());
+        assert!(plan.keys.is_empty());
+    }
+
+    #[test]
+    fn test_changed_output_starts_a_new_group() {
+        // Same command, different output: that is news, not a repeat.
+        let mut folder = ChatterFolder::new();
+        let batch: Vec<NewMessage> = [
+            pair("u0", "git status", "clean"),
+            pair("u1", "git status", "3 changed"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let refs: Vec<&NewMessage> = batch.iter().collect();
+
+        let plan = plan_folds(&refs, &mut folder, (1, 2));
+        assert!(plan.skip.is_empty());
+        assert_eq!(plan.touched.len(), 2);
+    }
+
+    #[test]
+    fn test_edits_are_never_folded() {
+        // The user reviews changes one by one; collapsing them would hide work.
+        let mut folder = ChatterFolder::new();
+        let batch: Vec<NewMessage> = (0..3)
+            .flat_map(|i| {
+                [
+                    entry(
+                        ContentType::ToolUse,
+                        &format!("u{i}"),
+                        "✏️ Edit: /a.rs",
+                        "Edit",
+                    ),
+                    entry(ContentType::ToolResult, &format!("u{i}"), "updated", "Edit"),
+                ]
+            })
+            .collect();
+        let refs: Vec<&NewMessage> = batch.iter().collect();
+
+        let plan = plan_folds(&refs, &mut folder, (1, 2));
+        assert!(plan.skip.is_empty());
+    }
+
+    #[test]
+    fn test_the_same_call_in_another_chat_is_not_a_repeat() {
+        let mut folder = ChatterFolder::new();
+        let batch: Vec<NewMessage> = pair("u0", "git status", "clean").to_vec();
+        let refs: Vec<&NewMessage> = batch.iter().collect();
+
+        let ours = plan_folds(&refs, &mut folder, (1, 2));
+        let theirs = plan_folds(&refs, &mut folder, (9, 9));
+        assert!(ours.skip.is_empty());
+        assert!(theirs.skip.is_empty(), "each chat shows its own copy");
+    }
+
+    #[test]
+    fn test_touched_lists_the_groups_this_batch_represents() {
+        // The refresh pass walks these to rewrite counters — missing one here
+        // leaves its counter stale for good.
+        let mut folder = ChatterFolder::new();
+        let batch: Vec<NewMessage> = [
+            pair("u0", "git status", "clean"),
+            pair("u1", "git status", "clean"),
+            pair("u2", "git log", "one"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let refs: Vec<&NewMessage> = batch.iter().collect();
+
+        let plan = plan_folds(&refs, &mut folder, (1, 2));
+        assert_eq!(plan.touched.len(), 2);
+        assert_eq!(plan.keys.len(), 3, "every complete call keeps its key");
+    }
+
+    #[test]
+    fn test_an_empty_result_does_not_make_a_pair() {
+        // An image-only result carries no text to compare and comes through on
+        // its own entry — it must not fold its call away.
+        let mut folder = ChatterFolder::new();
+        let batch = [
+            entry(
+                ContentType::ToolUse,
+                "u0",
+                "💻 Bash:\n```bash\nls\n```",
+                "Bash",
+            ),
+            entry(ContentType::ToolResult, "u0", "", "Bash"),
+            entry(
+                ContentType::ToolUse,
+                "u1",
+                "💻 Bash:\n```bash\nls\n```",
+                "Bash",
+            ),
+            entry(ContentType::ToolResult, "u1", "", "Bash"),
+        ];
+        let refs: Vec<&NewMessage> = batch.iter().collect();
+
+        let plan = plan_folds(&refs, &mut folder, (1, 2));
+        assert!(plan.skip.is_empty());
+    }
+
+    // ── the whole-runtime lock invariant ──
+
+    /// Regression guard for the read-modify-write locking.
+    ///
+    /// Handlers run concurrently (one lane per chat), so a save that skips the
+    /// lock silently drops another handler's updates. The pairing is spread over
+    /// 19 call sites in two files and the compiler cannot check it — a new
+    /// `load_runtime` ... `save_runtime` pair added without the lock compiles
+    /// fine. This is the only thing that catches that.
+    #[test]
+    fn test_every_runtime_save_is_taken_under_the_lock() {
+        for rel in ["src/server/mod.rs", "src/server/recovery.rs"] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
+            let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{rel}: {e}"));
+            for (i, line) in src.lines().enumerate() {
+                if line.contains(".save_runtime(") && !line.contains("save_runtime_locked(") {
+                    panic!(
+                        "{rel}:{} writes the whole runtime state without the lock:\n    {}",
+                        i + 1,
+                        line.trim()
+                    );
+                }
+            }
+        }
+    }
+
+    // ── inbound lanes ──
+
+    use atim_core::message::{ImEventKind, UserId};
+
+    type BoxFut = std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
+
+    fn inbound(chat: i64, text: &str) -> ImEvent {
+        ImEvent {
+            user_id: UserId(1),
+            target: MessageTarget {
+                chat_id: ChatId(chat),
+                thread_id: None,
+                chat_name: None,
+            },
+            kind: ImEventKind::Text {
+                text: text.to_string(),
+                is_mention: false,
+                is_group: false,
+                message_id: None,
+            },
+        }
+    }
+
+    fn lanes() -> InboundLanes {
+        Arc::new(Mutex::new(HashMap::new()))
+    }
+
+    /// Handler that reports the chat it saw, after `yield_now` so any
+    /// accidental second worker would be free to reorder.
+    fn recorder(tx: mpsc::UnboundedSender<i64>) -> impl Fn(ImEvent) -> BoxFut + Clone {
+        move |ev: ImEvent| {
+            let tx = tx.clone();
+            Box::pin(async move {
+                tokio::task::yield_now().await;
+                let _ = tx.send(ev.target.chat_id.0);
+                Ok(())
+            }) as BoxFut
+        }
+    }
+
+    #[tokio::test]
+    async fn test_events_within_a_chat_stay_in_order() {
+        let table = lanes();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let handle = recorder(tx);
+
+        const N: i64 = 25;
+        for i in 0..N {
+            dispatch_inbound(&table, inbound(1, &i.to_string()), handle.clone()).await;
+        }
+
+        let mut seen = Vec::new();
+        for _ in 0..N {
+            seen.push(rx.recv().await.expect("every event is handled"));
+        }
+        assert_eq!(seen, vec![1; N as usize], "one chat, one worker, in order");
+        assert_eq!(table.lock().await.len(), 1, "a chat gets exactly one lane");
+    }
+
+    #[tokio::test]
+    async fn test_a_blocked_chat_does_not_hold_up_another() {
+        // The whole point of the lanes: chat 1 stuck behind something slow must
+        // not delay chat 2's messages.
+        let table = lanes();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let gate = Arc::new(tokio::sync::Notify::new());
+
+        let handle = {
+            let gate = Arc::clone(&gate);
+            move |ev: ImEvent| {
+                let tx = tx.clone();
+                let gate = Arc::clone(&gate);
+                Box::pin(async move {
+                    let chat = ev.target.chat_id.0;
+                    if chat == 1 {
+                        gate.notified().await; // chat 1 is waiting on something slow
+                    }
+                    let _ = tx.send(chat);
+                    Ok(())
+                }) as BoxFut
+            }
+        };
+
+        dispatch_inbound(&table, inbound(1, "slow"), handle.clone()).await;
+        dispatch_inbound(&table, inbound(2, "fast"), handle.clone()).await;
+
+        let first = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("chat 2 must not queue behind chat 1");
+        assert_eq!(first, Some(2));
+
+        gate.notify_one();
+        let second = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("chat 1 finishes once its work does");
+        assert_eq!(second, Some(1));
+    }
+
+    #[tokio::test]
+    async fn test_a_second_chat_gets_a_lane_of_its_own() {
+        let table = lanes();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let handle = recorder(tx);
+
+        dispatch_inbound(&table, inbound(1, "a"), handle.clone()).await;
+        dispatch_inbound(&table, inbound(2, "b"), handle.clone()).await;
+        for _ in 0..2 {
+            rx.recv().await.expect("both chats are handled");
+        }
+        assert_eq!(table.lock().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_an_idle_lane_is_evicted_on_the_next_dispatch() {
+        // Otherwise a lane outlives its chat for as long as the process runs.
+        let table = lanes();
+        let (stale_tx, _keep) = mpsc::unbounded_channel();
+        let aged = std::time::Instant::now()
+            .checked_sub(LANE_IDLE + Duration::from_secs(1))
+            .expect("the clock runs back that far");
+        table.lock().await.insert(7, (stale_tx, aged));
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        dispatch_inbound(&table, inbound(7, "after the gap"), recorder(tx)).await;
+
+        assert_eq!(
+            rx.recv().await,
+            Some(7),
+            "a fresh lane must take over from the evicted one"
+        );
+        let map = table.lock().await;
+        assert_eq!(map.len(), 1);
+        assert!(
+            map.get(&7).expect("lane for chat 7").1 > aged,
+            "the stale entry was replaced, not reused"
+        );
     }
 }
