@@ -10,6 +10,73 @@ use super::{
     strip_ansi,
 };
 
+/// Pull `cwd` out of the head of a session JSONL.
+///
+/// The chunk is a fixed-size read, so its last line is usually truncated
+/// mid-object — that line simply fails to parse and is skipped.
+fn cwd_from_jsonl(chunk: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(chunk).ok()?;
+    for line in text.lines() {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(line)
+            && let Some(cwd) = val.get("cwd").and_then(|v| v.as_str())
+            && !cwd.is_empty()
+        {
+            return Some(cwd.to_string());
+        }
+    }
+    None
+}
+
+/// Index of the window `query` names, best match first.
+///
+/// An exact match beats a partial one, and a partial works in either
+/// direction: a window rendered as "3:Skills" still answers a query of
+/// "Skills". An empty query names nothing, which matters because a partial
+/// match would otherwise succeed against every candidate.
+fn pick_window<'a>(query: &str, names: impl Iterator<Item = &'a str>) -> Option<usize> {
+    if query.is_empty() {
+        return None;
+    }
+    let names: Vec<&str> = names.collect();
+    names.iter().position(|n| *n == query).or_else(|| {
+        names
+            .iter()
+            .position(|n| n.contains(query) || query.contains(n))
+    })
+}
+
+/// The command inside a `!<cmd>` message, if that is what this is.
+///
+/// A bare `!` is not a command — splitting it would leave the agent reading an
+/// empty line as a message.
+fn shell_command_payload(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix('!')?;
+    (!rest.is_empty()).then(|| rest.trim_start())
+}
+
+/// Coerce a `/atim config set` boolean, or `None` for anything else.
+fn parse_bool_setting(value: &str) -> Option<bool> {
+    match value {
+        "true" | "1" | "on" => Some(true),
+        "false" | "0" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+/// Everything from the last line mentioning `command` to the end of `content`.
+///
+/// The modal echoes the command it was invoked with, and the captured pane
+/// still holds whatever scrolled above it. When the command is absent the
+/// whole capture is returned rather than nothing, so the caller has something
+/// to show instead of a blank reply.
+fn after_last_mention(content: &str, command: &str) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    match lines.iter().rposition(|l| l.contains(command)) {
+        Some(idx) => lines[idx..].join("\n"),
+        None => content.to_string(),
+    }
+}
+
 impl super::Server {
     /// Extract the `cwd` field from a session's JSONL file.
     ///
@@ -19,17 +86,7 @@ impl super::Server {
         let path = resolve_jsonl(session_id).await?;
         let data = tokio::fs::read(&path).await.ok()?;
         // Only read the first 4 KB — cwd is in the first user message.
-        let chunk = &data[..data.len().min(4096)];
-        let text = std::str::from_utf8(chunk).ok()?;
-        for line in text.lines() {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(line)
-                && let Some(cwd) = val.get("cwd").and_then(|v| v.as_str())
-                && !cwd.is_empty()
-            {
-                return Some(cwd.to_string());
-            }
-        }
-        None
+        cwd_from_jsonl(&data[..data.len().min(4096)])
     }
 
     /// Recover a session when the tmux window has died.
@@ -450,47 +507,23 @@ impl super::Server {
     /// the normal session-prefixed path.
     pub(super) async fn find_window_by_name(&self, name: &str) -> Option<String> {
         let windows = self.tmux_mgr.list_windows().await.ok()?;
-        // Try exact match first
-        if let Some(w) = windows.iter().find(|w| w.name == name) {
-            return Some(w.window_id.0.clone());
-        }
-        // Try contains match (e.g. "Skills" matches "3:Skills")
-        if let Some(w) = windows
-            .iter()
-            .find(|w| w.name.contains(name) || name.contains(&w.name))
-        {
-            return Some(w.window_id.0.clone());
+        if let Some(i) = pick_window(name, windows.iter().map(|w| w.name.as_str())) {
+            return Some(windows[i].window_id.0.clone());
         }
 
-        // Fallback: search all tmux sessions (window may be in a user's
-        // session rather than the atim session — common after restart).
+        // Fallback: the window may be in a user's session rather than the atim
+        // one — common after a restart. Pull it in so later lookups hit the
+        // first branch directly.
         let all_windows = self.tmux_mgr.list_all_windows().await.ok()?;
-        // Try exact match across all sessions
-        for (w, session) in &all_windows {
-            if w.name == name {
-                // Move into atim session so future lookups work directly
-                if session != self.tmux_mgr.session_name() {
-                    self.tmux_mgr
-                        .move_window_into_session(session, &w.window_id)
-                        .await
-                        .ok()?;
-                }
-                return Some(w.window_id.0.clone());
-            }
+        let i = pick_window(name, all_windows.iter().map(|(w, _)| w.name.as_str()))?;
+        let (w, session) = &all_windows[i];
+        if session != self.tmux_mgr.session_name() {
+            self.tmux_mgr
+                .move_window_into_session(session, &w.window_id)
+                .await
+                .ok()?;
         }
-        // Try contains match across all sessions
-        for (w, session) in &all_windows {
-            if w.name.contains(name) || name.contains(&w.name) {
-                if session != self.tmux_mgr.session_name() {
-                    self.tmux_mgr
-                        .move_window_into_session(session, &w.window_id)
-                        .await
-                        .ok()?;
-                }
-                return Some(w.window_id.0.clone());
-            }
-        }
-        None
+        Some(w.window_id.0.clone())
     }
 
     /// Send text to the agent, optimizing `!` shell commands by sending
@@ -502,8 +535,7 @@ impl super::Server {
         text: &str,
         is_copilot: bool,
     ) -> Result<()> {
-        if text.starts_with('!') && text.len() > 1 {
-            let cmd = text[1..].trim_start();
+        if let Some(cmd) = shell_command_payload(text) {
             if is_copilot {
                 self.tmux_mgr.send_line_chars(window_id, "!", 10).await?;
                 tokio::time::sleep(Duration::from_millis(200)).await;
@@ -558,18 +590,10 @@ impl super::Server {
         // 5. Dismiss the modal
         self.tmux_mgr.send_key(window_id, "Escape").await.ok();
 
-        // 6. Find the last occurrence of the command in the captured output
-        //    and take everything after it as the modal content.
-        let content: String = content
-            .lines()
-            .rev()
-            .position(|line| line.contains(command))
-            .map(|pos| {
-                let line_count = content.lines().count();
-                let skip = line_count - pos - 1;
-                content.lines().skip(skip).collect::<Vec<_>>().join("\n")
-            })
-            .unwrap_or(content);
+        // 6. The modal echoes the command it was invoked with and the capture
+        //    still holds whatever scrolled above it, so anchor on the last
+        //    mention of the command.
+        let content = after_last_mention(&content, command);
         let trimmed = content.trim();
 
         if trimmed.is_empty() {
@@ -1090,19 +1114,12 @@ impl super::Server {
         let value = parts.next().unwrap_or("").trim();
         match key {
             "replyAtOnly" => {
-                let val = match value {
-                    "true" | "1" | "on" => true,
-                    "false" | "0" | "off" => false,
-                    _ => {
-                        let _ = self
-                            .im_adapter
-                            .send_message(
-                                target,
-                                "Usage: `/atim config set replyAtOnly [true|false]`",
-                            )
-                            .await;
-                        return;
-                    }
+                let Some(val) = parse_bool_setting(value) else {
+                    let _ = self
+                        .im_adapter
+                        .send_message(target, "Usage: `/atim config set replyAtOnly [true|false]`")
+                        .await;
+                    return;
                 };
                 let thread_id = target.thread_id.map(|t| t.0).unwrap_or(0);
                 let _rt_guard = self.state_mgr.lock_runtime().await;
@@ -1217,5 +1234,182 @@ impl super::Server {
                     .await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── cwd_from_jsonl ──
+
+    #[test]
+    fn test_cwd_is_read_from_the_first_line_that_has_one() {
+        let chunk = br#"{"type":"summary","summary":"x"}
+{"type":"user","cwd":"/home/me/project","message":{}}
+{"type":"assistant","cwd":"/elsewhere"}
+"#;
+        assert_eq!(cwd_from_jsonl(chunk).as_deref(), Some("/home/me/project"));
+    }
+
+    #[test]
+    fn test_a_truncated_tail_is_skipped_not_fatal() {
+        // The caller reads a fixed-size chunk, so the last line is routinely
+        // cut mid-object. It must not stop the scan.
+        let chunk = br#"{"type":"user","cwd":"/wanted"}
+{"type":"assistant","cwd":"/half"#;
+        assert_eq!(cwd_from_jsonl(chunk).as_deref(), Some("/wanted"));
+    }
+
+    #[test]
+    fn test_an_empty_cwd_does_not_count() {
+        let chunk = br#"{"type":"user","cwd":""}
+{"type":"user","cwd":"/real"}
+"#;
+        assert_eq!(cwd_from_jsonl(chunk).as_deref(), Some("/real"));
+    }
+
+    #[test]
+    fn test_no_cwd_anywhere_is_none() {
+        let chunk = br#"{"type":"summary","summary":"x"}
+garbage that is not json
+"#;
+        assert_eq!(cwd_from_jsonl(chunk), None);
+    }
+
+    #[test]
+    fn test_invalid_utf8_is_none_rather_than_a_panic() {
+        assert_eq!(cwd_from_jsonl(&[0xff, 0xfe, 0x00]), None);
+    }
+
+    // ── pick_window ──
+
+    #[test]
+    fn test_an_exact_name_beats_an_earlier_partial_one() {
+        // "3:Skills" comes first, but the query names the other window exactly.
+        let names = ["3:Skills", "Skills"];
+        assert_eq!(pick_window("Skills", names.iter().copied()), Some(1));
+    }
+
+    #[test]
+    fn test_a_partial_match_works_in_either_direction() {
+        // tmux renders a window as "<index>:<name>".
+        let names = ["3:Skills"];
+        assert_eq!(pick_window("Skills", names.iter().copied()), Some(0));
+        assert_eq!(pick_window("3:Skills", names.iter().copied()), Some(0));
+    }
+
+    #[test]
+    fn test_the_first_of_several_equal_matches_wins() {
+        let names = ["atim", "atim"];
+        assert_eq!(pick_window("atim", names.iter().copied()), Some(0));
+    }
+
+    #[test]
+    fn test_an_empty_query_names_nothing() {
+        // Every name contains "", so a partial match would otherwise win and
+        // silently target whatever window happens to be first.
+        let names = ["atim", "zsh"];
+        assert_eq!(pick_window("", names.iter().copied()), None);
+    }
+
+    #[test]
+    fn test_no_candidates_is_none() {
+        assert_eq!(pick_window("Skills", std::iter::empty()), None);
+    }
+
+    // ── shell_command_payload ──
+
+    #[test]
+    fn test_a_bang_prefix_yields_the_command() {
+        assert_eq!(shell_command_payload("!ls -la"), Some("ls -la"));
+        assert_eq!(shell_command_payload("! ls"), Some("ls"));
+        assert_eq!(shell_command_payload("!   ls"), Some("ls"));
+    }
+
+    #[test]
+    fn test_a_bare_bang_is_not_a_command() {
+        // Sending "!" alone would leave the agent reading an empty line.
+        assert_eq!(shell_command_payload("!"), None);
+    }
+
+    #[test]
+    fn test_a_double_bang_keeps_the_second() {
+        assert_eq!(shell_command_payload("!!"), Some("!"));
+    }
+
+    #[test]
+    fn test_ordinary_text_is_not_a_command() {
+        assert_eq!(shell_command_payload("hello"), None);
+        assert_eq!(shell_command_payload(""), None);
+        assert_eq!(shell_command_payload("what does ! do?"), None);
+    }
+
+    // ── parse_bool_setting ──
+
+    #[test]
+    fn test_booleans_accept_the_spellings_the_help_lists() {
+        for truthy in ["true", "1", "on"] {
+            assert_eq!(parse_bool_setting(truthy), Some(true), "{truthy}");
+        }
+        for falsy in ["false", "0", "off"] {
+            assert_eq!(parse_bool_setting(falsy), Some(false), "{falsy}");
+        }
+    }
+
+    #[test]
+    fn test_anything_else_is_rejected_so_the_caller_can_show_usage() {
+        // Case-sensitive as written: the help says [true|false], and a typo
+        // should get the usage line rather than silently setting something.
+        for bad in ["", "yes", "no", "2", "TRUE", "True", "on "] {
+            assert_eq!(parse_bool_setting(bad), None, "{bad:?}");
+        }
+    }
+
+    // ── after_last_mention ──
+
+    /// A `/status` capture: the pane still holds the shell line that launched
+    /// the agent, then the modal echoing the command, then the payload.
+    const STATUS_CAPTURE: &str = "\
+user@host ~ % claude
+/status
+ Version: 2.1.284
+ Session ID: 01729ab9-4b3e-49ac-a077-614fb93a0298
+ Model: opus
+";
+
+    #[test]
+    fn test_the_modal_payload_starts_at_the_echoed_command() {
+        let out = after_last_mention(STATUS_CAPTURE, "/status");
+        assert!(out.starts_with("/status\n"));
+        assert!(out.contains("Session ID: 01729ab9"));
+        // The shell line that scrolled above the modal is dropped.
+        assert!(!out.contains("user@host"));
+    }
+
+    #[test]
+    fn test_the_last_mention_wins_when_the_command_repeats() {
+        // The command appears in the scrollback and again as the modal echo;
+        // anchoring on the first would drag the scrollback along.
+        let capture = "/status\nold output that was already shown\n/status\nVersion: 2.1.284\n";
+        let out = after_last_mention(capture, "/status");
+        assert!(out.starts_with("/status\nVersion"));
+        assert!(!out.contains("old output"));
+    }
+
+    #[test]
+    fn test_a_command_that_is_absent_returns_the_whole_capture() {
+        // Better to show the raw pane than to reply with nothing.
+        let out = after_last_mention(STATUS_CAPTURE, "/usage");
+        assert_eq!(out, STATUS_CAPTURE);
+    }
+
+    #[test]
+    fn test_a_command_with_no_line_of_its_own_still_anchors() {
+        // The echo is matched as a substring, so a padded or decorated echo
+        // still anchors.
+        let capture = "noise\n  /status  \nVersion: 2.1.284\n";
+        let out = after_last_mention(capture, "/status");
+        assert_eq!(out, "  /status  \nVersion: 2.1.284");
     }
 }
