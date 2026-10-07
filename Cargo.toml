@@ -43,5 +43,5 @@ pulldown-cmark = "0.13"
 libc = "0.2"
 futures-util = "0.3"
 moka = "0.12"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 toml = "1.1"
