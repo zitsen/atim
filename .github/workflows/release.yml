@@ -239,7 +239,7 @@ jobs:
             end
 
             test do
-              assert_match "atim", shell_output("\#{bin}/atim --help")
+              assert_match "atim", shell_output("#{bin}/atim --help")
             end
           end
           FORMULA
