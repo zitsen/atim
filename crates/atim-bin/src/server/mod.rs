@@ -6382,15 +6382,14 @@ mod tests {
 
         // Simulate SessionMapChanged logic: update chat_binding when
         // window_binding has new session_id and display_name matches
-        for (window_id, session_id) in &[("@3", "ses_new")] {
-            if let Some(wb) = rt.window_bindings.get(*window_id) {
-                let window_name = wb.window_name.clone();
-                if let Some(cb) = rt.chat_bindings.iter_mut().find(|cb| {
-                    cb.display_name == window_name
-                        && (cb.session_id.is_empty() || cb.session_id != *session_id)
-                }) {
-                    cb.session_id = (*session_id).to_string();
-                }
+        let (window_id, session_id) = ("@3", "ses_new");
+        if let Some(wb) = rt.window_bindings.get(window_id) {
+            let window_name = wb.window_name.clone();
+            if let Some(cb) = rt.chat_bindings.iter_mut().find(|cb| {
+                cb.display_name == window_name
+                    && (cb.session_id.is_empty() || cb.session_id != session_id)
+            }) {
+                cb.session_id = session_id.to_string();
             }
         }
 
@@ -6410,15 +6409,14 @@ mod tests {
         let mut rt = make_test_runtime();
 
         // Should NOT update because session_id already matches
-        for (window_id, session_id) in &[("@1", "ses_test")] {
-            if let Some(wb) = rt.window_bindings.get(*window_id) {
-                let window_name = wb.window_name.clone();
-                if let Some(cb) = rt.chat_bindings.iter_mut().find(|cb| {
-                    cb.display_name == window_name
-                        && (cb.session_id.is_empty() || cb.session_id != *session_id)
-                }) {
-                    cb.session_id = "should_not_change".into();
-                }
+        let (window_id, session_id) = ("@1", "ses_test");
+        if let Some(wb) = rt.window_bindings.get(window_id) {
+            let window_name = wb.window_name.clone();
+            if let Some(cb) = rt.chat_bindings.iter_mut().find(|cb| {
+                cb.display_name == window_name
+                    && (cb.session_id.is_empty() || cb.session_id != session_id)
+            }) {
+                cb.session_id = "should_not_change".into();
             }
         }
 
