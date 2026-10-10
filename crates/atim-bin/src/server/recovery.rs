@@ -313,6 +313,24 @@ impl super::Server {
         };
         tokio::time::sleep(Duration::from_millis(startup_wait)).await;
 
+        // Recovering into a directory Claude has not seen opens the workspace
+        // trust dialog, and the pending message below would answer it: its
+        // Enter confirms the default, "No, exit", killing the recovered agent.
+        if !self.confirm_agent_launch(&new_window_id).await {
+            let pane = self
+                .tmux_mgr
+                .capture_pane(&new_window_id)
+                .await
+                .unwrap_or_default();
+            let clean = atim_parser::terminal::TerminalParser::strip_ansi(&pane);
+            let err_msg = format!(
+                "❌ Agent exited after trust dialog:\n```\n{}```",
+                clean.trim()
+            );
+            let _ = self.im_adapter.edit_message(target, msg_id, &err_msg).await;
+            return Ok(());
+        }
+
         // ── Update V2 runtime: re-key window_binding and chat_binding ──
         // Single load-save cycle to avoid race conditions with concurrent state writers.
         if !old_window_id.is_empty() {

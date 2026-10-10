@@ -1318,6 +1318,27 @@ impl Server {
                     );
                 }
 
+                // The new agent may be sitting on the workspace trust dialog;
+                // the user's next message would otherwise answer it.
+                let _ = self
+                    .tmux_mgr
+                    .wait_for_agent_ready(&window_id, Duration::from_secs(4))
+                    .await;
+                if !self.confirm_agent_launch(&window_id).await {
+                    let pane = self
+                        .tmux_mgr
+                        .capture_pane(&window_id)
+                        .await
+                        .unwrap_or_default();
+                    let clean = atim_parser::terminal::TerminalParser::strip_ansi(&pane);
+                    let err_msg = format!(
+                        "❌ Agent exited after trust dialog:\n```\n{}```",
+                        clean.trim()
+                    );
+                    let _ = self.im_adapter.send_message(&target, &err_msg).await;
+                    return Ok(());
+                }
+
                 // Update window binding via V2
                 let _rt_guard = self.state_mgr.lock_runtime().await;
                 let mut rt = self.state_mgr.load_runtime().await?;
@@ -1572,17 +1593,30 @@ impl Server {
                             tokio::time::sleep(Duration::from_millis(500)).await;
                         }
                         if started {
+                            // The relaunch may be showing the workspace trust
+                            // dialog; the user's next message would answer it.
                             let _ = self
-                                .im_adapter
-                                .send_message(
-                                    &target,
-                                    if session_id.is_some() {
-                                        "✅ Session reloaded (resumed)."
-                                    } else {
-                                        "✅ Agent reloaded."
-                                    },
-                                )
+                                .tmux_mgr
+                                .wait_for_agent_ready(&window_id, Duration::from_secs(4))
                                 .await;
+                            if !self.confirm_agent_launch(&window_id).await {
+                                let _ = self
+                                    .im_adapter
+                                    .send_message(&target, "❌ Agent exited after trust dialog.")
+                                    .await;
+                            } else {
+                                let _ = self
+                                    .im_adapter
+                                    .send_message(
+                                        &target,
+                                        if session_id.is_some() {
+                                            "✅ Session reloaded (resumed)."
+                                        } else {
+                                            "✅ Agent reloaded."
+                                        },
+                                    )
+                                    .await;
+                            }
                         } else {
                             let _ = self
                                 .im_adapter
@@ -1665,10 +1699,23 @@ impl Server {
                             tokio::time::sleep(Duration::from_millis(500)).await;
                         }
                         if started {
+                            // The fresh agent may be showing the workspace trust
+                            // dialog; the user's next message would answer it.
                             let _ = self
-                                .im_adapter
-                                .send_message(&target, "✅ New session started.")
+                                .tmux_mgr
+                                .wait_for_agent_ready(&window_id, Duration::from_secs(4))
                                 .await;
+                            if !self.confirm_agent_launch(&window_id).await {
+                                let _ = self
+                                    .im_adapter
+                                    .send_message(&target, "❌ Agent exited after trust dialog.")
+                                    .await;
+                            } else {
+                                let _ = self
+                                    .im_adapter
+                                    .send_message(&target, "✅ New session started.")
+                                    .await;
+                            }
                         } else {
                             let _ = self
                                 .im_adapter
@@ -2525,6 +2572,22 @@ impl Server {
                                 break;
                             }
                         }
+                    }
+                    // The re-launched agent may be on the workspace trust
+                    // dialog; forwarding the text now would answer it.
+                    if !self.confirm_agent_launch(&window_id).await {
+                        let pane = self
+                            .tmux_mgr
+                            .capture_pane(&window_id)
+                            .await
+                            .unwrap_or_default();
+                        let clean = atim_parser::terminal::TerminalParser::strip_ansi(&pane);
+                        let err_msg = format!(
+                            "❌ Agent exited after trust dialog:\n```\n{}```",
+                            clean.trim()
+                        );
+                        let _ = self.im_adapter.send_message(&target, &err_msg).await;
+                        return Ok(());
                     }
                     let is_copilot = wb_opt.map(|wb| wb.agent_type == "copilot").unwrap_or(false);
                     self.send_text_to_agent(&window_id, text, is_copilot)
@@ -3482,6 +3545,34 @@ impl Server {
         true
     }
 
+    /// Dismiss the workspace trust dialog on a freshly launched agent, and say
+    /// whether the agent survived it.
+    ///
+    /// Every launch path needs this before it types anything into the window.
+    /// A first run in any directory Claude has not seen before opens the
+    /// dialog, and on current Claude Code its default answer is "No, exit" —
+    /// so the first forwarded message's Enter confirms it and kills the agent
+    /// the message was meant for.
+    ///
+    /// Call it once the agent's TUI has settled: the dialog is a still pane, so
+    /// [`TerminalManager::wait_for_agent_ready`] reports it as "ready" and will
+    /// not tell you the difference.
+    async fn confirm_agent_launch(&self, window_id: &WindowId) -> bool {
+        if !self.auto_confirm_trust_dialog(window_id).await {
+            return true; // no dialog came up
+        }
+        if let Ok(info) = self.tmux_mgr.find_window(window_id).await
+            && is_shell_process(&info.current_command)
+        {
+            tracing::warn!(
+                "Agent in window {} exited on the workspace trust dialog",
+                window_id.0
+            );
+            return false;
+        }
+        true
+    }
+
     /// Actively discover the session_id by sending `/status` to the agent
     /// in the given window and parsing the Session ID from the response.
     ///
@@ -3710,26 +3801,21 @@ impl Server {
             .wait_for_agent_ready(&window_id, Duration::from_secs(4))
             .await;
 
-        // Auto-confirm trust folder dialog if present (first run in a new dir)
-        if self.auto_confirm_trust_dialog(&window_id).await {
-            // Verify the agent is still running after trust confirmation.
-            // If the agent exited (back to shell), report failure.
-            if let Ok(info) = self.tmux_mgr.find_window(&window_id).await
-                && is_shell_process(&info.current_command)
-            {
-                let pane = self
-                    .tmux_mgr
-                    .capture_pane(&window_id)
-                    .await
-                    .unwrap_or_default();
-                let clean = atim_parser::terminal::TerminalParser::strip_ansi(&pane);
-                let err_msg = format!(
-                    "❌ Agent exited after trust dialog:\n```\n{}```",
-                    clean.trim()
-                );
-                let _ = self.im_adapter.send_message(target, &err_msg).await;
-                return Ok(());
-            }
+        // A first run in a new directory opens the workspace trust dialog; it
+        // has to be answered before anything is typed into the window.
+        if !self.confirm_agent_launch(&window_id).await {
+            let pane = self
+                .tmux_mgr
+                .capture_pane(&window_id)
+                .await
+                .unwrap_or_default();
+            let clean = atim_parser::terminal::TerminalParser::strip_ansi(&pane);
+            let err_msg = format!(
+                "❌ Agent exited after trust dialog:\n```\n{}```",
+                clean.trim()
+            );
+            let _ = self.im_adapter.send_message(target, &err_msg).await;
+            return Ok(());
         }
 
         // Notify user the session is ready
@@ -3850,6 +3936,27 @@ impl Server {
         };
         self.tmux_mgr.send_line(&window_id, &resume_cmd).await?;
 
+        // Resuming into an untrusted directory shows the trust dialog just like
+        // a fresh launch, and the pending message would answer it.
+        let _ = self
+            .tmux_mgr
+            .wait_for_agent_ready(&window_id, Duration::from_secs(4))
+            .await;
+        if !self.confirm_agent_launch(&window_id).await {
+            let pane = self
+                .tmux_mgr
+                .capture_pane(&window_id)
+                .await
+                .unwrap_or_default();
+            let clean = atim_parser::terminal::TerminalParser::strip_ansi(&pane);
+            let err_msg = format!(
+                "❌ Agent exited after trust dialog:\n```\n{}```",
+                clean.trim()
+            );
+            let _ = self.im_adapter.send_message(target, &err_msg).await;
+            return Ok(());
+        }
+
         // Notify user the session is ready instead of sending the first line to Claude
         let _ = self
             .im_adapter
@@ -3958,21 +4065,17 @@ impl Server {
             }
         }
 
-        // Auto-confirm trust folder dialog if present (first run in a new dir)
-        if self.auto_confirm_trust_dialog(&wid).await {
-            // Verify the agent is still running after trust confirmation
-            if let Ok(info) = self.tmux_mgr.find_window(&wid).await
-                && is_shell_process(&info.current_command)
-            {
-                let pane = self.tmux_mgr.capture_pane(&wid).await.unwrap_or_default();
-                let clean = atim_parser::terminal::TerminalParser::strip_ansi(&pane);
-                let err_msg = format!(
-                    "❌ Agent exited after trust dialog:\n```\n{}```",
-                    clean.trim()
-                );
-                let _ = self.im_adapter.send_message(target, &err_msg).await;
-                return Ok(());
-            }
+        // A first run in a new directory opens the workspace trust dialog; it
+        // has to be answered before anything is typed into the window.
+        if !self.confirm_agent_launch(&wid).await {
+            let pane = self.tmux_mgr.capture_pane(&wid).await.unwrap_or_default();
+            let clean = atim_parser::terminal::TerminalParser::strip_ansi(&pane);
+            let err_msg = format!(
+                "❌ Agent exited after trust dialog:\n```\n{}```",
+                clean.trim()
+            );
+            let _ = self.im_adapter.send_message(target, &err_msg).await;
+            return Ok(());
         }
 
         // Notify user the session is ready
@@ -4109,6 +4212,23 @@ impl Server {
             .tmux_mgr
             .wait_for_agent_ready(&window_id, Duration::from_secs(4))
             .await;
+
+        // Answer the workspace trust dialog before the queued message reaches
+        // the window — its Enter would confirm the dialog's default, "No, exit".
+        if !self.confirm_agent_launch(&window_id).await {
+            let pane = self
+                .tmux_mgr
+                .capture_pane(&window_id)
+                .await
+                .unwrap_or_default();
+            let clean = atim_parser::terminal::TerminalParser::strip_ansi(&pane);
+            let err_msg = format!(
+                "❌ Agent exited after trust dialog:\n```\n{}```",
+                clean.trim()
+            );
+            let _ = self.im_adapter.send_message(target, &err_msg).await;
+            return Ok(());
+        }
 
         // Notify user the session is ready
         let _ = self
@@ -7208,5 +7328,71 @@ mod tests {
             trust_cursor_steps(" ❯ No, exit\n   Maybe later\n\n Enter to confirm\n"),
             None
         );
+    }
+
+    // ── every agent launch must confirm the trust dialog ──
+
+    /// Name of the top-level function a source line introduces.
+    fn top_level_fn(line: &str) -> Option<String> {
+        let t = line.trim_start();
+        if line.len() - t.len() > 4 {
+            return None;
+        }
+        let t = t
+            .strip_prefix("pub(super) ")
+            .or_else(|| t.strip_prefix("pub "))
+            .unwrap_or(t);
+        let t = t.strip_prefix("async ").unwrap_or(t);
+        t.strip_prefix("fn ")
+            .and_then(|r| r.split(['(', '<']).next())
+            .filter(|n| !n.is_empty())
+            .map(String::from)
+    }
+
+    /// Regression guard for the workspace trust dialog.
+    ///
+    /// Every path that launches an agent must confirm the dialog before the
+    /// window sees any keystroke — otherwise the next message answers it with
+    /// "No, exit" and kills the agent. The check is on all eight launch sites
+    /// here and in `recovery.rs`; this is what makes sure a ninth cannot be
+    /// added without it. It is how the `/recover` gap that let a session die
+    /// on the dialog (the Anke incident) was found.
+    #[test]
+    fn test_every_agent_launch_path_confirms_the_trust_dialog() {
+        for rel in ["src/server/mod.rs", "src/server/recovery.rs"] {
+            let src =
+                std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel))
+                    .unwrap_or_else(|e| panic!("{rel}: {e}"));
+
+            let mut current = String::new();
+            let mut bodies: HashMap<String, String> = HashMap::new();
+            for line in src.lines() {
+                if let Some(name) = top_level_fn(line) {
+                    current = name;
+                    bodies.entry(current.clone()).or_default();
+                }
+                if let Some(body) = bodies.get_mut(&current) {
+                    body.push_str(line);
+                    body.push('\n');
+                }
+            }
+
+            for (name, body) in &bodies {
+                if matches!(
+                    name.as_str(),
+                    "confirm_agent_launch" | "auto_confirm_trust_dialog" | "agent_launch_cmd"
+                ) {
+                    continue;
+                }
+                let launches =
+                    body.contains("agent_launch_cmd(") || body.contains("resume_command(");
+                let confirms = body.contains("confirm_agent_launch(");
+                assert!(
+                    !(launches && !confirms),
+                    "{rel}: fn `{name}` launches an agent but never confirms the workspace \\
+                     trust dialog"
+                );
+            }
+        }
     }
 }
