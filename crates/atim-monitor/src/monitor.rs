@@ -14,6 +14,13 @@ fn mimo_db_path() -> Option<PathBuf> {
     if p.exists() { Some(p) } else { None }
 }
 
+/// Path to the OpenCode SQLite session store.
+fn opencode_db_path() -> Option<PathBuf> {
+    let home = home::home_dir()?;
+    let p = home.join(".local/share/opencode/opencode.db");
+    if p.exists() { Some(p) } else { None }
+}
+
 /// Polling interval for JSONL file changes.
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -277,6 +284,11 @@ impl SessionMonitor {
             // 2b. Poll mimo SQLite DB for new messages
             if let Err(e) = self.poll_mimo_db(&tx).await {
                 tracing::debug!("Mimo DB poll failed: {e}");
+            }
+
+            // 2c. Poll the OpenCode SQLite DB for new messages
+            if let Err(e) = self.poll_opencode_db(&tx).await {
+                tracing::debug!("OpenCode DB poll failed: {e}");
             }
 
             // 3. Periodically persist byte offsets
@@ -544,6 +556,133 @@ impl SessionMonitor {
 
         if !messages.is_empty() {
             tracing::info!("[monitor] Mimo DB: {} new messages", messages.len());
+            send_in_batches(tx, messages);
+        }
+
+        Ok(())
+    }
+
+    /// Poll the OpenCode SQLite store for new assistant text parts.
+    ///
+    /// Same shape as the mimo DB poll: only sessions atim already tracks (i.e.
+    /// ones bound to a window) are queried, the high-water timestamp lives in
+    /// `byte_offsets` under `__opencode_last_time`, and only assistant text
+    /// parts are delivered — the user's own prompts are not echoed back.
+    async fn poll_opencode_db(&self, tx: &mpsc::UnboundedSender<MonitorEvent>) -> Result<()> {
+        let db_path = match opencode_db_path() {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+
+        let offset_key = "__opencode_last_time";
+
+        let last_time: i64 = {
+            let offsets = self.byte_offsets.lock().await;
+            offsets.get(offset_key).copied().unwrap_or(0) as i64
+        };
+
+        let known_sessions: Vec<String> = {
+            let offsets = self.byte_offsets.lock().await;
+            offsets
+                .keys()
+                .filter(|k| !k.starts_with("__"))
+                .cloned()
+                .collect()
+        };
+
+        if known_sessions.is_empty() {
+            return Ok(());
+        }
+
+        // rusqlite Connection is !Send, so run the query in a blocking task.
+        #[allow(clippy::type_complexity)]
+        let rows =
+            tokio::task::spawn_blocking(move || -> Result<Vec<(String, String, String, i64)>> {
+                let db = rusqlite::Connection::open_with_flags(
+                    &db_path,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )
+                .map_err(|e| atim_core::error::Error::State(format!("opencode open: {e}")))?;
+
+                let placeholders: String = known_sessions
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| format!("?{}", i + 2))
+                    .collect::<Vec<_>>()
+                    .join(",");
+
+                let sql = format!(
+                    "SELECT p.id, p.session_id, json_extract(p.data, '$.text'), p.time_updated
+                     FROM part p JOIN message m ON m.id = p.message_id
+                     WHERE p.time_updated > ?1
+                       AND p.session_id IN ({placeholders})
+                       AND json_extract(p.data, '$.type') = 'text'
+                       AND json_extract(m.data, '$.role') = 'assistant'
+                     ORDER BY p.time_updated ASC"
+                );
+
+                let mut stmt = db.prepare(&sql).map_err(|e| {
+                    atim_core::error::Error::State(format!("opencode prepare: {e}"))
+                })?;
+
+                let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(last_time)];
+                for sid in &known_sessions {
+                    params.push(Box::new(sid.clone()));
+                }
+                let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                    params.iter().map(|p| p.as_ref()).collect();
+
+                let rows: Vec<(String, String, String, i64)> = stmt
+                    .query_map(param_refs.as_slice(), |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                    })
+                    .map_err(|e| atim_core::error::Error::State(format!("opencode query: {e}")))?
+                    .filter_map(|r| r.ok())
+                    .collect();
+
+                Ok(rows)
+            })
+            .await
+            .map_err(|e| atim_core::error::Error::State(format!("opencode task: {e}")))??;
+
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        let mut max_time: i64 = last_time;
+        let mut messages = Vec::new();
+
+        for (msg_id, session_id, text, time) in &rows {
+            if *time > max_time {
+                max_time = *time;
+            }
+
+            let body = text.trim();
+            if body.is_empty() {
+                continue;
+            }
+
+            messages.push(NewMessage {
+                session_id: SessionId(session_id.clone()),
+                text: body.to_string(),
+                is_complete: true,
+                content_type: atim_core::message::ContentType::Text,
+                tool_use_id: Some(msg_id.clone()),
+                role: "assistant".to_string(),
+                tool_name: None,
+                image_data: None,
+                raw_input: None,
+            });
+        }
+
+        // Advance the high-water mark
+        {
+            let mut offsets = self.byte_offsets.lock().await;
+            offsets.insert(offset_key.to_string(), max_time as u64);
+        }
+
+        if !messages.is_empty() {
+            tracing::info!("[monitor] OpenCode DB: {} new messages", messages.len());
             send_in_batches(tx, messages);
         }
 

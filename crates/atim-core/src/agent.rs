@@ -2,6 +2,7 @@ pub mod claude;
 pub mod codex;
 pub mod copilot;
 pub mod mimo;
+pub mod opencode;
 pub mod trait_def;
 pub mod types;
 
@@ -36,6 +37,7 @@ pub fn parser_for(kind: AgentKind) -> Box<dyn AgentParser> {
         AgentKind::CopilotCli => Box::new(copilot::CopilotParser),
         AgentKind::CodexCli => Box::new(codex::CodexParser),
         AgentKind::MimoCode => Box::new(claude::ClaudeParser), // mimo reuses Claude parser
+        AgentKind::OpenCode => Box::new(opencode::OpenCodeParser),
         AgentKind::Unknown => Box::new(claude::ClaudeParser),
     }
 }

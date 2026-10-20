@@ -142,6 +142,7 @@ pub enum AgentKind {
     CopilotCli,
     CodexCli,
     MimoCode,
+    OpenCode,
     Unknown,
 }
 
@@ -152,6 +153,7 @@ impl AgentKind {
             AgentKind::CopilotCli => "copilot",
             AgentKind::CodexCli => "codex",
             AgentKind::MimoCode => "mimo",
+            AgentKind::OpenCode => "opencode",
             AgentKind::Unknown => "unknown",
         }
     }

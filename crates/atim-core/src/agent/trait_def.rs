@@ -25,6 +25,7 @@ pub enum AgentId {
     CopilotCli,
     CodexCli,
     MimoCode,
+    OpenCode,
 }
 
 impl AgentId {
@@ -34,6 +35,7 @@ impl AgentId {
             AgentId::CopilotCli => "copilot",
             AgentId::CodexCli => "codex",
             AgentId::MimoCode => "mimo",
+            AgentId::OpenCode => "opencode",
         }
     }
 
@@ -43,6 +45,7 @@ impl AgentId {
             AgentId::CopilotCli => AgentKind::CopilotCli,
             AgentId::CodexCli => AgentKind::CodexCli,
             AgentId::MimoCode => AgentKind::MimoCode,
+            AgentId::OpenCode => AgentKind::OpenCode,
         }
     }
 }
@@ -55,6 +58,7 @@ impl std::str::FromStr for AgentId {
             "copilot" => Ok(AgentId::CopilotCli),
             "codex" => Ok(AgentId::CodexCli),
             "mimo" => Ok(AgentId::MimoCode),
+            "opencode" => Ok(AgentId::OpenCode),
             _ => Err(()),
         }
     }

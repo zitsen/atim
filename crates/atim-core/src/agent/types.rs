@@ -183,6 +183,7 @@ impl AgentRegistry {
         register_agent!(super::copilot::CopilotAgent, "copilot");
         register_agent!(super::codex::CodexAgent, "codex");
         register_agent!(super::mimo::MimoAgent, "mimo");
+        register_agent!(super::opencode::OpenCodeAgent, "opencode");
 
         // Determine default from ATIM_AGENT_COMMAND (or fallback env vars)
         let cmd = std::env::var("ATIM_AGENT_COMMAND")
@@ -196,6 +197,8 @@ impl AgentRegistry {
             "codex"
         } else if cmd.contains("mimo") {
             "mimo"
+        } else if cmd.contains("opencode") {
+            "opencode"
         } else {
             "claude"
         };
