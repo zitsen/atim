@@ -55,6 +55,7 @@
 | `/atim config` 或 `/atim c` | 查看当前聊天的配置 |
 | `/atim config set replyAtOnly <bool>` | 设置是否仅响应 @ 消息（群聊中） |
 | `/atim config set defaultAgent <name>` | 设置当前聊天的默认 agent |
+| `/atim config set sendToolMessages <bool>` | 是否向此聊天推送工具调用与结果（默认 false，仅推送 agent 回复） |
 
 ## 目录浏览
 

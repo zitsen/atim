@@ -575,11 +575,21 @@ impl Server {
                 chat_name: None,
             };
 
+            // Tool chatter is opt-in (send_tool_messages, default off): the
+            // assistant's replies and questions are what the chat is for, and
+            // tool output is what floods it. When off, tool calls and results
+            // never reach the IM — only the assistant's text does. A per-chat
+            // setting wins over the global default.
+            let send_tools = self.tool_messages_enabled(&binding).await;
+
             // Fold repeated tool calls before anything is sent: the repeats
-            // must never reach the IM at all. See `plan_folds`.
-            let folds = {
+            // must never reach the IM at all. See `plan_folds`. Only worth
+            // planning when tool output will be delivered.
+            let folds = if send_tools {
                 let mut folder = self.fold.lock().await;
                 plan_folds(group, &mut folder, (chat_id, thread_id_val))
+            } else {
+                BatchFolds::default()
             };
 
             // ── P1.3 Status→Content + P1.4 Message Merging ──
@@ -657,6 +667,12 @@ impl Server {
                         {
                             continue;
                         }
+                        // Tool calls are opt-in. AskUserQuestion stays exempt —
+                        // the user has to be able to answer it.
+                        let is_ask = msg.tool_name.as_deref() == Some("AskUserQuestion");
+                        if !send_tools && !is_ask {
+                            continue;
+                        }
                         // A flood of tool output is held back and summarised
                         // rather than drowning the chat. Interactive prompts are
                         // exempt — the user has to be able to answer them.
@@ -732,6 +748,12 @@ impl Server {
                             .as_deref()
                             .is_some_and(|t| folds.skip.contains(t))
                         {
+                            continue;
+                        }
+                        // Tool delivery is opt-in too, and a result without its
+                        // call reads like noise. AskUserQuestion results are
+                        // exempt along with it.
+                        if !send_tools {
                             continue;
                         }
                         // …and so does the output of a call the storm guard held
@@ -3668,6 +3690,27 @@ impl Server {
         true
     }
 
+    /// Whether this chat wants tool calls and results delivered.
+    ///
+    /// Tool chatter is opt-in (`send_tool_messages`, default off): the
+    /// assistant's replies and questions are what the chat is for, and tool
+    /// output is what floods it. A per-chat setting wins over the global
+    /// default, so a busy project can be verbose while the rest stay quiet.
+    async fn tool_messages_enabled(&self, binding: &ChatBinding) -> bool {
+        match self
+            .state_mgr
+            .load_chat_setting(binding.user_id, binding.thread_id, "send_tool_messages")
+            .await
+        {
+            Ok(Some(v)) => v.eq_ignore_ascii_case("true"),
+            Ok(None) => self.config.send_tool_messages,
+            Err(e) => {
+                tracing::warn!("[pipe] load_chat_setting failed: {e}");
+                self.config.send_tool_messages
+            }
+        }
+    }
+
     /// Dismiss the workspace trust dialog on a freshly launched agent, and say
     /// whether the agent survived it.
     ///
@@ -5772,6 +5815,7 @@ const BOX_DRAWING: &[char] = &[
 
 /// Transcribe an OGG voice message using OpenAI's gpt-4o-transcribe model.
 /// What the fold planner decided about one batch of session output.
+#[derive(Default)]
 struct BatchFolds {
     /// `tool_use_id`s to skip — a folded call's result goes with it.
     skip: HashSet<String>,

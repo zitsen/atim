@@ -133,6 +133,10 @@ pub struct DisplaySection {
     pub show_user_messages: String,
     #[serde(default = "_default_true_str")]
     pub show_tool_calls: String,
+    /// Deliver agent tool calls and results to the IM. Opt-in — the assistant's
+    /// replies are what the chat is for, and tool output is what floods it.
+    #[serde(default)]
+    pub send_tool_messages: bool,
     #[serde(default)]
     pub show_hidden_dirs: bool,
 }
@@ -144,6 +148,7 @@ impl Default for DisplaySection {
         Self {
             show_user_messages: "true".into(),
             show_tool_calls: "true".into(),
+            send_tool_messages: false,
             show_hidden_dirs: false,
         }
     }
@@ -210,6 +215,8 @@ pub struct Config {
     // ── Display ──
     pub show_user_messages: bool,
     pub show_tool_calls: bool,
+    /// Deliver agent tool calls and results to the IM (opt-in).
+    pub send_tool_messages: bool,
     pub show_hidden_dirs: bool,
 
     // ── OpenAI (voice transcription) ──
@@ -381,6 +388,14 @@ impl Config {
             .unwrap_or_else(|| "true".into())
             .to_lowercase()
             != "false";
+        let send_tool_messages = match std::env::var("ATIM_SEND_TOOL_MESSAGES") {
+            Ok(v) => v.to_lowercase() != "false",
+            Err(_) => toml_cfg
+                .as_ref()
+                .map(|c| c.display.send_tool_messages)
+                .unwrap_or(false),
+        };
+
         let show_hidden_dirs = std::env::var("ATIM_SHOW_HIDDEN_DIRS")
             .ok()
             .map(|v| v.to_lowercase() == "true")
@@ -437,6 +452,7 @@ impl Config {
             monitor_poll_interval_secs: monitor_poll_interval,
             show_user_messages,
             show_tool_calls,
+            send_tool_messages,
             show_hidden_dirs,
             openai_api_key,
             openai_base_url,
@@ -519,3 +535,26 @@ pub const SENSITIVE_ENV_VARS: &[&str] = &[
     "ATIM_FEISHU_APP_ID",
     "ATIM_FEISHU_APP_SECRET",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Tool chatter is opt-in: absent from the config it must default to off.
+    #[test]
+    fn test_send_tool_messages_defaults_to_off() {
+        let toml = ConfigToml::default();
+        assert!(!toml.display.send_tool_messages);
+    }
+
+    #[test]
+    fn test_send_tool_messages_parses_from_config() {
+        let toml: ConfigToml =
+            toml::from_str("[display]\nsend_tool_messages = true\n").expect("parse");
+        assert!(toml.display.send_tool_messages);
+
+        let toml: ConfigToml =
+            toml::from_str("[display]\nsend_tool_messages = false\n").expect("parse");
+        assert!(!toml.display.send_tool_messages);
+    }
+}

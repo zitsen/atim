@@ -1149,10 +1149,24 @@ impl super::Server {
             format!("`{default_agent}`")
         };
 
+        // sendToolMessages from chat_settings (per-chat opt-in for tool output)
+        let send_tool_messages = self
+            .state_mgr
+            .load_chat_setting(user_id, thread_id, "send_tool_messages")
+            .await
+            .ok()
+            .flatten();
+
+        let send_tool_display = match send_tool_messages.as_deref() {
+            Some(v) => format!("`{v}`"),
+            None => "(not set — tool messages are not sent)".to_string(),
+        };
+
         let msg = format!(
-            "**Chat Config**\n\n`replyAtOnly`: {}\n`defaultAgent`: {}",
+            "**Chat Config**\n\n`replyAtOnly`: {}\n`defaultAgent`: {}\n`sendToolMessages`: {}",
             if reply_at_only { "true" } else { "false" },
             agent_display,
+            send_tool_display,
         );
         let _ = self.im_adapter.send_message(target, &msg).await;
     }
@@ -1213,6 +1227,45 @@ impl super::Server {
                         .await;
                 }
             }
+            "sendToolMessages" | "showToolMessages" => {
+                let Some(val) = parse_bool_setting(value) else {
+                    let _ = self
+                        .im_adapter
+                        .send_message(
+                            target,
+                            "Usage: `/atim config set sendToolMessages [true|false]`.                              Default is false — only the agent's replies are delivered.",
+                        )
+                        .await;
+                    return;
+                };
+                let thread_id = target.thread_id.map(|t| t.0).unwrap_or(0);
+                if let Err(e) = self
+                    .state_mgr
+                    .save_chat_setting(
+                        user_id,
+                        thread_id,
+                        "send_tool_messages",
+                        if val { "true" } else { "false" },
+                    )
+                    .await
+                {
+                    let _ = self
+                        .im_adapter
+                        .send_message(target, &format!("Failed to save config: {e}"))
+                        .await;
+                    return;
+                }
+                let what = if val {
+                    "Tool calls and results will be delivered."
+                } else {
+                    "Tool calls and results will not be delivered; only the agent's replies."
+                };
+                let _ = self
+                    .im_adapter
+                    .send_message(target, &format!("`sendToolMessages` = {val}. {what}"))
+                    .await;
+            }
+
             "defaultAgent" => {
                 let agent_name = value.trim().to_lowercase();
                 if agent_name.is_empty() {

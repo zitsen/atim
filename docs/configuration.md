@@ -40,6 +40,7 @@ poll_interval = "2.0"   # seconds between JSONL polls
 show_user_messages = "true"
 show_tool_calls = "true"
 show_hidden_dirs = false
+send_tool_messages = false   # deliver agent tool calls/results to the IM
 
 [openai]
 api_key = "..."                        # for voice message transcription
@@ -69,6 +70,7 @@ Any setting in `config.toml` can be overridden by the corresponding environment 
 | `ATIM_MONITOR_POLL_INTERVAL` | `2.0` | Seconds between JSONL polls |
 | `ATIM_SHOW_USER_MESSAGES` | `true` | Show user messages in output |
 | `ATIM_SHOW_TOOL_CALLS` | `true` | Show tool call details in output |
+| `ATIM_SEND_TOOL_MESSAGES` | `false` | Deliver agent tool calls/results to the IM |
 | `ATIM_SHOW_HIDDEN_DIRS` | `false` | Show hidden directories in browser |
 
 ## Per-Agent Configuration
@@ -99,6 +101,7 @@ These can be changed at runtime via `/atim config set`:
 |---------|---------|-------------|
 | `replyAtOnly` | `false` | In group chats, only respond to @-mentions (ignore other messages) |
 | `defaultAgent` | from config | Override the default agent for this specific chat |
+| `sendToolMessages` | `false` | Deliver agent tool calls and results to this chat. Off by default — only the agent's replies arrive. |
 
 ## Data Directory Structure
 
