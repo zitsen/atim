@@ -1913,7 +1913,7 @@ impl Server {
                     .unwrap_or_else(|| self.config.agent_registry.default().clone());
 
                 // Session discovery via /status command — most reliable source.
-                let discovered_sid: Option<String> = if agent.supports_sessions() {
+                let mut discovered_sid: Option<String> = if agent.supports_sessions() {
                     // If a shell is running instead of the agent (e.g. Claude
                     // quit or crashed), sending /status would be interpreted as
                     // a file path lookup — skip session discovery.
@@ -1971,6 +1971,25 @@ impl Server {
                 } else {
                     None
                 };
+
+                // OpenCode's /status carries no session id — its own SQLite
+                // store is the source of truth. Fall back to the newest session
+                // recorded for this directory when the capture yields nothing.
+                if discovered_sid.is_none()
+                    && let Ok(cwd) = self.tmux_mgr.pane_cwd(&window_id).await
+                {
+                    let known = std::collections::HashSet::new();
+                    discovered_sid = agent
+                        .discover_session(&cwd, &known, std::time::SystemTime::now())
+                        .ok()
+                        .flatten();
+                    if let Some(ref sid) = discovered_sid {
+                        tracing::info!(
+                            "[rebind] window {} session id from DB: {sid}",
+                            window_id_str
+                        );
+                    }
+                }
 
                 if agent.supports_sessions()
                     && agent.name() != "copilot"
