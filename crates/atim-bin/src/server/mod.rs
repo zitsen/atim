@@ -2166,9 +2166,16 @@ impl Server {
                     }
                     // Keep an existing offset: rebind must not replay the
                     // session's earlier output into the newly bound chat.
-                    let has_offset = self.byte_offsets.lock().await.contains_key(sid);
-                    if !has_offset
-                        && let Some(path) = resolve_jsonl(sid).await
+                    //
+                    // Also register the session in byte_offsets even without a
+                    // JSONL file (OpenCode keeps sessions in its own SQLite
+                    // store): the DB poller filters its query by these keys, so
+                    // a session missing here is one whose output is never
+                    // delivered.
+                    if !self.byte_offsets.lock().await.contains_key(sid) {
+                        self.byte_offsets.lock().await.insert(sid.clone(), 0);
+                    }
+                    if let Some(path) = resolve_jsonl(sid).await
                         && let Ok(meta) = tokio::fs::metadata(path).await
                     {
                         let offset = meta.len();
