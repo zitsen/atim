@@ -14,7 +14,7 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
-atim-core = { path = "../atim-core", version = "0.7" }
+atim-core = { path = "../atim-core", version = "0.8" }
 
 [dev-dependencies]
 # test-util: paused clock so the rate limiter's timing can be asserted without
