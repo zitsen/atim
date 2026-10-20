@@ -2174,6 +2174,11 @@ impl Server {
                     // delivered.
                     if !self.byte_offsets.lock().await.contains_key(sid) {
                         self.byte_offsets.lock().await.insert(sid.clone(), 0);
+                        // Persist it too: the monitor rebuilds byte_offsets from
+                        // monitor_offsets on restart, and a session only in
+                        // memory disappears from the DB poller's filter — its
+                        // replies then stop being delivered after a restart.
+                        self.state_mgr.upsert_offset(sid, 0).await?;
                     }
                     if let Some(path) = resolve_jsonl(sid).await
                         && let Ok(meta) = tokio::fs::metadata(path).await

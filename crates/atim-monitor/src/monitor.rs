@@ -401,10 +401,18 @@ impl SessionMonitor {
         // Clean up stale sessions — remove sessions whose JSONL no longer exists.
         // This avoids purging filesystem-discovered sessions (which wouldn't be in
         // current_sessions since they're not in session_map.json or state.json).
+        //
+        // Sessions kept in another store are not stale just because they have no
+        // JSONL: OpenCode keeps its sessions in SQLite and the DB poller finds
+        // them by these keys, so removing one here silently stops its delivery
+        // after the next cycle.
         {
             let mut offsets = self.byte_offsets.lock().await;
             let tracked: Vec<String> = offsets.keys().cloned().collect();
             for id in &tracked {
+                if id.starts_with("__") || id.starts_with("ses_") {
+                    continue;
+                }
                 if !current_sessions.contains(id) && resolve_jsonl(id).await.is_none() {
                     offsets.remove(id);
                     tracing::debug!("[monitor] Removed stale session {id}");
@@ -591,6 +599,7 @@ impl SessionMonitor {
         };
 
         if known_sessions.is_empty() {
+            tracing::debug!("[monitor] OpenCode DB: no known sessions yet, skipping");
             return Ok(());
         }
 
