@@ -14,6 +14,47 @@ fn mimo_db_path() -> Option<PathBuf> {
     if p.exists() { Some(p) } else { None }
 }
 
+/// Newest history timestamp in the mimo store, for seeding its watermark.
+async fn newest_mimo_history_time() -> Option<i64> {
+    let db_path = mimo_db_path()?;
+    tokio::task::spawn_blocking(move || {
+        let db = rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .ok()?;
+        db.query_row(
+            "SELECT COALESCE(MAX(time_created), 0) FROM history_fts",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .ok()
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Timestamp of the newest part in the OpenCode store, for seeding the
+/// watermark after a restart (the watermark itself is not persisted).
+async fn newest_part_time() -> Option<i64> {
+    let db_path = opencode_db_path()?;
+    tokio::task::spawn_blocking(move || {
+        let db = rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .ok()?;
+        db.query_row("SELECT COALESCE(MAX(time_updated), 0) FROM part", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .ok()
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 /// Path to the OpenCode SQLite session store.
 fn opencode_db_path() -> Option<PathBuf> {
     let home = home::home_dir()?;
@@ -435,9 +476,14 @@ impl SessionMonitor {
 
         let mimo_offset_key = "__mimo_last_time";
 
+        // Same as the OpenCode poll: the watermark lives only in memory, so a
+        // restart would replay the session's whole history. Seed from the store.
         let last_time: i64 = {
             let offsets = self.byte_offsets.lock().await;
-            offsets.get(mimo_offset_key).copied().unwrap_or(0) as i64
+            match offsets.get(mimo_offset_key) {
+                Some(&t) => t as i64,
+                None => newest_mimo_history_time().await.unwrap_or(0),
+            }
         };
 
         // Collect known session IDs before entering spawn_blocking
@@ -584,9 +630,17 @@ impl SessionMonitor {
 
         let offset_key = "__opencode_last_time";
 
+        // The watermark is only in memory, so after a restart it would be 0 and
+        // every part the session ever produced would be delivered again — the
+        // user sees the whole history replayed as one long message. Seed it from
+        // the newest part already in the store instead: a fresh session has none,
+        // so nothing is replayed and only genuinely new output follows.
         let last_time: i64 = {
             let offsets = self.byte_offsets.lock().await;
-            offsets.get(offset_key).copied().unwrap_or(0) as i64
+            match offsets.get(offset_key) {
+                Some(&t) => t as i64,
+                None => newest_part_time().await.unwrap_or(0),
+            }
         };
 
         let known_sessions: Vec<String> = {
