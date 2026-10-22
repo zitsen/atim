@@ -89,6 +89,31 @@ fn send_in_batches(tx: &mpsc::UnboundedSender<MonitorEvent>, messages: Vec<NewMe
     }
 }
 
+/// Codex continuation files can end in a new UUID while retaining the same
+/// logical session ID in their first JSONL record.
+async fn output_session_id(path: &Path, file_id: &str) -> Option<String> {
+    if !path.to_string_lossy().contains(".codex/sessions/") {
+        return Some(file_id.to_string());
+    }
+    match atim_parser::codex_jsonl::CodexJsonlParser::read_meta(path).await {
+        Ok(meta) if !meta.session_id.is_empty() => Some(meta.session_id),
+        Ok(_) => {
+            tracing::warn!(
+                "[monitor] Codex JSONL has no session ID: {}",
+                path.display()
+            );
+            None
+        }
+        Err(e) => {
+            tracing::warn!(
+                "[monitor] Failed to read Codex session metadata from {}: {e}",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
 /// Result produced by the monitor.
 pub enum MonitorEvent {
     /// New messages from a session JSONL.
@@ -1087,6 +1112,15 @@ impl SessionMonitor {
                 }
             };
 
+            let route_session_id = if entries.is_empty() {
+                None
+            } else {
+                let Some(id) = output_session_id(&path, session_id).await else {
+                    continue;
+                };
+                Some(id)
+            };
+
             // Always advance the byte offset past processed data, even when
             // entries is empty (e.g. thinking-only or metadata-only lines).
             // This prevents getting stuck on lines that never produce entries.
@@ -1096,6 +1130,7 @@ impl SessionMonitor {
             }
 
             if !entries.is_empty() {
+                let route_session_id = route_session_id.expect("non-empty entries have a route");
                 tracing::info!(
                     "[monitor] Parsed {} new entries from {session_id}.jsonl (offset {offset} → {new_offset})",
                     entries.len(),
@@ -1110,7 +1145,7 @@ impl SessionMonitor {
                             | atim_core::message::ContentType::ToolUse
                     );
                     messages.push(NewMessage {
-                        session_id: SessionId(session_id.clone()),
+                        session_id: SessionId(route_session_id.clone()),
                         text: entry.text,
                         is_complete,
                         content_type: entry.content_type,
@@ -1151,6 +1186,31 @@ impl SessionMonitor {
 mod tests {
     use super::*;
     use atim_core::message::ContentType;
+
+    #[tokio::test]
+    async fn test_codex_continuation_routes_to_metadata_session() {
+        let dir = std::env::temp_dir()
+            .join(format!("atim-monitor-{}", std::process::id()))
+            .join(".codex/sessions/2026/10/18");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let file_id = "01a14530-b3e4-7f00-8e0a-4441d09a5574";
+        let session_id = "01a13829-6833-7862-b162-81f4c7255141";
+        let path = dir.join(format!(
+            "rollout-2026-10-18T10-00-00-{session_id}_{file_id}.jsonl"
+        ));
+        tokio::fs::write(
+            &path,
+            format!("{{\"type\":\"session_meta\",\"payload\":{{\"session_id\":\"{session_id}\",\"cwd\":\"/tmp\"}}}}\n"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            output_session_id(&path, file_id).await.as_deref(),
+            Some(session_id)
+        );
+        tokio::fs::remove_file(path).await.unwrap();
+    }
 
     fn msg(text: &str) -> NewMessage {
         NewMessage {
