@@ -903,26 +903,23 @@ impl SessionMonitor {
         }
 
         // 3c: Codex CLI sessions — ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
+        //
+        // This walk runs on every poll tick (every ~2s) and covers the whole
+        // session history, so it must stay quiet: only a session that is
+        // actually new deserves a log line. Logging each directory visited and
+        // each rollout file seen emitted ~130 lines per tick — several million
+        // per day — and buried every other message in the journal.
         if let Some(home) = home::home_dir() {
             let codex_sessions_dir = Path::new(&home).join(".codex").join("sessions");
-            tracing::debug!(
-                "[monitor] Codex scan: checking {} (exists={})",
-                codex_sessions_dir.display(),
-                codex_sessions_dir.is_dir()
-            );
             if codex_sessions_dir.is_dir() {
                 // Walk YYYY/MM/DD subdirectories
                 if let Ok(mut year_dir) = tokio::fs::read_dir(&codex_sessions_dir).await {
                     while let Ok(Some(year_entry)) = year_dir.next_entry().await {
-                        let year_name = year_entry.file_name().to_string_lossy().to_string();
                         let year_is_dir = year_entry
                             .file_type()
                             .await
                             .map(|t| t.is_dir())
                             .unwrap_or(false);
-                        tracing::debug!(
-                            "[monitor] Codex scan: year={year_name} is_dir={year_is_dir}"
-                        );
                         if !year_is_dir {
                             continue;
                         }
@@ -933,11 +930,6 @@ impl SessionMonitor {
                                     .await
                                     .map(|t| t.is_dir())
                                     .unwrap_or(false);
-                                let month_name =
-                                    month_entry.file_name().to_string_lossy().to_string();
-                                tracing::debug!(
-                                    "[monitor] Codex scan: {year_name}/{month_name} is_dir={month_is_dir}"
-                                );
                                 if !month_is_dir {
                                     continue;
                                 }
@@ -968,9 +960,6 @@ impl SessionMonitor {
                                                 {
                                                     continue;
                                                 }
-                                                tracing::debug!(
-                                                    "[monitor] Codex scan: found {fname_str}"
-                                                );
                                                 // Extract session ID from filename
                                                 let name_no_ext = &fname_str[..fname_str.len() - 6];
                                                 let sid_str = if name_no_ext.len() >= 36 {
