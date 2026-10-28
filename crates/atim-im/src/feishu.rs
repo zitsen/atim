@@ -1017,10 +1017,17 @@ impl FeishuAdapter {
 // ── Image download ──
 
 impl FeishuAdapter {
-    /// Download an image by its image_key from Feishu.
-    async fn download_image(&self, image_key: &str) -> Result<Vec<u8>> {
+    /// Download an image attached to a message.
+    ///
+    /// Message images are only reachable through the message-resource API:
+    /// the standalone `GET im/v1/images/{image_key}` (no `/download` suffix —
+    /// that path doesn't exist) serves app-uploaded images only and rejects
+    /// message-image keys with code 234001.
+    async fn download_message_image(&self, message_id: &str, file_key: &str) -> Result<Vec<u8>> {
         let token = self.get_token().await?;
-        let url = format!("{FEISHU_BASE_URL}/open-apis/im/v1/images/{image_key}/download");
+        let url = format!(
+            "{FEISHU_BASE_URL}/open-apis/im/v1/messages/{message_id}/resources/{file_key}?type=image"
+        );
         let resp = self
             .client
             .get(&url)
@@ -1239,13 +1246,53 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
             }
         }
         "image" => {
-            let image_key = parsed_content["image_key"].as_str().unwrap_or("");
-            let data = adapter.download_image(image_key).await.unwrap_or_default();
-            ImEventKind::Photo {
-                caption: None,
-                data,
-                mime_type: "image/png".into(),
-            }
+            let image_key = parsed_content["image_key"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            // The download is a multi-second HTTP call and the payload loop is
+            // sequential, so running it inline would stall every text message
+            // queued behind it. Emit the Photo event from the spawned task
+            // instead of falling through to the shared emit below.
+            let adapter = adapter.clone();
+            let Some(tx) = adapter.event_tx.read().await.clone() else {
+                tracing::warn!("Feishu image {image_key} dropped: event channel not ready");
+                return Ok(());
+            };
+            let is_group = chat_type == "group";
+            let message_id = message_id_str.to_string();
+            tokio::spawn(async move {
+                // Don't swallow download errors — an empty vec on failure keeps
+                // the server-side flow uniform (it replies "图片数据为空"), but
+                // the cause must land in the log.
+                let data = match adapter
+                    .download_message_image(&message_id, &image_key)
+                    .await
+                {
+                    Ok(d) if !d.is_empty() => d,
+                    Ok(_) => {
+                        tracing::warn!("Feishu image {image_key} downloaded empty");
+                        Vec::new()
+                    }
+                    Err(e) => {
+                        tracing::warn!("Feishu image {image_key} download failed: {e}");
+                        Vec::new()
+                    }
+                };
+                let _ = tx.send(ImEvent {
+                    user_id,
+                    target,
+                    kind: ImEventKind::Photo {
+                        caption: None,
+                        data,
+                        mime_type: "image/png".into(),
+                        is_mention: false,
+                        is_group,
+                        message_id: Some(message_id),
+                    },
+                });
+            });
+            return Ok(());
         }
         _ => {
             tracing::debug!("Skipping unknown msg_type: {msg_type}");

@@ -676,6 +676,9 @@ fn parse_message(msg: &serde_json::Value) -> Option<ImEvent> {
                 .map(String::from),
             data: Vec::new(), // Would need to download the photo file
             mime_type: "image/jpeg".into(),
+            is_mention: false,
+            is_group,
+            message_id: msg["message_id"].as_i64().map(|id| id.to_string()),
         }
     } else if msg.get("voice").is_some() {
         ImEventKind::Voice(Vec::new()) // Would need to download voice file

@@ -439,8 +439,61 @@ impl Server {
                 )
                 .await?;
             }
-            ImEventKind::Photo { .. } => {
-                tracing::info!("Photo message (not yet implemented)");
+            ImEventKind::Photo {
+                caption,
+                data,
+                mime_type,
+                is_mention,
+                is_group,
+                message_id,
+            } => {
+                if data.is_empty() {
+                    // The Telegram adapter doesn't download photo bytes yet.
+                    tracing::warn!("Photo message with empty data, skipping");
+                    let _ = self
+                        .im_adapter
+                        .send_message(&event.target, "⚠️ 图片数据为空，无法转发。")
+                        .await;
+                    return Ok(());
+                }
+                // Binary payloads can't cross tmux send-keys, so the image is
+                // written to disk and the agent receives a prompt referencing
+                // the path — its file-reading tool renders the image.
+                let path = match save_inbound_image(&self.config.atim_dir, &data, &mime_type).await
+                {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::error!("Failed to save inbound image: {e}");
+                        let _ = self
+                            .im_adapter
+                            .send_message(&event.target, &format!("❌ 图片保存失败: {e}"))
+                            .await;
+                        return Ok(());
+                    }
+                };
+                tracing::info!(
+                    "[Feishu] Photo saved: {} ({} KB)",
+                    path.display(),
+                    data.len() / 1024,
+                );
+                let mut text = String::new();
+                if let Some(cap) = caption.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+                    text.push_str(cap);
+                    text.push_str("\n\n");
+                }
+                let _ = std::fmt::Write::write_fmt(
+                    &mut text,
+                    format_args!("[image] {} ({} KB)", path.display(), data.len() / 1024),
+                );
+                self.handle_text_message(
+                    event.target,
+                    event.user_id.0,
+                    &text,
+                    is_mention,
+                    is_group,
+                    message_id,
+                )
+                .await?;
             }
             ImEventKind::Voice(data) => {
                 if data.is_empty() {
@@ -6087,6 +6140,72 @@ async fn send_screenshot(
     }
 }
 
+/// How long a saved inbound image stays on disk before the next save sweeps it.
+///
+/// The agent normally reads the file within seconds of receiving the prompt;
+/// the TTL is generous so a busy session or a restart can't lose the image.
+const INBOUND_IMAGE_TTL: Duration = Duration::from_secs(7 * 24 * 3600);
+
+/// Sniff the file extension from image magic bytes, falling back to the
+/// advertised mime type. Feishu reports every image as PNG even when the bytes
+/// are JPEG, so the bytes win.
+fn image_ext(data: &[u8], mime_type: &str) -> &'static str {
+    if data.starts_with(&[0x89, b'P', b'N', b'G']) {
+        "png"
+    } else if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "jpg"
+    } else if data.starts_with(b"GIF8") {
+        "gif"
+    } else if data.len() > 12 && data.starts_with(b"RIFF") && &data[8..12] == b"WEBP" {
+        "webp"
+    } else if mime_type.contains("jpeg") || mime_type.contains("jpg") {
+        "jpg"
+    } else if mime_type.contains("gif") {
+        "gif"
+    } else if mime_type.contains("webp") {
+        "webp"
+    } else {
+        "png"
+    }
+}
+
+/// Persist an inbound image under `<atim_dir>/images/` and return its path.
+///
+/// The agent consumes images from disk, so the directory doubles as the
+/// handoff point. Each save sweeps files that outlived [`INBOUND_IMAGE_TTL`]
+/// so the directory stays bounded without a background job.
+async fn save_inbound_image(atim_dir: &Path, data: &[u8], mime_type: &str) -> Result<PathBuf> {
+    let dir = atim_dir.join("images");
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| atim_core::error::Error::State(format!("create images dir: {e}")))?;
+
+    if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let stale = entry
+                .metadata()
+                .await
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .and_then(|m| m.elapsed().ok())
+                .is_some_and(|age| age > INBOUND_IMAGE_TTL);
+            if stale && let Err(e) = tokio::fs::remove_file(entry.path()).await {
+                tracing::warn!("Failed to sweep old image {:?}: {e}", entry.path());
+            }
+        }
+    }
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path = dir.join(format!("img_{nanos}.{}", image_ext(data, mime_type)));
+    tokio::fs::write(&path, data)
+        .await
+        .map_err(|e| atim_core::error::Error::State(format!("write image: {e}")))?;
+    Ok(path)
+}
+
 async fn transcribe_voice(api_key: &str, base_url: &str, audio_data: &[u8]) -> Result<String> {
     let url = format!("{}/audio/transcriptions", base_url.trim_end_matches('/'));
 
@@ -6371,6 +6490,26 @@ mod tests {
     use super::*;
     use atim_core::card::{ActionLayout, CardElement};
     use std::collections::HashMap;
+
+    #[test]
+    fn test_image_ext_sniffs_magic_bytes_over_mime() {
+        // Feishu labels every download image/png; JPEG magic must win.
+        let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0];
+        jpeg.extend(std::iter::repeat_n(0u8, 16));
+        assert_eq!(image_ext(&jpeg, "image/png"), "jpg");
+
+        let mut png = vec![0x89, b'P', b'N', b'G'];
+        png.extend(std::iter::repeat_n(0u8, 16));
+        assert_eq!(image_ext(&png, "image/png"), "png");
+
+        let mut riff = b"RIFF\x00\x00\x00\x00WEBVP".to_vec();
+        riff[8..12].copy_from_slice(b"WEBP");
+        assert_eq!(image_ext(&riff, ""), "webp");
+
+        // Unknown bytes fall back to the mime type, then to png.
+        assert_eq!(image_ext(&[0, 1, 2, 3], "image/gif"), "gif");
+        assert_eq!(image_ext(&[0, 1, 2, 3], "text/plain"), "png");
+    }
 
     #[test]
     fn test_status_session_id_formats() {
