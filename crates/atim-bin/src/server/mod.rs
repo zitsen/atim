@@ -1635,14 +1635,19 @@ impl Server {
                     });
                 let agent_type = wb.map(|w| w.agent_type.clone()).unwrap_or_default();
 
-                let window_id = atim_core::message::WindowId(wid_str.to_string());
-                if wid_str.is_empty() || !self.tmux_mgr.window_exists(&window_id).await {
-                    let _ = self
-                        .im_adapter
-                        .send_message(&target, "No active session window found.")
-                        .await;
-                    return Ok(());
-                }
+                let mut window_id = match self
+                    .resolve_bound_window(wid_str, &binding.display_name)
+                    .await
+                {
+                    Some(w) => w,
+                    None => {
+                        let _ = self
+                            .im_adapter
+                            .send_message(&target, "No active session window found.")
+                            .await;
+                        return Ok(());
+                    }
+                };
 
                 // 1. Send /quit to exit the agent gracefully
                 self.tmux_mgr.send_line(&window_id, "/quit").await.ok();
@@ -1661,9 +1666,23 @@ impl Server {
                     // Force kill the window if agent didn't exit cleanly
                     self.tmux_mgr.kill_window(&window_id).await.ok();
                     tokio::time::sleep(Duration::from_millis(500)).await;
-                    // Re-create window in same cwd
+                    // Re-create window in same cwd. The new window gets a new
+                    // id; the relaunch below must target it, not the dead one.
                     let cwd = wb.map(|w| w.cwd.clone()).unwrap_or_default();
-                    let _ = self.tmux_mgr.new_window(&binding.display_name, &cwd).await;
+                    let sid = session_id.as_deref().unwrap_or("");
+                    match self
+                        .recreate_bound_window(&window_id, &binding.display_name, &cwd, sid)
+                        .await
+                    {
+                        Some(new_id) => window_id = new_id,
+                        None => {
+                            let _ = self
+                                .im_adapter
+                                .send_message(&target, "❌ Could not recreate the window.")
+                                .await;
+                            return Ok(());
+                        }
+                    }
                 }
 
                 // 2. Relaunch agent (resume if we have a session_id)
@@ -1750,14 +1769,19 @@ impl Server {
         if text.trim() == "/new" {
             if let Some((binding, wb)) = find_cb() {
                 let wid_str = wb.map(|w| &w.window_id).map(|s| s.as_str()).unwrap_or("");
-                let window_id = atim_core::message::WindowId(wid_str.to_string());
-                if wid_str.is_empty() || !self.tmux_mgr.window_exists(&window_id).await {
-                    let _ = self
-                        .im_adapter
-                        .send_message(&target, "No active session window found.")
-                        .await;
-                    return Ok(());
-                }
+                let mut window_id = match self
+                    .resolve_bound_window(wid_str, &binding.display_name)
+                    .await
+                {
+                    Some(w) => w,
+                    None => {
+                        let _ = self
+                            .im_adapter
+                            .send_message(&target, "No active session window found.")
+                            .await;
+                        return Ok(());
+                    }
+                };
 
                 // 1. Send /quit to exit the agent gracefully
                 self.tmux_mgr.send_line(&window_id, "/quit").await.ok();
@@ -1776,7 +1800,24 @@ impl Server {
                     self.tmux_mgr.kill_window(&window_id).await.ok();
                     tokio::time::sleep(Duration::from_millis(500)).await;
                     let cwd = wb.map(|w| w.cwd.clone()).unwrap_or_default();
-                    let _ = self.tmux_mgr.new_window(&binding.display_name, &cwd).await;
+                    match self
+                        .recreate_bound_window(
+                            &window_id,
+                            &binding.display_name,
+                            &cwd,
+                            &binding.session_id,
+                        )
+                        .await
+                    {
+                        Some(new_id) => window_id = new_id,
+                        None => {
+                            let _ = self
+                                .im_adapter
+                                .send_message(&target, "❌ Could not recreate the window.")
+                                .await;
+                            return Ok(());
+                        }
+                    }
                 }
 
                 // 2. Launch a FRESH agent (no resume — new session)
@@ -1816,10 +1857,33 @@ impl Server {
                                     .send_message(&target, "❌ Agent exited after trust dialog.")
                                     .await;
                             } else {
-                                let _ = self
-                                    .im_adapter
-                                    .send_message(&target, "✅ New session started.")
+                                // A fresh agent gets a new session UUID. Discover
+                                // it and re-point this chat's binding — otherwise
+                                // the monitor resolves the new session to no chat
+                                // binding and every response is dropped until the
+                                // user runs `/rebind` by hand.
+                                let old_sid = binding.session_id.clone();
+                                let new_sid = self
+                                    .resolve_session_id(&window_id.0, Duration::from_secs(15))
                                     .await;
+                                let msg = match new_sid {
+                                    Some(sid) if !sid.is_empty() && sid != old_sid => {
+                                        let tid = target.thread_id.map(|t| t.0).unwrap_or(0);
+                                        self.rebind_session_to_window(
+                                            &window_id.0,
+                                            &sid,
+                                            user_id,
+                                            tid,
+                                        )
+                                        .await;
+                                        format!("✅ New session started (session {sid}).")
+                                    }
+                                    Some(sid) if !sid.is_empty() => {
+                                        format!("✅ New session started (session {sid}).")
+                                    }
+                                    _ => "⚠️ New session started, but its ID could not be discovered. Send /rebind.".to_string(),
+                                };
+                                let _ = self.im_adapter.send_message(&target, &msg).await;
                             }
                         } else {
                             let _ = self

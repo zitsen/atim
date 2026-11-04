@@ -576,6 +576,114 @@ impl super::Server {
         Some(w.window_id.0.clone())
     }
 
+    /// Resolve the live window for a binding.
+    ///
+    /// The stored `window_id` (`@3`) is only valid for the tmux server that
+    /// created it — a restart renumbers every window and a stale id can even
+    /// point at a different chat's window. Fall back to the binding's display
+    /// name (the tmux window name) exactly like a normal message does.
+    pub(super) async fn resolve_bound_window(&self, stored: &str, name: &str) -> Option<WindowId> {
+        if !stored.is_empty() {
+            let wid = WindowId(stored.to_string());
+            // The id must still belong to *this* binding: tmux reuses ids
+            // after a restart, so an existing @3 may be another chat's window.
+            if let Ok(info) = self.tmux_mgr.find_window(&wid).await
+                && info.name == name
+            {
+                return Some(wid);
+            }
+        }
+        self.find_window_by_name(name).await.map(WindowId)
+    }
+
+    /// Recreate a dead window and re-key the runtime state to the new id.
+    ///
+    /// Returns the new id; the caller must use it for the relaunch, because
+    /// the old id died with the window.
+    pub(super) async fn recreate_bound_window(
+        &self,
+        old: &WindowId,
+        name: &str,
+        cwd: &str,
+        session_id: &str,
+    ) -> Option<WindowId> {
+        let new_id = self.tmux_mgr.new_window(name, cwd).await.ok()?;
+        tracing::info!("[window] recreated {} -> {} ({name})", old.0, new_id.0);
+
+        {
+            let _rt_guard = self.state_mgr.lock_runtime().await;
+            if let Ok(mut rt) = self.state_mgr.load_runtime().await
+                && let Some(old_binding) = rt.window_bindings.remove(&old.0)
+            {
+                rt.window_bindings.insert(
+                    new_id.0.clone(),
+                    WindowBinding {
+                        window_id: new_id.0.clone(),
+                        ..old_binding
+                    },
+                );
+                if let Err(e) = self.state_mgr.save_runtime_locked(_rt_guard, &rt).await {
+                    tracing::warn!("[window] failed to re-key window binding: {e}");
+                }
+            }
+        }
+
+        // session_map is keyed by window id as well; keep it consistent so the
+        // monitor keeps resolving this session to its chat.
+        if !session_id.is_empty()
+            && let Ok(mut map) = self.state_mgr.load_session_map().await
+            && let Some(sid) = map.remove(&old.0)
+        {
+            map.insert(new_id.0.clone(), sid);
+            if let Err(e) = self.state_mgr.save_session_map(&map).await {
+                tracing::warn!("[window] failed to re-key session_map: {e}");
+            }
+        }
+
+        Some(new_id)
+    }
+
+    /// Re-point a window and one chat's binding at a new session id.
+    ///
+    /// Used after `/new` starts a fresh agent: until the bindings point at the
+    /// new UUID the monitor resolves its output to no chat and every response
+    /// is dropped, leaving the user to run `/rebind` by hand.
+    pub(super) async fn rebind_session_to_window(
+        &self,
+        window_id: &str,
+        session_id: &str,
+        user_id: i64,
+        thread_id: i64,
+    ) {
+        {
+            let _rt_guard = self.state_mgr.lock_runtime().await;
+            if let Ok(mut rt) = self.state_mgr.load_runtime().await {
+                if let Some(wb) = rt.window_bindings.get_mut(window_id) {
+                    wb.session_id = session_id.to_string();
+                }
+                for cb in rt.chat_bindings.iter_mut() {
+                    if cb.user_id == user_id && cb.thread_id == thread_id {
+                        cb.session_id = session_id.to_string();
+                    }
+                }
+                if let Err(e) = self.state_mgr.save_runtime_locked(_rt_guard, &rt).await {
+                    tracing::warn!("[rebind] failed to save runtime: {e}");
+                }
+            }
+        }
+
+        if let Ok(mut map) = self.state_mgr.load_session_map().await {
+            map.insert(window_id.to_string(), session_id.to_string());
+            if let Err(e) = self.state_mgr.save_session_map(&map).await {
+                tracing::warn!("[rebind] failed to save session_map: {e}");
+            }
+        }
+
+        tracing::info!(
+            "[rebind] window {window_id} → session {session_id} (user={user_id} thread={thread_id})"
+        );
+    }
+
     /// Send text to the agent, optimizing `!` shell commands by sending
     /// `!` first and the command separately to avoid the agent treating
     /// the entire input as a conversational message.
