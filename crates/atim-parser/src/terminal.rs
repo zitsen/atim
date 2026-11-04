@@ -44,6 +44,47 @@ impl TerminalParser {
         re.replace_all(text, "").to_string()
     }
 
+    /// Whether the agent's input box is empty.
+    ///
+    /// Claude Code draws its prompt between two full-width horizontal rules at
+    /// the bottom of the pane. `Some(true)` means the box holds nothing but the
+    /// prompt marker — i.e. the message that was just sent has been submitted.
+    /// `Some(false)` means a draft is still sitting there: the trailing Enter
+    /// was dropped. `None` means the layout is not recognized (a dialog is
+    /// open, the agent is between renders, or this is not a Claude-style TUI),
+    /// and the caller must not act on it.
+    pub fn input_area_is_empty(pane_text: &str) -> Option<bool> {
+        let clean = Self::strip_ansi(pane_text);
+        let lines: Vec<&str> = clean.lines().collect();
+
+        let is_rule = |l: &&str| {
+            let t = l.trim();
+            t.chars().count() >= 10 && t.chars().all(|c| matches!(c, '─' | '━' | '═'))
+        };
+        let rules: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| is_rule(l))
+            .map(|(i, _)| i)
+            .collect();
+        if rules.len() < 2 {
+            return None;
+        }
+        let (start, end) = (rules[rules.len() - 2], rules[rules.len() - 1]);
+
+        // The prompt marker is `❯` (U+276F) in current builds, `>` in older
+        // ones; older layouts may also prefix the box with `│`.
+        let mut draft = String::new();
+        for line in &lines[start + 1..end] {
+            draft.push_str(line);
+        }
+        let content = draft
+            .trim_start()
+            .trim_start_matches(['❯', '>', '│'])
+            .trim_matches(|c: char| c.is_whitespace() || c == '\u{a0}');
+        Some(content.is_empty())
+    }
+
     /// Strip leading blank lines and trailing tmux status bar.
     ///
     /// Tmux appends its status bar line at the bottom. We strip it by
@@ -79,5 +120,48 @@ mod tests {
     fn test_strip_pane_chrome() {
         let text = "Hello\nWorld\n[0] 0:bash*";
         assert_eq!(TerminalParser::strip_pane_chrome(text), "Hello\nWorld");
+    }
+
+    #[test]
+    fn test_input_area_empty_when_submitted() {
+        let pane = "\
+✻ Worked for 1m 56s · done 10:57 AM
+
+──────────────────────────────────────────────────────────────
+❯\u{a0}
+──────────────────────────────────────────────────────────────
+  huolinhe@host:/home/huolinhe/code/workspace
+  ⏵⏵ bypass permissions on (shift+tab to cycle)";
+        assert_eq!(TerminalParser::input_area_is_empty(pane), Some(true));
+    }
+
+    #[test]
+    fn test_input_area_detects_unsubmitted_draft() {
+        let pane = "\
+✻ Worked for 1m 56s · done 10:57 AM
+
+──────────────────────────────────────────────────────────────
+❯ https://project.feishu.cn/taosdata_td/feature/detail/7117102738 继续review
+──────────────────────────────────────────────────────────────
+  huolinhe@host:/home/huolinhe/code/workspace";
+        assert_eq!(TerminalParser::input_area_is_empty(pane), Some(false));
+    }
+
+    #[test]
+    fn test_input_area_none_without_rules() {
+        // A dialog or a non-Claude TUI: the caller must not act on a guess.
+        let pane = "Do you want to proceed?\n❯ 1. Yes\n  2. No";
+        assert_eq!(TerminalParser::input_area_is_empty(pane), None);
+    }
+
+    #[test]
+    fn test_input_area_ignores_ansi_and_multiline_drafts() {
+        let pane = "\
+──────────────────────────────────────────────────────────────
+\x1b[36m❯ line one\x1b[0m
+line two
+──────────────────────────────────────────────────────────────
+";
+        assert_eq!(TerminalParser::input_area_is_empty(pane), Some(false));
     }
 }

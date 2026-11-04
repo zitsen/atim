@@ -450,6 +450,14 @@ impl super::Server {
             }
         }
 
+        // Let the TUI finish starting before typing into it: a message sent
+        // into a half-initialized input handler is where the trailing Enter
+        // gets dropped, leaving the draft in the box with no response.
+        let _ = self
+            .tmux_mgr
+            .wait_for_agent_ready(&new_window_id, Duration::from_secs(10))
+            .await;
+
         // Forward the user's original text to the agent.
         // resolve_session_id above gives the agent enough time to initialize.
         tracing::info!(
@@ -457,14 +465,11 @@ impl super::Server {
             text.len(),
             new_window_id.0,
         );
+        // Route through the shared sender so the message gets the same `!`
+        // handling and submit verification as a normal chat message.
         let is_copilot = agent.name() == "copilot";
-        if is_copilot {
-            self.tmux_mgr
-                .send_line_chars(&new_window_id, text, 10)
-                .await?;
-        } else {
-            self.tmux_mgr.send_line(&new_window_id, text).await?;
-        }
+        self.send_text_to_agent(&new_window_id, text, is_copilot)
+            .await?;
         self.pending_messages
             .lock()
             .await
@@ -710,7 +715,55 @@ impl super::Server {
                 self.tmux_mgr.send_line(window_id, text).await?;
             }
         }
+
+        self.ensure_agent_submitted(window_id).await;
         Ok(())
+    }
+
+    /// Make sure the text that was just sent actually left the input box.
+    ///
+    /// Claude Code's TUI intermittently drops the trailing Enter — when the
+    /// text arrives as one burst (paste detection swallows the following CR)
+    /// or while the TUI is still initializing after a launch or resume. The
+    /// draft then sits in the input box and the agent never sees it, so the
+    /// user gets no response at all. Re-press Enter while a draft is visible.
+    ///
+    /// The check is deliberately conservative: an unrecognized layout (open
+    /// dialog, mid-render) returns `None` and ends the loop rather than
+    /// guessing, so a stray Enter can never confirm a dialog or cut a paste
+    /// short.
+    async fn ensure_agent_submitted(&self, window_id: &WindowId) {
+        // The TUI needs time to ingest the burst and process the Enter; a
+        // premature check would see the draft still present and press Enter
+        // mid-paste, submitting a truncated message.
+        tokio::time::sleep(Duration::from_millis(800)).await;
+
+        for attempt in 0..3 {
+            let pane = match self.tmux_mgr.capture_pane(window_id).await {
+                Ok(p) => p,
+                Err(_) => return,
+            };
+            match atim_parser::terminal::TerminalParser::input_area_is_empty(&pane) {
+                Some(true) => return,
+                Some(false) => {
+                    tracing::warn!(
+                        "[send] message still in the input box after Enter (attempt {}); re-sending Enter",
+                        attempt + 1
+                    );
+                    if self.tmux_mgr.send_key(window_id, "Enter").await.is_err() {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+                // Layout not recognized (dialog, still rendering): don't guess.
+                None => return,
+            }
+        }
+
+        tracing::error!(
+            "[send] message to window {} still unsubmitted after 3 retries",
+            window_id.0
+        );
     }
 
     /// Send a slash command to the agent, capture the modal content,
