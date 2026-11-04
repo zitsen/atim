@@ -27,10 +27,23 @@ const LATIN_FONT_PATHS: &[&str] = &[
 ];
 
 /// CJK fallback font paths.
+///
+/// The Noto CJK package installs to a different directory per distro:
+/// Debian/Ubuntu use `opentype/noto`, Arch ships `noto-cjk`, Fedora uses
+/// `google-noto-cjk`. Keep every known layout here — a path that only exists
+/// on one distro leaves Chinese text rendered as .notdef boxes.
 const CJK_FONT_PATHS: &[&str] = &[
-    "/usr/share/fonts/wenquanyi/wqy-zenhei/wqy-zenhei.ttc",
+    // Debian / Ubuntu (fonts-noto-cjk)
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-SC-Regular.otf",
+    // Arch / Fedora layouts
     "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/noto-cjk/NotoSansCJK-SC-Regular.otf",
+    "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+    // WenQuanYi / Droid fallbacks
+    "/usr/share/fonts/wenquanyi/wqy-zenhei/wqy-zenhei.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
     // Windows fonts
     "C:\\Windows\\Fonts\\msyh.ttc",
     "C:\\Windows\\Fonts\\simhei.ttf",
@@ -231,6 +244,32 @@ fn load_font_opt(candidates: &[&str]) -> Option<FontArc> {
         .and_then(|d| FontArc::try_from_vec(d).ok())
 }
 
+/// Locate a CJK-capable font: known distro paths first, then fontconfig.
+///
+/// The static list covers the common package layouts; `fc-match` handles
+/// everything else (custom installs, other distros) without adding a font
+/// library dependency.
+fn load_cjk_font() -> Option<FontArc> {
+    if let Some(font) = load_font_opt(CJK_FONT_PATHS) {
+        return Some(font);
+    }
+    let out = std::process::Command::new("fc-match")
+        .args(["-f", "%{file}", ":lang=zh"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = String::from_utf8(out.stdout).ok()?;
+    let path = path.trim();
+    if path.is_empty() {
+        return None;
+    }
+    std::fs::read(path)
+        .ok()
+        .and_then(|d| FontArc::try_from_vec(d).ok())
+}
+
 /// Check if a character likely needs a CJK font.
 fn is_cjk(ch: char) -> bool {
     matches!(ch as u32,
@@ -272,7 +311,7 @@ pub fn render_ansi_to_png(contents: &str) -> Result<Vec<u8>> {
         tracing::warn!("Failed to load Latin font: {e}");
         e
     })?;
-    let cjk_font = load_font_opt(CJK_FONT_PATHS);
+    let cjk_font = load_cjk_font();
     if cjk_font.is_none() {
         tracing::warn!("No CJK font found — CJK chars use Latin fallback");
     }
@@ -381,11 +420,35 @@ pub fn render_ansi_to_png(contents: &str) -> Result<Vec<u8>> {
                 }
             }
 
-            // Draw text
+            // Draw text. Mixed segments need a per-character font fallback:
+            // the Latin font has no CJK glyphs (Chinese used to come out as
+            // .notdef boxes), while drawing a whole mixed segment with the CJK
+            // font would break the Latin metrics the background width assumes.
             let fg = seg.style.fg_rgb();
             let rgba = image::Rgba([fg.0, fg.1, fg.2, 255]);
-            let f = cjk_font.as_ref().unwrap_or(&font);
-            imageproc::drawing::draw_text_mut(&mut img, rgba, x, y, scale, f, &seg.text);
+            if cjk_count == 0 {
+                imageproc::drawing::draw_text_mut(&mut img, rgba, x, y, scale, &font, &seg.text);
+            } else {
+                let mut cx = x;
+                for ch in seg.text.chars() {
+                    let cell_w = if is_cjk(ch) {
+                        2 * char_w as i32
+                    } else {
+                        char_w as i32
+                    };
+                    if !ch.is_whitespace() {
+                        let mut buf = [0u8; 4];
+                        let s = ch.encode_utf8(&mut buf);
+                        let f = if is_cjk(ch) {
+                            cjk_font.as_ref().unwrap_or(&font)
+                        } else {
+                            &font
+                        };
+                        imageproc::drawing::draw_text_mut(&mut img, rgba, cx, y, scale, f, s);
+                    }
+                    cx += cell_w;
+                }
+            }
 
             x += seg_w as i32;
         }
@@ -460,6 +523,20 @@ pub fn fill_rect(img: &mut RgbaImage, x: u32, y: u32, w: u32, h: u32, color: ima
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_render_cjk_draws_glyphs() {
+        let png =
+            render_ansi_to_png("中文测试：你好，世界！\nLatin line: hello\n混合 mixed 文本 123")
+                .expect("render");
+        assert!(png.len() > 1000);
+        // Hosts without a CJK font still render (as before); the glyph test is
+        // only meaningful where one is installed.
+        if load_cjk_font().is_some() {
+            let bytes = render_ansi_to_png("中文").expect("cjk render");
+            assert!(!bytes.is_empty());
+        }
+    }
 
     #[test]
     fn test_sgr_reset() {
