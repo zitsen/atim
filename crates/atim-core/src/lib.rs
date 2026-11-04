@@ -3,6 +3,7 @@ pub mod card;
 pub mod config;
 pub mod error;
 pub mod im;
+pub mod images;
 pub mod message;
 pub mod session;
 pub mod terminal;

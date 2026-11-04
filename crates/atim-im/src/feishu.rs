@@ -39,6 +39,8 @@ pub struct FeishuAdapter {
     id_map: Arc<RwLock<IdMap>>,
     /// Persistence file for id_map (survives restarts).
     id_map_file: PathBuf,
+    /// atim state directory (`~/.atim`), where inbound images are saved.
+    atim_dir: PathBuf,
     event_tx: Arc<RwLock<Option<mpsc::UnboundedSender<ImEvent>>>>,
     /// Bot's own open_id, used to detect @-mentions in group chats.
     bot_open_id: Arc<RwLock<Option<String>>>,
@@ -85,6 +87,7 @@ impl FeishuAdapter {
                 thread_ids: HashMap::new(),
             })),
             id_map_file,
+            atim_dir,
             event_tx: Arc::new(RwLock::new(None)),
             bot_open_id: Arc::new(RwLock::new(None)),
             bot_name: Arc::new(RwLock::new(None)),
@@ -1060,6 +1063,7 @@ impl Clone for FeishuAdapter {
             token_cache: self.token_cache.clone(),
             id_map: self.id_map.clone(),
             id_map_file: self.id_map_file.clone(),
+            atim_dir: self.atim_dir.clone(),
             event_tx: self.event_tx.clone(),
             bot_open_id: self.bot_open_id.clone(),
             bot_name: self.bot_name.clone(),
@@ -1150,7 +1154,8 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
 
     let parsed_content: serde_json::Value = serde_json::from_str(content_str).unwrap_or_default();
 
-    let mut text = String::new();
+    // Assigned by every match arm that does not return early.
+    let mut text: String;
     let mut has_mention = false;
 
     // Check for @-mention of the bot in group chats (shared by text/post types)
@@ -1232,17 +1237,88 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
                 ""
             };
 
-            if !locale.is_empty() {
-                text = extract_post_text(&post_obj[locale]);
+            let post_content: Option<&serde_json::Value> = if !locale.is_empty() {
+                Some(&post_obj[locale])
             } else if parsed_content["content"].is_array() {
                 // Format 2: direct content without locale wrapper
-                text = extract_post_text(&parsed_content);
-            }
-            ImEventKind::Text {
-                text: text.clone(),
-                is_mention: has_mention,
-                is_group: chat_type == "group",
-                message_id: Some(message_id_str.to_string()),
+                Some(&parsed_content)
+            } else {
+                None
+            };
+            let (post_text, image_keys) =
+                post_content.map(extract_post_content).unwrap_or_default();
+
+            // Text-only post: keep the existing path (an `img` without an
+            // image_key still leaves its placeholder as a hint).
+            if image_keys.iter().all(|k| k.is_empty()) {
+                text = post_text;
+                ImEventKind::Text {
+                    text: text.clone(),
+                    is_mention: has_mention,
+                    is_group: chat_type == "group",
+                    message_id: Some(message_id_str.to_string()),
+                }
+            } else {
+                // Rich-text images are message resources, not standalone image
+                // keys. Downloading each one is a multi-second HTTP call, so do
+                // it off the sequential payload loop and emit a single Text
+                // event with every placeholder replaced by its local path.
+                let adapter = adapter.clone();
+                let Some(tx) = adapter.event_tx.read().await.clone() else {
+                    tracing::warn!("Feishu post images dropped: event channel not ready");
+                    return Ok(());
+                };
+                let is_group = chat_type == "group";
+                let message_id = message_id_str.to_string();
+                tokio::spawn(async move {
+                    let mut paths: Vec<Option<PathBuf>> = Vec::with_capacity(image_keys.len());
+                    for key in &image_keys {
+                        if key.is_empty() {
+                            paths.push(None);
+                            continue;
+                        }
+                        let data = match adapter.download_message_image(&message_id, key).await {
+                            Ok(d) if !d.is_empty() => d,
+                            Ok(_) => {
+                                tracing::warn!("Feishu post image {key} downloaded empty");
+                                paths.push(None);
+                                continue;
+                            }
+                            Err(e) => {
+                                tracing::warn!("Feishu post image {key} download failed: {e}");
+                                paths.push(None);
+                                continue;
+                            }
+                        };
+                        match atim_core::images::save_inbound_image(
+                            &adapter.atim_dir,
+                            &data,
+                            "image/png",
+                        )
+                        .await
+                        {
+                            Ok(p) => paths.push(Some(p)),
+                            Err(e) => {
+                                tracing::warn!("Feishu post image {key} save failed: {e}");
+                                paths.push(None);
+                            }
+                        }
+                    }
+
+                    let out = render_post_with_paths(&post_text, &paths);
+
+                    let _ = tx.send(ImEvent {
+                        user_id,
+                        target,
+                        kind: ImEventKind::Text {
+                            text: out,
+                            is_mention: has_mention,
+                            is_group,
+                            message_id: Some(message_id),
+                        },
+                    });
+                });
+                return Ok(());
             }
         }
         "image" => {
@@ -1592,8 +1668,15 @@ fn fs_button(btn: &CardButton) -> serde_json::Value {
 }
 
 /// Extract plain text from a Feishu `post` rich-text block.
-fn extract_post_content_text(content: &serde_json::Value) -> String {
+/// Extract the text of a rich-text (post) message along with the image keys
+/// it embeds, in order.
+///
+/// Every `img` element contributes exactly one ` [image] ` placeholder to the
+/// text and one entry to the key list (empty when the element carries no
+/// `image_key`), so callers can substitute the placeholders positionally.
+fn extract_post_content(content: &serde_json::Value) -> (String, Vec<String>) {
     let mut result = String::new();
+    let mut image_keys = Vec::new();
 
     if let Some(title) = content["title"].as_str()
         && !title.is_empty()
@@ -1638,6 +1721,7 @@ fn extract_post_content_text(content: &serde_json::Value) -> String {
                             }
                         }
                         "img" => {
+                            image_keys.push(el["image_key"].as_str().unwrap_or("").to_string());
                             result.push_str(" [image] ");
                         }
                         _ => {}
@@ -1647,12 +1731,33 @@ fn extract_post_content_text(content: &serde_json::Value) -> String {
         }
     }
 
-    result
+    (result, image_keys)
 }
 
-/// Shorthand wrapper for the helper above.
-fn extract_post_text(post_content: &serde_json::Value) -> String {
-    extract_post_content_text(post_content)
+/// Replace each ` [image] ` placeholder with its resolved local path, in
+/// order. A placeholder whose image failed to download stays as-is.
+fn render_post_with_paths(post_text: &str, paths: &[Option<PathBuf>]) -> String {
+    let parts: Vec<&str> = post_text.split(" [image] ").collect();
+    let mut out = String::new();
+    for (i, part) in parts.iter().enumerate() {
+        out.push_str(part);
+        if i + 1 < parts.len() {
+            match paths.get(i).and_then(|p| p.as_ref()) {
+                Some(path) => {
+                    out.push_str(" [image] ");
+                    out.push_str(&path.display().to_string());
+                    out.push(' ');
+                }
+                None => out.push_str(" [image] "),
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+fn extract_post_content_text(content: &serde_json::Value) -> String {
+    extract_post_content(content).0
 }
 
 // ── Tests ──
@@ -1842,5 +1947,45 @@ mod tests {
         let result = extract_post_content_text(&content);
         assert!(result.contains("See this"));
         assert!(result.contains("[image]"));
+    }
+
+    #[test]
+    fn test_extract_post_content_collects_image_keys_in_order() {
+        let content = serde_json::json!({
+            "title": "T",
+            "content": [
+                [
+                    { "tag": "text", "text": "before" },
+                    { "tag": "img", "image_key": "img_1" },
+                    { "tag": "text", "text": "after" }
+                ],
+                [
+                    { "tag": "img", "image_key": "img_2" },
+                    { "tag": "img" }
+                ]
+            ]
+        });
+        let (text, keys) = extract_post_content(&content);
+        // One placeholder per img element, with or without an image_key.
+        assert_eq!(text.matches(" [image] ").count(), 3);
+        assert_eq!(
+            keys,
+            vec!["img_1".to_string(), "img_2".to_string(), String::new()]
+        );
+    }
+
+    #[test]
+    fn test_render_post_with_paths_substitutes_in_order() {
+        let text = "a [image] b [image] c [image] d";
+        let paths = vec![
+            Some(std::path::PathBuf::from("/tmp/one.jpg")),
+            None, // download failed — placeholder must survive
+            Some(std::path::PathBuf::from("/tmp/three.png")),
+        ];
+        let out = render_post_with_paths(text, &paths);
+        assert_eq!(
+            out,
+            "a [image] /tmp/one.jpg b [image] c [image] /tmp/three.png d"
+        );
     }
 }
