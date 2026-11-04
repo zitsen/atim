@@ -53,7 +53,10 @@ impl AgentHandle {
             .unwrap_or_else(|| self.inner.new_session_command())
     }
     pub fn resume_command(&self, session_id: &str) -> Option<String> {
-        self.inner.resume_command(session_id)
+        match &self.extra_args_override {
+            Some(args) => self.inner.resume_command_with_args(session_id, args),
+            None => self.inner.resume_command(session_id),
+        }
     }
     pub fn extra_args(&self) -> Vec<String> {
         self.extra_args_override
@@ -222,5 +225,32 @@ impl std::fmt::Debug for AgentRegistry {
             )
             .field("default", &self.default_name)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::claude::ClaudeAgent;
+
+    #[test]
+    fn test_resume_command_honors_configured_args() {
+        let handle = AgentHandle::with_overrides(
+            ClaudeAgent,
+            None,
+            Some(vec!["--autocompact".into(), "900000".into()]),
+        );
+        let cmd = handle.resume_command("abc-123").expect("claude resumes");
+        assert!(cmd.contains("--resume abc-123"), "{cmd}");
+        assert!(cmd.contains("--autocompact 900000"), "{cmd}");
+        // The hardcoded default must not win over the configured value.
+        assert!(!cmd.contains("--autocompact auto"), "{cmd}");
+    }
+
+    #[test]
+    fn test_resume_command_without_override_uses_agent_defaults() {
+        let handle = AgentHandle::new(ClaudeAgent);
+        let cmd = handle.resume_command("abc-123").expect("claude resumes");
+        assert!(cmd.contains("--autocompact auto"), "{cmd}");
     }
 }

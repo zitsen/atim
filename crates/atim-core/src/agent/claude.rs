@@ -174,18 +174,15 @@ impl Agent for ClaudeAgent {
     }
 
     fn resume_command(&self, session_id: &str) -> Option<String> {
-        let args = self.extra_args();
+        self.resume_command_with_args(session_id, &self.extra_args())
+    }
+
+    fn resume_command_with_args(&self, session_id: &str, args: &[String]) -> Option<String> {
+        let base = format!("{} --resume {session_id}", self.new_session_command());
         if args.is_empty() {
-            Some(format!(
-                "{} --resume {session_id}",
-                self.new_session_command()
-            ))
+            Some(base)
         } else {
-            Some(format!(
-                "{} --resume {session_id} {}",
-                self.new_session_command(),
-                args.join(" ")
-            ))
+            Some(format!("{base} {}", args.join(" ")))
         }
     }
 

@@ -106,6 +106,16 @@ pub trait Agent: Send + Sync {
     /// Command to resume an existing session, if supported.
     fn resume_command(&self, session_id: &str) -> Option<String>;
 
+    /// Command to resume an existing session with an explicit argument list —
+    /// the user's `[agent.<name>] args` override.
+    ///
+    /// The default ignores the override (agents whose resume syntax cannot
+    /// take extra flags); Claude overrides it so configured flags such as
+    /// `--autocompact` apply to resumed sessions too.
+    fn resume_command_with_args(&self, session_id: &str, _args: &[String]) -> Option<String> {
+        self.resume_command(session_id)
+    }
+
     /// Extra CLI args appended on every invocation.
     fn extra_args(&self) -> Vec<String> {
         vec![]
