@@ -2,6 +2,7 @@ pub mod agent;
 pub mod card;
 pub mod config;
 pub mod error;
+pub mod files;
 pub mod im;
 pub mod images;
 pub mod message;

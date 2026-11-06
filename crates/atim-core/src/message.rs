@@ -105,6 +105,17 @@ pub enum ImEventKind {
         /// The IM platform's message ID, for reacting to the original message.
         message_id: Option<String>,
     },
+    /// A file attachment of any type (documents, archives, SVG, ...).
+    File {
+        file_name: String,
+        data: Vec<u8>,
+        /// True if the user explicitly @-mentioned the bot (relevant for group chats).
+        is_mention: bool,
+        /// True if the message was sent in a group chat (vs P2P).
+        is_group: bool,
+        /// The IM platform's message ID, for reacting to the original message.
+        message_id: Option<String>,
+    },
     /// Voice message (OGG OPUS).
     Voice(Vec<u8>),
     /// Inline keyboard button press.
@@ -129,6 +140,7 @@ impl ImEventKind {
         match self {
             ImEventKind::Text { .. } => "Text",
             ImEventKind::Photo { .. } => "Photo",
+            ImEventKind::File { .. } => "File",
             ImEventKind::Voice(..) => "Voice",
             ImEventKind::CallbackQuery { .. } => "CallbackQuery",
             ImEventKind::TopicCreated { .. } => "TopicCreated",

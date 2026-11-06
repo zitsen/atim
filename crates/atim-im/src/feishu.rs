@@ -1017,19 +1017,24 @@ impl FeishuAdapter {
     }
 }
 
-// ── Image download ──
+// ── Message resource download ──
 
 impl FeishuAdapter {
-    /// Download an image attached to a message.
+    /// Download a resource (image or file) attached to a message.
     ///
-    /// Message images are only reachable through the message-resource API:
+    /// Message resources are only reachable through the message-resource API:
     /// the standalone `GET im/v1/images/{image_key}` (no `/download` suffix —
     /// that path doesn't exist) serves app-uploaded images only and rejects
     /// message-image keys with code 234001.
-    async fn download_message_image(&self, message_id: &str, file_key: &str) -> Result<Vec<u8>> {
+    async fn download_message_resource(
+        &self,
+        message_id: &str,
+        file_key: &str,
+        resource_type: &str,
+    ) -> Result<Vec<u8>> {
         let token = self.get_token().await?;
         let url = format!(
-            "{FEISHU_BASE_URL}/open-apis/im/v1/messages/{message_id}/resources/{file_key}?type=image"
+            "{FEISHU_BASE_URL}/open-apis/im/v1/messages/{message_id}/resources/{file_key}?type={resource_type}"
         );
         let resp = self
             .client
@@ -1037,11 +1042,11 @@ impl FeishuAdapter {
             .header("Authorization", format!("Bearer {token}"))
             .send()
             .await
-            .map_err(|e| Error::Feishu(format!("image download error: {e}")))?;
+            .map_err(|e| Error::Feishu(format!("resource download error: {e}")))?;
 
         if !resp.status().is_success() {
             return Err(Error::Feishu(format!(
-                "image download failed: HTTP {}",
+                "resource download failed: HTTP {}",
                 resp.status()
             )));
         }
@@ -1049,7 +1054,7 @@ impl FeishuAdapter {
         let bytes = resp
             .bytes()
             .await
-            .map_err(|e| Error::Feishu(format!("image read error: {e}")))?;
+            .map_err(|e| Error::Feishu(format!("resource read error: {e}")))?;
         Ok(bytes.to_vec())
     }
 }
@@ -1277,7 +1282,10 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
                             paths.push(None);
                             continue;
                         }
-                        let data = match adapter.download_message_image(&message_id, key).await {
+                        let data = match adapter
+                            .download_message_resource(&message_id, key, "image")
+                            .await
+                        {
                             Ok(d) if !d.is_empty() => d,
                             Ok(_) => {
                                 tracing::warn!("Feishu post image {key} downloaded empty");
@@ -1342,7 +1350,7 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
                 // the server-side flow uniform (it replies "图片数据为空"), but
                 // the cause must land in the log.
                 let data = match adapter
-                    .download_message_image(&message_id, &image_key)
+                    .download_message_resource(&message_id, &image_key, "image")
                     .await
                 {
                     Ok(d) if !d.is_empty() => d,
@@ -1370,9 +1378,61 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
             });
             return Ok(());
         }
+        "file" => {
+            let file_key = parsed_content["file_key"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            let file_name = parsed_content["file_name"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("file")
+                .to_string();
+            if file_key.is_empty() {
+                tracing::warn!("Feishu file message without file_key, skipping");
+                return Ok(());
+            }
+            // Same reasoning as images: the download is a multi-second HTTP
+            // call on a sequential payload loop, so emit from a spawned task.
+            let adapter = adapter.clone();
+            let Some(tx) = adapter.event_tx.read().await.clone() else {
+                tracing::warn!("Feishu file {file_name} dropped: event channel not ready");
+                return Ok(());
+            };
+            let is_group = chat_type == "group";
+            let message_id = message_id_str.to_string();
+            tokio::spawn(async move {
+                let data = match adapter
+                    .download_message_resource(&message_id, &file_key, "file")
+                    .await
+                {
+                    Ok(d) if !d.is_empty() => d,
+                    Ok(_) => {
+                        tracing::warn!("Feishu file {file_name} downloaded empty");
+                        Vec::new()
+                    }
+                    Err(e) => {
+                        tracing::warn!("Feishu file {file_name} download failed: {e}");
+                        Vec::new()
+                    }
+                };
+                let _ = tx.send(ImEvent {
+                    user_id,
+                    target,
+                    kind: ImEventKind::File {
+                        file_name,
+                        data,
+                        is_mention: has_mention,
+                        is_group,
+                        message_id: Some(message_id),
+                    },
+                });
+            });
+            return Ok(());
+        }
         _ => {
             tracing::debug!("Skipping unknown msg_type: {msg_type}");
-            return Ok(()); // skip audio, file, sticker, etc.
+            return Ok(()); // skip audio, sticker, etc.
         }
     };
 

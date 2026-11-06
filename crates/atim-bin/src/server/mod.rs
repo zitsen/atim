@@ -496,6 +496,62 @@ impl Server {
                 )
                 .await?;
             }
+            ImEventKind::File {
+                file_name,
+                data,
+                is_mention,
+                is_group,
+                message_id,
+            } => {
+                if data.is_empty() {
+                    tracing::warn!("File message with empty data, skipping");
+                    let _ = self
+                        .im_adapter
+                        .send_message(&event.target, "⚠️ 文件数据为空，无法转发。")
+                        .await;
+                    return Ok(());
+                }
+                // Same handoff as images: the file is written under
+                // ~/.atim/files/ and the agent receives a prompt referencing
+                // the path, because binary payloads can't cross send-keys.
+                let path = match atim_core::files::save_inbound_file(
+                    &self.config.atim_dir,
+                    &file_name,
+                    &data,
+                )
+                .await
+                {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::error!("Failed to save inbound file: {e}");
+                        let _ = self
+                            .im_adapter
+                            .send_message(&event.target, &format!("❌ 文件保存失败: {e}"))
+                            .await;
+                        return Ok(());
+                    }
+                };
+                tracing::info!(
+                    "[Feishu] File saved: {} ({} KB, name={file_name})",
+                    path.display(),
+                    data.len() / 1024,
+                );
+                let text = format!(
+                    "[file] {} ({}, {} KB)",
+                    path.display(),
+                    file_name,
+                    data.len() / 1024
+                );
+                self.handle_text_message(
+                    event.target,
+                    event.user_id.0,
+                    &text,
+                    is_mention,
+                    is_group,
+                    message_id,
+                )
+                .await?;
+            }
             ImEventKind::Voice(data) => {
                 if data.is_empty() {
                     tracing::warn!("Empty voice data, skipping");
