@@ -1255,6 +1255,20 @@ impl Server {
             }
         }
 
+        // Acknowledge receipt before any slow work (binding lookup, agent
+        // relaunch, forwarding): the user sees the message was picked up.
+        // Feishu has no "EYES" reaction type (the API rejects it with
+        // 231001), so OnIt — "on it" — is the closest receipt.
+        if let Some(mid) = message_id.clone() {
+            let adapter = self.im_adapter.clone();
+            let target = target.clone();
+            tokio::spawn(async move {
+                if let Err(e) = adapter.add_reaction(&target, &mid, "OnIt").await {
+                    tracing::debug!("Failed to add receipt reaction: {e}");
+                }
+            });
+        }
+
         // Helper: find chat_binding by (user_id, thread_id).
         // Falls back to (user_id, chat_id) when thread_id doesn't match
         // (e.g. Feishu replies to cards use a different thread_id).
