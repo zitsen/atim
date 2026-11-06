@@ -250,6 +250,22 @@ impl ImAdapter for FloodControlledAdapter {
         result
     }
 
+    async fn send_file(
+        &self,
+        target: &MessageTarget,
+        filename: &str,
+        data: &[u8],
+    ) -> Result<MessageId> {
+        let chat_id = Self::get_chat_id(target).await;
+        // Essential — a file the user explicitly asked for.
+        self.rate_limit(chat_id, false).await;
+        let result = self.inner.send_file(target, filename, data).await;
+        if result.is_ok() {
+            self.record_send(chat_id).await;
+        }
+        result
+    }
+
     async fn send_card(&self, target: &MessageTarget, card: &Card) -> Result<MessageId> {
         let chat_id = Self::get_chat_id(target).await;
         // Card UI is essential for setup flows (browser, session picker,
@@ -363,6 +379,14 @@ mod tests {
         ) -> Result<MessageId> {
             Ok(MessageId("mock:1".into()))
         }
+        async fn send_file(
+            &self,
+            _target: &MessageTarget,
+            _filename: &str,
+            _data: &[u8],
+        ) -> Result<MessageId> {
+            Ok(MessageId("mock:file".into()))
+        }
         async fn send_card(&self, _target: &MessageTarget, _card: &Card) -> Result<MessageId> {
             Ok(MessageId("mock:1".into()))
         }
@@ -426,6 +450,27 @@ mod tests {
             controller.send_message(&target, "test").await.unwrap();
         }
         assert_eq!(*inner.send_count.lock().unwrap(), 5);
+    }
+
+    #[tokio::test]
+    async fn test_send_file_is_forwarded() {
+        let inner = Arc::new(MockAdapter {
+            send_count: std::sync::Mutex::new(0),
+        });
+        let controller = FloodControlledAdapter::new(inner);
+        let target = MessageTarget {
+            chat_id: atim_core::message::ChatId(1),
+            thread_id: None,
+            chat_name: None,
+        };
+
+        // The wrapper must forward the file to the adapter underneath; a
+        // missing override falls back to the trait's unsupported error.
+        let id = controller
+            .send_file(&target, "notes.txt", b"payload")
+            .await
+            .unwrap();
+        assert_eq!(id.0, "mock:file");
     }
 
     #[tokio::test]
