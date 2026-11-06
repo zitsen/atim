@@ -1,4 +1,4 @@
-use ab_glyph::{FontArc, PxScale};
+use ab_glyph::{Font, FontArc, PxScale, ScaleFont};
 use image::ImageEncoder;
 use image::RgbaImage;
 use regex::Regex;
@@ -270,6 +270,31 @@ fn load_cjk_font() -> Option<FontArc> {
         .and_then(|d| FontArc::try_from_vec(d).ok())
 }
 
+/// Scale the CJK font so one ideograph's advance fills the two cells a wide
+/// character owns.
+///
+/// Some CJK faces — the first face of Noto's `.ttc` among them — expose an
+/// advance well under one em, so drawing them at the Latin scale leaves a
+/// visible gap between every pair of characters. Scaling by the measured
+/// advance keeps the glyph grid aligned with the terminal's cells whatever
+/// face is installed.
+fn cjk_scale_for(cjk_font: &FontArc, base: PxScale, target_width: f32) -> Option<PxScale> {
+    let scaled = cjk_font.as_scaled(base);
+    let glyph_id = scaled.glyph_id('中');
+    if glyph_id.0 == 0 {
+        return None;
+    }
+    let advance = scaled.h_advance(glyph_id);
+    if advance <= 0.0 {
+        return None;
+    }
+    let factor = target_width / advance;
+    Some(PxScale {
+        x: base.x * factor,
+        y: base.y * factor,
+    })
+}
+
 /// Check if a character likely needs a CJK font.
 fn is_cjk(ch: char) -> bool {
     matches!(ch as u32,
@@ -324,6 +349,19 @@ pub fn render_ansi_to_png(contents: &str) -> Result<Vec<u8>> {
     let char_w = imageproc::drawing::text_size(scale, &font, "W").0 as u32;
     let line_h = (font_size * 1.35).ceil() as u32;
     let padding = 16u32;
+
+    // A wide character owns two cells. Draw it with a CJK scale that fills
+    // that box, and shift it back by the ascent difference so its baseline
+    // still matches the Latin text on the same line.
+    let cjk_scale = cjk_font
+        .as_ref()
+        .and_then(|f| cjk_scale_for(f, scale, 2.0 * char_w as f32));
+    let cjk_dy = match (cjk_font.as_ref(), cjk_scale) {
+        (Some(f), Some(s)) => {
+            (font.as_scaled(scale).ascent() - f.as_scaled(s).ascent()).round() as i32
+        }
+        _ => 0,
+    };
 
     // Parse lines
     let ansi_re = Regex::new(r"\x1b\[([0-9;]*)m").unwrap();
@@ -439,12 +477,24 @@ pub fn render_ansi_to_png(contents: &str) -> Result<Vec<u8>> {
                     if !ch.is_whitespace() {
                         let mut buf = [0u8; 4];
                         let s = ch.encode_utf8(&mut buf);
-                        let f = if is_cjk(ch) {
-                            cjk_font.as_ref().unwrap_or(&font)
+                        let (f, glyph_scale, dy) = if is_cjk(ch) {
+                            match (cjk_font.as_ref(), cjk_scale) {
+                                (Some(f), Some(s)) => (f, s, cjk_dy),
+                                (Some(f), None) => (f, scale, 0),
+                                (None, _) => (&font, scale, 0),
+                            }
                         } else {
-                            &font
+                            (&font, scale, 0)
                         };
-                        imageproc::drawing::draw_text_mut(&mut img, rgba, cx, y, scale, f, s);
+                        imageproc::drawing::draw_text_mut(
+                            &mut img,
+                            rgba,
+                            cx,
+                            y + dy,
+                            glyph_scale,
+                            f,
+                            s,
+                        );
                     }
                     cx += cell_w;
                 }
@@ -613,6 +663,22 @@ mod tests {
         assert!(result.is_ok());
         let png = result.unwrap();
         assert_eq!(&png[..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
+    }
+
+    #[test]
+    fn test_cjk_scale_fills_two_cells() {
+        let Some(cjk) = load_cjk_font() else {
+            return;
+        };
+        let base = PxScale { x: 16.0, y: 16.0 };
+        let target = 20.0; // two 10px cells
+        let scaled = cjk_scale_for(&cjk, base, target).expect("cjk scale");
+        let font = cjk.as_scaled(scaled);
+        let advance = font.h_advance(font.glyph_id('中'));
+        assert!(
+            (advance - target).abs() < 0.5,
+            "scaled advance {advance} should fill the {target}px cell"
+        );
     }
 
     #[test]
