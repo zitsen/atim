@@ -15,20 +15,33 @@ use crate::error::{Error, Result};
 /// the TTL is generous so a busy session or a restart can't lose the image.
 pub const INBOUND_IMAGE_TTL: Duration = Duration::from_secs(7 * 24 * 3600);
 
+/// Recognise an image from its magic bytes, returning the extension the IM
+/// platforms accept for image messages.
+///
+/// Returns `None` when the bytes are not a supported image — outbound files
+/// use this to tell a photo from a document.
+pub fn sniff_image_ext(data: &[u8]) -> Option<&'static str> {
+    if data.starts_with(&[0x89, b'P', b'N', b'G']) {
+        Some("png")
+    } else if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("jpg")
+    } else if data.starts_with(b"GIF8") {
+        Some("gif")
+    } else if data.len() > 12 && data.starts_with(b"RIFF") && &data[8..12] == b"WEBP" {
+        Some("webp")
+    } else {
+        None
+    }
+}
+
 /// Sniff the file extension from image magic bytes, falling back to the
 /// advertised mime type.
 ///
 /// Feishu reports every image as `image/png` even when the bytes are JPEG, so
 /// the bytes win whenever they carry a recognizable signature.
 pub fn image_ext(data: &[u8], mime_type: &str) -> &'static str {
-    if data.starts_with(&[0x89, b'P', b'N', b'G']) {
-        "png"
-    } else if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        "jpg"
-    } else if data.starts_with(b"GIF8") {
-        "gif"
-    } else if data.len() > 12 && data.starts_with(b"RIFF") && &data[8..12] == b"WEBP" {
-        "webp"
+    if let Some(ext) = sniff_image_ext(data) {
+        ext
     } else if mime_type.contains("jpeg") || mime_type.contains("jpg") {
         "jpg"
     } else if mime_type.contains("gif") {
@@ -99,5 +112,22 @@ mod tests {
         // Unknown bytes fall back to the mime type, then to png.
         assert_eq!(image_ext(&[0, 1, 2, 3], "image/gif"), "gif");
         assert_eq!(image_ext(&[0, 1, 2, 3], "text/plain"), "png");
+    }
+
+    #[test]
+    fn test_sniff_image_ext_tells_photos_from_documents() {
+        // `image_ext` defaults to png for unknown bytes; the outbound path
+        // needs a sniff that can say "this is not an image".
+        let mut png = vec![0x89, b'P', b'N', b'G'];
+        png.extend(std::iter::repeat_n(0u8, 8));
+        assert_eq!(sniff_image_ext(&png), Some("png"));
+        assert_eq!(sniff_image_ext(&[0xFF, 0xD8, 0xFF, 0xE0]), Some("jpg"));
+        assert_eq!(sniff_image_ext(b"GIF89a"), Some("gif"));
+        assert_eq!(
+            sniff_image_ext(b"RIFF\x00\x00\x00\x00WEBPVP8 "),
+            Some("webp")
+        );
+        assert_eq!(sniff_image_ext(b"PK\x03\x04"), None);
+        assert_eq!(sniff_image_ext(b"%PDF-1.7"), None);
     }
 }

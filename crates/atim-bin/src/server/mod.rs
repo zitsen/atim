@@ -1114,6 +1114,100 @@ impl Server {
         Ok(())
     }
 
+    /// Handle `/send <path>`: deliver a local file into the IM chat.
+    ///
+    /// Images take the photo channel (the platforms render them inline);
+    /// everything else is uploaded as a document. The path is canonicalized
+    /// first, so `..` and symlinks cannot dodge the regular-file check.
+    async fn handle_send_command(&self, target: &MessageTarget, raw: &str) -> Result<()> {
+        const MAX_FILE_BYTES: u64 = 30 * 1024 * 1024;
+        const MAX_PHOTO_BYTES: u64 = 10 * 1024 * 1024;
+
+        if raw.is_empty() {
+            let _ = self
+                .im_adapter
+                .send_message(target, "用法：`/send <绝对路径>`（也支持 `~/` 开头）")
+                .await;
+            return Ok(());
+        }
+
+        let path = expand_send_path(raw);
+        if !path.is_absolute() {
+            let _ = self
+                .im_adapter
+                .send_message(target, "❌ 请使用绝对路径（或 `~/` 开头的路径）。")
+                .await;
+            return Ok(());
+        }
+
+        let path = match tokio::fs::canonicalize(&path).await {
+            Ok(path) => path,
+            Err(e) => {
+                let _ = self
+                    .im_adapter
+                    .send_message(target, &format!("❌ 无法访问文件：{e}"))
+                    .await;
+                return Ok(());
+            }
+        };
+
+        let meta = match tokio::fs::metadata(&path).await {
+            Ok(meta) => meta,
+            Err(e) => {
+                let _ = self
+                    .im_adapter
+                    .send_message(target, &format!("❌ 无法读取文件信息：{e}"))
+                    .await;
+                return Ok(());
+            }
+        };
+        if !meta.is_file() {
+            let _ = self
+                .im_adapter
+                .send_message(target, "❌ 目标不是普通文件。")
+                .await;
+            return Ok(());
+        }
+        if meta.len() > MAX_FILE_BYTES {
+            let _ = self
+                .im_adapter
+                .send_message(target, "❌ 文件超过 30 MB 上限。")
+                .await;
+            return Ok(());
+        }
+
+        let data = match tokio::fs::read(&path).await {
+            Ok(data) => data,
+            Err(e) => {
+                let _ = self
+                    .im_adapter
+                    .send_message(target, &format!("❌ 读取文件失败：{e}"))
+                    .await;
+                return Ok(());
+            }
+        };
+        let filename = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "file".to_string());
+
+        let result = if data.len() as u64 <= MAX_PHOTO_BYTES
+            && atim_core::images::sniff_image_ext(&data).is_some()
+        {
+            self.im_adapter.send_photo(target, &filename, &data).await
+        } else {
+            self.im_adapter.send_file(target, &filename, &data).await
+        };
+        if let Err(e) = result {
+            tracing::warn!("Failed to send file {:?}: {e}", path);
+            let _ = self
+                .im_adapter
+                .send_message(target, &format!("❌ 发送失败：{e}"))
+                .await;
+        }
+        Ok(())
+    }
+
     async fn handle_text_message(
         &self,
         target: MessageTarget,
@@ -1216,6 +1310,19 @@ impl Server {
                     .send_message(&target, "No active session to capture.")
                     .await;
             }
+            return Ok(());
+        }
+
+        // ── /send <path> — send a local file back to this chat ──
+        if let Some(arg) = text.trim().strip_prefix("/send ") {
+            let arg = arg.trim().to_string();
+            return self.handle_send_command(&target, &arg).await;
+        }
+        if text.trim() == "/send" {
+            let _ = self
+                .im_adapter
+                .send_message(&target, "用法：`/send <绝对路径>`（也支持 `~/` 开头）")
+                .await;
             return Ok(());
         }
 
@@ -6240,6 +6347,20 @@ async fn run_voice_transcription(
 /// Runs off the main event loop for the same reason as
 /// [`run_voice_transcription`]: rendering and uploading a terminal PNG is slow,
 /// and it touches no runtime state.
+/// Expand a leading `~` in a `/send` argument.
+fn expand_send_path(raw: &str) -> PathBuf {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    if raw == "~" {
+        return home.unwrap_or_else(|| PathBuf::from("~"));
+    }
+    if let Some(rest) = raw.strip_prefix("~/")
+        && let Some(home) = home
+    {
+        return home.join(rest);
+    }
+    PathBuf::from(raw)
+}
+
 async fn send_screenshot(
     tmux: TerminalMgr,
     im: Arc<dyn ImAdapter>,
@@ -6545,6 +6666,24 @@ mod tests {
     use super::*;
     use atim_core::card::{ActionLayout, CardElement};
     use std::collections::HashMap;
+
+    #[test]
+    fn test_expand_send_path_expands_home_only_at_the_front() {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        if let Some(home) = home {
+            assert_eq!(expand_send_path("~/notes.md"), home.join("notes.md"));
+            assert_eq!(expand_send_path("~"), home);
+        }
+        // A `~` inside the path is a literal character, not a home marker.
+        assert_eq!(
+            expand_send_path("/tmp/~backup/x"),
+            PathBuf::from("/tmp/~backup/x")
+        );
+        assert_eq!(
+            expand_send_path("relative.png"),
+            PathBuf::from("relative.png")
+        );
+    }
 
     #[test]
     fn test_status_session_id_formats() {

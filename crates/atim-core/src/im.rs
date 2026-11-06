@@ -68,6 +68,21 @@ pub trait ImAdapter: Send + Sync {
         data: &[u8],
     ) -> Result<MessageId>;
 
+    /// Send an arbitrary file as a document attachment.
+    ///
+    /// Adapters that only carry photos leave this default in place; the error
+    /// surfaces to the user as an unsupported-command reply.
+    async fn send_file(
+        &self,
+        _target: &MessageTarget,
+        _filename: &str,
+        _data: &[u8],
+    ) -> Result<MessageId> {
+        Err(crate::error::Error::Im(
+            "this adapter cannot send files".into(),
+        ))
+    }
+
     /// Send a structured card (header + markdown + buttons/list/dropdown).
     async fn send_card(
         &self,

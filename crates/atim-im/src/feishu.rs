@@ -245,6 +245,44 @@ impl FeishuAdapter {
         Ok(json["data"]["image_key"].as_str().unwrap_or("").to_string())
     }
 
+    /// Upload file data and return the file_key.
+    async fn upload_file(&self, data: &[u8], filename: &str) -> Result<String> {
+        let token = self.get_token().await?;
+        let url = format!("{FEISHU_BASE_URL}/open-apis/im/v1/files");
+        let mime = mime_guess::from_path(filename).first_or_octet_stream();
+
+        let form = reqwest::multipart::Form::new()
+            .part(
+                "file",
+                reqwest::multipart::Part::bytes(data.to_vec())
+                    .file_name(filename.to_string())
+                    .mime_str(mime.as_ref())
+                    .map_err(|e| Error::Feishu(format!("mime error: {e}")))?,
+            )
+            .text("file_type", feishu_file_type(filename))
+            .text("file_name", filename.to_string());
+
+        let resp = self
+            .client
+            .post(url)
+            .header("Authorization", format!("Bearer {token}"))
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| Error::Feishu(format!("file upload error: {e}")))?;
+
+        let json: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| Error::Feishu(format!("JSON decode: {e}")))?;
+
+        if json["code"].as_i64().unwrap_or(-1) != 0 {
+            let msg = json["msg"].as_str().unwrap_or("unknown");
+            return Err(Error::Feishu(format!("file upload error: {msg}")));
+        }
+        Ok(json["data"]["file_key"].as_str().unwrap_or("").to_string())
+    }
+
     // ── ID mapping ──
 
     /// Deterministically hash a Feishu string ID to i64.
@@ -536,6 +574,27 @@ impl TokenCache {
 
 // ── ImAdapter implementation ──
 
+/// Map a filename to one of Feishu's supported file_type values.
+///
+/// Feishu only accepts `opus`, `mp4`, `pdf`, `doc`, `xls`, `ppt` and `stream`;
+/// everything it cannot classify is uploaded as a generic stream.
+fn feishu_file_type(filename: &str) -> &'static str {
+    let ext = std::path::Path::new(filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "opus" | "ogg" => "opus",
+        "mp4" => "mp4",
+        "pdf" => "pdf",
+        "doc" | "docx" => "doc",
+        "xls" | "xlsx" | "csv" => "xls",
+        "ppt" | "pptx" => "ppt",
+        _ => "stream",
+    }
+}
+
 #[async_trait]
 impl ImAdapter for FeishuAdapter {
     #[allow(deprecated)]
@@ -801,6 +860,37 @@ impl ImAdapter for FeishuAdapter {
         let mut body = serde_json::json!({
             "receive_id": chat_id,
             "msg_type": "image",
+            "content": content.to_string(),
+        });
+        self.add_thread_id(&mut body, target).await;
+
+        let data = self
+            .api_post("/im/v1/messages?receive_id_type=chat_id", &body)
+            .await?;
+        let msg_id = data["message_id"].as_str().unwrap_or("").to_string();
+        Ok(MessageId(msg_id))
+    }
+
+    async fn send_file(
+        &self,
+        target: &MessageTarget,
+        filename: &str,
+        data: &[u8],
+    ) -> Result<MessageId> {
+        let chat_id = self
+            .resolve_chat(&target.chat_id)
+            .await
+            .ok_or_else(|| Error::Feishu("unknown chat_id".into()))?;
+
+        let file_key = self.upload_file(data, filename).await?;
+        if file_key.is_empty() {
+            return Err(Error::Feishu("file upload returned empty key".into()));
+        }
+
+        let content = serde_json::json!({"file_key": file_key});
+        let mut body = serde_json::json!({
+            "receive_id": chat_id,
+            "msg_type": "file",
             "content": content.to_string(),
         });
         self.add_thread_id(&mut body, target).await;
@@ -2032,6 +2122,19 @@ mod tests {
             keys,
             vec!["img_1".to_string(), "img_2".to_string(), String::new()]
         );
+    }
+
+    #[test]
+    fn test_feishu_file_type_maps_extensions() {
+        assert_eq!(feishu_file_type("report.pdf"), "pdf");
+        assert_eq!(feishu_file_type("SPEC.DOCX"), "doc");
+        assert_eq!(feishu_file_type("data.xlsx"), "xls");
+        assert_eq!(feishu_file_type("deck.pptx"), "ppt");
+        assert_eq!(feishu_file_type("voice.ogg"), "opus");
+        assert_eq!(feishu_file_type("clip.mp4"), "mp4");
+        // Anything Feishu cannot classify goes up as a generic stream.
+        assert_eq!(feishu_file_type("icon-style-guide.zip"), "stream");
+        assert_eq!(feishu_file_type("noext"), "stream");
     }
 
     #[test]

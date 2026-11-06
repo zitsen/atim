@@ -510,6 +510,51 @@ impl ImAdapter for TelegramAdapter {
         }
     }
 
+    async fn send_file(
+        &self,
+        target: &MessageTarget,
+        filename: &str,
+        data: &[u8],
+    ) -> Result<MessageId> {
+        let url = format!("{}/sendDocument", self.api_url);
+        let mut form = reqwest::multipart::Form::new()
+            .text("chat_id", target.chat_id.0.to_string())
+            .part(
+                "document",
+                reqwest::multipart::Part::bytes(data.to_vec()).file_name(filename.to_string()),
+            );
+        if let Some(thread) = target.thread_id {
+            form = form.text("message_thread_id", thread.0.to_string());
+        }
+
+        let resp = self
+            .client
+            .post(&url)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| Error::Telegram(format!("HTTP error: {e}")))?;
+        let json: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| Error::Telegram(format!("JSON parse error: {e}")))?;
+
+        if json.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            Ok(MessageId(
+                json["result"]["message_id"]
+                    .as_i64()
+                    .unwrap_or(0)
+                    .to_string(),
+            ))
+        } else {
+            let desc = json
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error");
+            Err(Error::Telegram(format!("sendDocument failed: {desc}")))
+        }
+    }
+
     async fn send_card(&self, target: &MessageTarget, card: &Card) -> Result<MessageId> {
         let (html, inline_keyboard) = render_tg_card(card);
 
