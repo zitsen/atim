@@ -335,6 +335,15 @@ impl ImAdapter for FloodControlledAdapter {
         self.inner.add_reaction(target, message_id, emoji).await
     }
 
+    async fn remove_reaction(
+        &self,
+        target: &MessageTarget,
+        message_id: &str,
+        emoji: &str,
+    ) -> Result<()> {
+        self.inner.remove_reaction(target, message_id, emoji).await
+    }
+
     async fn send_kv_table(
         &self,
         target: &MessageTarget,
@@ -423,6 +432,15 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
+
+        async fn remove_reaction(
+            &self,
+            _target: &MessageTarget,
+            _message_id: &str,
+            _emoji: &str,
+        ) -> Result<()> {
+            Err(Error::Im("mock: remove_reaction".into()))
+        }
         async fn send_kv_table(
             &self,
             _target: &MessageTarget,
@@ -450,6 +468,28 @@ mod tests {
             controller.send_message(&target, "test").await.unwrap();
         }
         assert_eq!(*inner.send_count.lock().unwrap(), 5);
+    }
+
+    #[tokio::test]
+    async fn test_remove_reaction_is_forwarded() {
+        let inner = Arc::new(MockAdapter {
+            send_count: std::sync::Mutex::new(0),
+        });
+        let controller = FloodControlledAdapter::new(inner);
+        let target = MessageTarget {
+            chat_id: atim_core::message::ChatId(1),
+            thread_id: None,
+            chat_name: None,
+        };
+
+        // The mock fails the call on purpose: the trait's default returns
+        // Ok, so an error proves the wrapper delegated.
+        assert!(
+            controller
+                .remove_reaction(&target, "om_1", "Get")
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

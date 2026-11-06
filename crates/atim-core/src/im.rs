@@ -132,6 +132,20 @@ pub trait ImAdapter: Send + Sync {
         emoji: &str,
     ) -> Result<()>;
 
+    /// Remove one of the bot's own reactions from a message.
+    ///
+    /// Implementations must only delete reactions this app added. The
+    /// default is a no-op so adapters without reaction support keep
+    /// compiling.
+    async fn remove_reaction(
+        &self,
+        _target: &MessageTarget,
+        _message_id: &str,
+        _emoji: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     /// Send a key-value table card.
     async fn send_kv_table(
         &self,

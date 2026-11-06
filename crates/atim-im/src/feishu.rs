@@ -1011,6 +1011,51 @@ impl ImAdapter for FeishuAdapter {
         Ok(())
     }
 
+    async fn remove_reaction(
+        &self,
+        _target: &MessageTarget,
+        message_id: &str,
+        emoji: &str,
+    ) -> Result<()> {
+        let token = self.get_token().await?;
+        let url = format!("{FEISHU_BASE_URL}/open-apis/im/v1/messages/{message_id}/reactions");
+        let resp = self
+            .client
+            .get(&url)
+            .query(&[("reaction_type", emoji), ("page_size", "50")])
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .map_err(|e| Error::Feishu(format!("reaction list error: {e}")))?;
+        let json: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| Error::Feishu(format!("JSON decode: {e}")))?;
+        if json["code"].as_i64().unwrap_or(-1) != 0 {
+            let msg = json["msg"].as_str().unwrap_or("unknown");
+            return Err(Error::Feishu(format!("reaction list error: {msg}")));
+        }
+
+        let empty = Vec::new();
+        for item in json["data"]["items"].as_array().unwrap_or(&empty) {
+            let reaction_id = item["reaction_id"].as_str().unwrap_or("");
+            let operator_id = item["operator"]["operator_id"].as_str().unwrap_or("");
+            // Only remove what this app added — never another member's.
+            if reaction_id.is_empty() || operator_id != self.app_id {
+                continue;
+            }
+            if let Err(e) = self
+                .api_delete(&format!(
+                    "/im/v1/messages/{message_id}/reactions/{reaction_id}"
+                ))
+                .await
+            {
+                tracing::warn!("Feishu reaction {reaction_id} removal failed: {e}");
+            }
+        }
+        Ok(())
+    }
+
     async fn send_chat_action(&self, target: &MessageTarget) -> Result<()> {
         let chat_id = self
             .resolve_chat(&target.chat_id)

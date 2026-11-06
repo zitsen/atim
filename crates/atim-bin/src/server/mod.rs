@@ -1257,16 +1257,11 @@ impl Server {
 
         // Acknowledge receipt before any slow work (binding lookup, agent
         // relaunch, forwarding): the user sees the message was picked up.
-        // Feishu has no "EYES" reaction type (the API rejects it with
-        // 231001), so OnIt — "on it" — is the closest receipt.
-        if let Some(mid) = message_id.clone() {
-            let adapter = self.im_adapter.clone();
-            let target = target.clone();
-            tokio::spawn(async move {
-                if let Err(e) = adapter.add_reaction(&target, &mid, "OnIt").await {
-                    tracing::debug!("Failed to add receipt reaction: {e}");
-                }
-            });
+        // Await it so the later DONE swap always finds the receipt.
+        if let Some(mid) = message_id.as_deref()
+            && let Err(e) = self.im_adapter.add_reaction(&target, mid, "Get").await
+        {
+            tracing::debug!("Failed to add receipt reaction: {e}");
         }
 
         // Helper: find chat_binding by (user_id, thread_id).
@@ -3064,6 +3059,8 @@ impl Server {
                     self.send_text_to_agent(&window_id, text, is_copilot)
                         .await?;
                     if let Some(ref mid) = message_id {
+                        // Swap the receipt for the completion mark.
+                        let _ = self.im_adapter.remove_reaction(&target, mid, "Get").await;
                         let _ = self.im_adapter.add_reaction(&target, mid, "DONE").await;
                     }
                     let sc_chat_id = binding.group_chat_id.unwrap_or(binding.chat_id);
@@ -3210,6 +3207,8 @@ impl Server {
                                 window_id_str,
                             );
                             if let Some(ref mid) = message_id {
+                                // Swap the receipt for the completion mark.
+                                let _ = self.im_adapter.remove_reaction(&target, mid, "Get").await;
                                 let _ = self.im_adapter.add_reaction(&target, mid, "DONE").await;
                             }
                         }
