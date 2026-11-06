@@ -45,11 +45,7 @@ pub fn sanitize_file_name(file_name: &str) -> String {
 /// The file keeps its original name (sanitized) behind a timestamp prefix so
 /// repeated uploads of the same name never collide. Older files are swept on
 /// each save so the directory stays bounded without a background job.
-pub async fn save_inbound_file(
-    atim_dir: &Path,
-    file_name: &str,
-    data: &[u8],
-) -> Result<PathBuf> {
+pub async fn save_inbound_file(atim_dir: &Path, file_name: &str, data: &[u8]) -> Result<PathBuf> {
     let dir = atim_dir.join("files");
     tokio::fs::create_dir_all(&dir)
         .await
