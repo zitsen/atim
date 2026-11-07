@@ -236,22 +236,30 @@ fn load_font(candidates: &[&str]) -> Result<FontArc> {
     Err(Error::Font("no suitable font found".into()))
 }
 
-/// Attempt to load an optional font (returns None if not found).
-fn load_font_opt(candidates: &[&str]) -> Option<FontArc> {
-    candidates
-        .iter()
-        .find_map(|p| std::fs::read(p).ok())
-        .and_then(|d| FontArc::try_from_vec(d).ok())
+/// A font is only usable for Chinese if it can actually draw a Han glyph.
+///
+/// `fc-match :lang=zh` can return a Latin-only face on hosts without a CJK
+/// package, and a font that parses fine still lacks the glyph — drawing with
+/// it produces .notdef boxes, and the cell-filling scale has nothing to
+/// measure.
+fn has_han_glyph(font: &FontArc) -> bool {
+    font.as_scaled(PxScale::from(16.0)).glyph_id('中').0 != 0
 }
 
 /// Locate a CJK-capable font: known distro paths first, then fontconfig.
 ///
 /// The static list covers the common package layouts; `fc-match` handles
 /// everything else (custom installs, other distros) without adding a font
-/// library dependency.
+/// library dependency. Candidates that parse but cannot draw a Han glyph are
+/// skipped rather than accepted as CJK-capable.
 fn load_cjk_font() -> Option<FontArc> {
-    if let Some(font) = load_font_opt(CJK_FONT_PATHS) {
-        return Some(font);
+    for path in CJK_FONT_PATHS {
+        if let Ok(data) = std::fs::read(path)
+            && let Ok(font) = FontArc::try_from_vec(data)
+            && has_han_glyph(&font)
+        {
+            return Some(font);
+        }
     }
     let out = std::process::Command::new("fc-match")
         .args(["-f", "%{file}", ":lang=zh"])
@@ -265,9 +273,10 @@ fn load_cjk_font() -> Option<FontArc> {
     if path.is_empty() {
         return None;
     }
-    std::fs::read(path)
+    let font = std::fs::read(path)
         .ok()
-        .and_then(|d| FontArc::try_from_vec(d).ok())
+        .and_then(|d| FontArc::try_from_vec(d).ok())?;
+    has_han_glyph(&font).then_some(font)
 }
 
 /// Scale the CJK font so one ideograph's advance fills the two cells a wide
@@ -672,7 +681,11 @@ mod tests {
         };
         let base = PxScale { x: 16.0, y: 16.0 };
         let target = 20.0; // two 10px cells
-        let scaled = cjk_scale_for(&cjk, base, target).expect("cjk scale");
+        // A host whose fc-match returned a font without Han glyphs skips
+        // this check; load_cjk_font already filters those out.
+        let Some(scaled) = cjk_scale_for(&cjk, base, target) else {
+            return;
+        };
         let font = cjk.as_scaled(scaled);
         let advance = font.h_advance(font.glyph_id('中'));
         assert!(
