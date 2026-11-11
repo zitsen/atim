@@ -3480,7 +3480,7 @@ impl Server {
         let question = q["question"].as_str().unwrap_or("Choose:");
         let header = q["header"].as_str().unwrap_or("");
 
-        let card_text = if !header.is_empty() {
+        let mut card_text = if !header.is_empty() {
             format!("**{}**: {}\n", header, question)
         } else if total > 1 {
             format!("**Q{}**: {}\n", qi + 1, question)
@@ -3496,25 +3496,16 @@ impl Server {
                     continue;
                 }
                 let desc = opt["description"].as_str().unwrap_or("");
-                let btn_text = if !desc.is_empty() && desc != label {
-                    format!("{}. {} — {}", i + 1, label, desc)
-                } else {
-                    format!("{}. {}", i + 1, label)
-                };
-                let btn_label = if btn_text.len() > 45 {
-                    format!(
-                        "{}…",
-                        &btn_text[..btn_text
-                            .char_indices()
-                            .nth(42)
-                            .map(|(j, _)| j)
-                            .unwrap_or(btn_text.len())]
-                    )
-                } else {
-                    btn_text
-                };
+                // Buttons are a single line wide and Feishu cuts anything
+                // longer mid-word, so the option details live in the card
+                // body; the button carries only the number and short label.
+                card_text.push_str(&format!("\n**{}. {}**", i + 1, label));
+                if !desc.is_empty() && desc != label {
+                    card_text.push_str(&format!("\n{}", desc));
+                }
+                card_text.push('\n');
                 option_btns.push(CardButton::default(
-                    btn_label,
+                    truncate_chars(&format!("{}. {}", i + 1, label), 30),
                     format!("ui:answer-{qi}-{i}"),
                 ));
             }
@@ -6435,6 +6426,16 @@ async fn transcribe_voice(api_key: &str, base_url: &str, audio_data: &[u8]) -> R
     Ok(json["text"].as_str().unwrap_or("").to_string())
 }
 
+/// Truncate a label to `max` characters (not bytes), adding an ellipsis.
+fn truncate_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
 /// Map an interactive UI kind to a display-friendly name.
 fn ui_display_name(kind: UiKind) -> &'static str {
     match kind {
@@ -6696,6 +6697,54 @@ mod tests {
             expand_send_path("relative.png"),
             PathBuf::from("relative.png")
         );
+    }
+
+    #[test]
+    fn test_question_card_puts_option_details_in_the_body() {
+        let q = serde_json::json!({
+            "question": "即将运行本次改动相关的单元测试，是否应用？",
+            "header": "测试执行",
+            "options": [
+                {
+                    "label": "应用",
+                    "description": "立即执行 (Recommended)\n运行三个相关 spec，验证 OAuth 无 state 兜底逻辑。"
+                },
+                {
+                    "label": "跳过",
+                    "description": "本次不执行\n不运行测试，直接进行构建验证。"
+                }
+            ]
+        });
+        let card = Server::build_question_card(&q, 0, 1);
+
+        let markdown = card
+            .elements
+            .iter()
+            .find_map(|e| match e {
+                CardElement::Markdown(text) => Some(text.clone()),
+                _ => None,
+            })
+            .expect("markdown body");
+        assert!(markdown.contains("1. 应用"));
+        assert!(markdown.contains("立即执行 (Recommended)"));
+        assert!(markdown.contains("运行三个相关 spec"));
+        assert!(markdown.contains("2. 跳过"));
+        assert!(markdown.contains("不运行测试"));
+
+        let buttons: Vec<&str> = card
+            .elements
+            .iter()
+            .flat_map(|e| match e {
+                CardElement::Actions { buttons, .. } => {
+                    buttons.iter().map(|b| b.text.as_str()).collect::<Vec<_>>()
+                }
+                _ => Vec::new(),
+            })
+            .collect();
+        assert!(buttons.contains(&"1. 应用"));
+        assert!(buttons.contains(&"2. 跳过"));
+        // The description must not leak back into the button text.
+        assert!(!buttons.iter().any(|b| b.contains('…')));
     }
 
     #[test]
