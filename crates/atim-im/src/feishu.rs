@@ -1214,6 +1214,30 @@ impl Clone for FeishuAdapter {
 
 // ── Event handlers ──
 
+/// Whether a group message's @-mentions include this bot.
+///
+/// Matching by open_id is authoritative. The display name is only consulted
+/// while the open_id is still unknown (startup, or a failed bot-info call),
+/// and the permissive "any mention counts" fallback only applies when the
+/// bot's identity is entirely unknown — otherwise @-mentioning another
+/// member would wake the bot.
+fn mentions_bot(
+    mentions: &[serde_json::Value],
+    bot_id: Option<&str>,
+    bot_name: Option<&str>,
+) -> bool {
+    let matched = mentions.iter().any(|mention| match bot_id {
+        Some(id) => mention["id"]["open_id"].as_str() == Some(id),
+        None => {
+            bot_name.is_some_and(|name| mention["name"].as_str().is_some_and(|n| n.contains(name)))
+        }
+    });
+    if matched {
+        return true;
+    }
+    bot_id.is_none() && bot_name.is_none() && !mentions.is_empty()
+}
+
 async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Value) -> Result<()> {
     let event = &payload["event"];
     let sender = &event["sender"];
@@ -1299,41 +1323,14 @@ async fn handle_message_event(adapter: &FeishuAdapter, payload: &serde_json::Val
     let mut has_mention = false;
 
     // Check for @-mention of the bot in group chats (shared by text/post types)
-    if chat_type == "group" {
+    if chat_type == "group"
+        && let Some(mentions) = message["mentions"].as_array()
+    {
         let bot_id = adapter.bot_open_id.read().await;
         let bot_name = adapter.bot_name.read().await;
-        let mentions = message["mentions"].as_array();
-        if let Some(mentions) = mentions {
-            for mention in mentions {
-                // Check by bot open_id (preferred)
-                let is_bot = match bot_id.as_ref() {
-                    Some(bid) => mention["id"]["open_id"].as_str() == Some(bid),
-                    None => false,
-                };
-                // Fallback: check by name
-                let is_bot = is_bot
-                    || bot_name.as_ref().is_some_and(|name| {
-                        mention["name"]
-                            .as_str()
-                            .is_some_and(|n| n.contains(name) || name.contains(n))
-                    });
-                // Broader fallback: any mention named "bot" or the app_id prefix
-                let is_bot = is_bot
-                    || mention["name"]
-                        .as_str()
-                        .is_some_and(|n| n.contains("bot") || adapter.app_id.contains(n));
-                if is_bot {
-                    has_mention = true;
-                }
-            }
-        }
-        // Permissive fallback: if mentions array exists and is non-empty but we
-        // couldn't match the bot's identity, treat any mention as a bot mention
-        if !has_mention && message["mentions"].as_array().map_or(0, |m| m.len()) > 0 {
-            tracing::debug!(
-                "Mentions present but no bot match — permissive fallback, treating as @mention"
-            );
-            has_mention = true;
+        has_mention = mentions_bot(mentions, bot_id.as_deref(), bot_name.as_deref());
+        if !has_mention && !mentions.is_empty() {
+            tracing::debug!("Mentions present but none is the bot — normal group message");
         }
     }
 
@@ -2167,6 +2164,34 @@ mod tests {
             keys,
             vec!["img_1".to_string(), "img_2".to_string(), String::new()]
         );
+    }
+
+    #[test]
+    fn test_mentions_bot_matches_only_the_bot() {
+        let other = serde_json::json!([{
+            "key": "@_user_1",
+            "id": {"open_id": "ou_human"},
+            "name": "张元湃"
+        }]);
+        let bot = serde_json::json!([{
+            "key": "@_user_1",
+            "id": {"open_id": "ou_bot"},
+            "name": "AtimBot"
+        }]);
+        let other = other.as_array().unwrap();
+        let bot = bot.as_array().unwrap();
+
+        // The regression: @-mentioning another member is not a bot mention.
+        assert!(!mentions_bot(other, Some("ou_bot"), Some("AtimBot")));
+        assert!(mentions_bot(bot, Some("ou_bot"), Some("AtimBot")));
+
+        // Before the bot's identity is fetched, fall back to the name.
+        assert!(mentions_bot(bot, None, Some("AtimBot")));
+        assert!(!mentions_bot(other, None, Some("AtimBot")));
+
+        // With no identity at all, keep the permissive startup behaviour.
+        assert!(mentions_bot(other, None, None));
+        assert!(!mentions_bot(&[], Some("ou_bot"), Some("AtimBot")));
     }
 
     #[test]
