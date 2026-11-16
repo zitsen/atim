@@ -151,6 +151,16 @@ impl FeishuAdapter {
 
     /// Send an authenticated GET request to the Feishu API.
     async fn api_get(&self, path: &str) -> Result<serde_json::Value> {
+        let json = self.api_get_raw(path).await?;
+        Ok(json["data"].clone())
+    }
+
+    /// GET that returns the whole response body.
+    ///
+    /// A few endpoints — `/bot/v3/info` among them — put their payload at the
+    /// top level instead of under `data`, so callers that need those fields
+    /// must see the unwrapped response.
+    async fn api_get_raw(&self, path: &str) -> Result<serde_json::Value> {
         let token = self.get_token().await?;
         let url = format!("{FEISHU_BASE_URL}/open-apis{path}");
         let resp = self
@@ -170,7 +180,7 @@ impl FeishuAdapter {
             let msg = json["msg"].as_str().unwrap_or("unknown");
             return Err(Error::Feishu(format!("API error: {msg}")));
         }
-        Ok(json["data"].clone())
+        Ok(json)
     }
 
     /// Send an authenticated DELETE request (message recall).
@@ -489,7 +499,9 @@ impl FeishuAdapter {
 
     /// Fetch bot info (app name, open_id) from Feishu API.
     async fn get_bot_info(&self) -> Result<serde_json::Value> {
-        self.api_get("/bot/v3/info").await
+        // `/bot/v3/info` answers at the top level (no `data` wrapper); keep
+        // the raw body so `extract_bot_identity` can see either shape.
+        self.api_get_raw("/bot/v3/info").await
     }
 
     /// Process a raw WS event payload (schema 2.0).
@@ -611,17 +623,20 @@ impl ImAdapter for FeishuAdapter {
         match self.get_bot_info().await {
             Ok(info) => {
                 tracing::debug!("Feishu bot info response: {info}");
-                if let Some(open_id) = info["app_open_id"].as_str() {
-                    *self.bot_open_id.write().await = Some(open_id.to_string());
-                    tracing::info!("Feishu bot open_id: {open_id}");
-                } else {
-                    tracing::warn!("Feishu bot info response missing app_open_id");
+                let (open_id, name) = extract_bot_identity(&info);
+                match open_id {
+                    Some(open_id) => {
+                        *self.bot_open_id.write().await = Some(open_id.clone());
+                        tracing::info!("Feishu bot open_id: {open_id}");
+                    }
+                    None => tracing::warn!("Feishu bot info response missing open_id"),
                 }
-                if let Some(name) = info["app_name"].as_str() {
-                    *self.bot_name.write().await = Some(name.to_string());
-                    tracing::info!("Feishu bot name: {name}");
-                } else {
-                    tracing::warn!("Feishu bot info response missing app_name");
+                match name {
+                    Some(name) => {
+                        *self.bot_name.write().await = Some(name.clone());
+                        tracing::info!("Feishu bot name: {name}");
+                    }
+                    None => tracing::warn!("Feishu bot info response missing app_name"),
                 }
             }
             Err(e) => {
@@ -1213,6 +1228,30 @@ impl Clone for FeishuAdapter {
 }
 
 // ── Event handlers ──
+
+/// Pull the bot's open_id and display name out of a `/bot/v3/info` response.
+///
+/// The endpoint has answered both with the identity fields at the top level
+/// (today's shape) and wrapped in `data`, and older responses used
+/// `app_open_id` for the open_id — accept all of them. When no identity can be
+/// found, callers must treat the bot as unknown rather than guessing.
+fn extract_bot_identity(info: &serde_json::Value) -> (Option<String>, Option<String>) {
+    let data = &info["data"];
+    let obj = if data["open_id"].is_string()
+        || data["app_open_id"].is_string()
+        || data["app_name"].is_string()
+    {
+        data
+    } else {
+        info
+    };
+    let open_id = obj["open_id"]
+        .as_str()
+        .or_else(|| obj["app_open_id"].as_str())
+        .map(str::to_string);
+    let name = obj["app_name"].as_str().map(str::to_string);
+    (open_id, name)
+}
 
 /// Whether a group message's @-mentions include this bot.
 ///
@@ -2164,6 +2203,35 @@ mod tests {
             keys,
             vec!["img_1".to_string(), "img_2".to_string(), String::new()]
         );
+    }
+
+    #[test]
+    fn test_extract_bot_identity_accepts_every_response_shape() {
+        // `/bot/v3/info` as it answers today: fields at the top level.
+        let top = serde_json::json!({
+            "code": 0, "msg": "ok",
+            "activate_status": 2,
+            "app_name": "AtimBot",
+            "open_id": "ou_bot"
+        });
+        assert_eq!(
+            extract_bot_identity(&top),
+            (Some("ou_bot".into()), Some("AtimBot".into()))
+        );
+
+        // Wrapped in data, and the older app_open_id key.
+        let wrapped = serde_json::json!({
+            "code": 0, "msg": "ok",
+            "data": {"app_name": "AtimBot", "app_open_id": "ou_bot"}
+        });
+        assert_eq!(
+            extract_bot_identity(&wrapped),
+            (Some("ou_bot".into()), Some("AtimBot".into()))
+        );
+
+        // No usable identity: matching must stay conservative.
+        let empty = serde_json::json!({"code": 0, "msg": "ok"});
+        assert_eq!(extract_bot_identity(&empty), (None, None));
     }
 
     #[test]
