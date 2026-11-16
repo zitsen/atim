@@ -1231,20 +1231,21 @@ impl Clone for FeishuAdapter {
 
 /// Pull the bot's open_id and display name out of a `/bot/v3/info` response.
 ///
-/// The endpoint has answered both with the identity fields at the top level
-/// (today's shape) and wrapped in `data`, and older responses used
-/// `app_open_id` for the open_id — accept all of them. When no identity can be
-/// found, callers must treat the bot as unknown rather than guessing.
+/// The endpoint answers `{"code":0,"msg":"ok","bot":{...}}` today; older
+/// shapes put the same fields under `data` or at the top level, and the
+/// open_id used to be called `app_open_id`. Accept all of them. When no
+/// identity can be found, callers must treat the bot as unknown rather than
+/// guessing.
 fn extract_bot_identity(info: &serde_json::Value) -> (Option<String>, Option<String>) {
-    let data = &info["data"];
-    let obj = if data["open_id"].is_string()
-        || data["app_open_id"].is_string()
-        || data["app_name"].is_string()
-    {
-        data
-    } else {
-        info
-    };
+    let candidates = [&info["bot"], &info["data"], info];
+    let obj = candidates
+        .into_iter()
+        .find(|obj| {
+            obj["open_id"].is_string()
+                || obj["app_open_id"].is_string()
+                || obj["app_name"].is_string()
+        })
+        .unwrap_or(info);
     let open_id = obj["open_id"]
         .as_str()
         .or_else(|| obj["app_open_id"].as_str())
@@ -2207,15 +2208,18 @@ mod tests {
 
     #[test]
     fn test_extract_bot_identity_accepts_every_response_shape() {
-        // `/bot/v3/info` as it answers today: fields at the top level.
-        let top = serde_json::json!({
+        // `/bot/v3/info` as it actually answers today.
+        let nested = serde_json::json!({
             "code": 0, "msg": "ok",
-            "activate_status": 2,
-            "app_name": "AtimBot",
-            "open_id": "ou_bot"
+            "bot": {
+                "activate_status": 2,
+                "app_name": "AtimBot",
+                "open_id": "ou_bot",
+                "ip_white_list": []
+            }
         });
         assert_eq!(
-            extract_bot_identity(&top),
+            extract_bot_identity(&nested),
             (Some("ou_bot".into()), Some("AtimBot".into()))
         );
 
@@ -2226,6 +2230,18 @@ mod tests {
         });
         assert_eq!(
             extract_bot_identity(&wrapped),
+            (Some("ou_bot".into()), Some("AtimBot".into()))
+        );
+
+        // Top-level fields, in case the endpoint drops the wrapper.
+        let top = serde_json::json!({
+            "code": 0, "msg": "ok",
+            "activate_status": 2,
+            "app_name": "AtimBot",
+            "open_id": "ou_bot"
+        });
+        assert_eq!(
+            extract_bot_identity(&top),
             (Some("ou_bot".into()), Some("AtimBot".into()))
         );
 
