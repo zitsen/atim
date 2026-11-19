@@ -28,6 +28,7 @@ use tokio::sync::mpsc;
 use crate::browser;
 use crate::browser::{BrowserMode, DirectoryBrowser};
 
+mod opencode_forms;
 mod recovery;
 
 /// Key type for per-user pending state: (user_id, thread_id).
@@ -140,6 +141,8 @@ pub struct Server {
     pub pending_rename_names: Arc<Mutex<HashMap<UserTriple, String>>>,
     /// Multi-question AskUser state: (user_id, thread_id) -> pending questions.
     pub pending_ask_questions: Arc<Mutex<HashMap<UserTriple, PendingAskQuestions>>>,
+    /// OpenCode question forms already forwarded to a chat (form_id).
+    pub opencode_forms_seen: Arc<Mutex<HashSet<String>>>,
     /// Callback context tokens for validating inline keyboard callbacks.
     /// Stores (user_id, thread_id, created_at) for each callback token.
     pub callback_contexts: Arc<Mutex<HashMap<String, CallbackCtx>>>,
@@ -2782,6 +2785,86 @@ impl Server {
 
         // Find binding for this user+thread
         if let Some((binding, wb_opt)) = find_cb() {
+            // A pending OpenCode question takes precedence: this text is the
+            // answer, not a new prompt for the TUI.
+            if !binding.session_id.is_empty()
+                && wb_opt.is_some_and(|wb| wb.agent_type == "opencode")
+            {
+                let permissions = opencode_forms::list_permissions().await;
+                if let Some(request) = permissions
+                    .iter()
+                    .find(|p| p.session_id == binding.session_id)
+                {
+                    let Some(decision) = opencode_forms::permission_decision(text) else {
+                        let _ = self
+                            .im_adapter
+                            .send_message(
+                                &target,
+                                "当前有权限请求待确认，请回复：1 允许一次 / 2 始终允许 / 3 拒绝",
+                            )
+                            .await;
+                        return Ok(());
+                    };
+                    let label = match decision {
+                        "once" => "允许一次",
+                        "always" => "始终允许",
+                        _ => "拒绝",
+                    };
+                    match opencode_forms::reply_permission(
+                        &binding.session_id,
+                        &request.id,
+                        decision,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            let _ = self
+                                .im_adapter
+                                .send_message(&target, &format!("✅ 权限已处理：{label}"))
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ = self
+                                .im_adapter
+                                .send_message(&target, &format!("❌ 权限处理失败：{e}"))
+                                .await;
+                        }
+                    }
+                    return Ok(());
+                }
+
+                let forms = opencode_forms::list_forms(&binding.session_id).await;
+                if let Some(form) = forms
+                    .into_iter()
+                    .find(|f| f.is_question() && f.fields.len() == 1)
+                {
+                    let field = &form.fields[0];
+                    let value = opencode_forms::answer_value(field, text);
+                    match opencode_forms::reply_form(
+                        &binding.session_id,
+                        &form.id,
+                        &field.key,
+                        &value,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            let _ = self
+                                .im_adapter
+                                .send_message(&target, &format!("✅ 已提交：{value}"))
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ = self
+                                .im_adapter
+                                .send_message(&target, &format!("❌ 提交答案失败：{e}"))
+                                .await;
+                        }
+                    }
+                    return Ok(());
+                }
+            }
+
             let mut unconfirmed_windows = rt
                 .window_bindings
                 .values()
@@ -5681,6 +5764,11 @@ impl Server {
             tracing::debug!("[probe] Skipped {stale} binding(s) whose window tmux no longer has");
         }
 
+        // OpenCode keeps AskUserQuestion prompts in its HTTP service rather
+        // than the pane or SQLite store. Poll them first so a pending question
+        // reaches the chat even when the TUI is idle.
+        self.poll_opencode_forms(&bindings).await;
+
         tracing::debug!("[probe] Probing {} windows", bindings.len());
 
         for (cb, wb) in bindings.into_iter().rev() {
@@ -5753,6 +5841,86 @@ impl Server {
         }
 
         Ok(())
+    }
+
+    /// Send pending OpenCode question forms to their bound chats.
+    async fn poll_opencode_forms(&self, bindings: &[(&ChatBinding, &WindowBinding)]) {
+        for (cb, wb) in bindings {
+            if wb.agent_type != "opencode" || wb.session_id.is_empty() {
+                continue;
+            }
+            let forms = opencode_forms::list_forms(&wb.session_id).await;
+            for form in forms {
+                // Only the question tool is answerable with a short text
+                // reply; multi-field forms stay in the terminal.
+                if !form.is_question() || form.fields.len() != 1 {
+                    continue;
+                }
+                if self
+                    .opencode_forms_seen
+                    .lock()
+                    .await
+                    .contains(&form.id)
+                {
+                    continue;
+                }
+                let target = MessageTarget {
+                    chat_id: ChatId(cb.group_chat_id.unwrap_or(cb.chat_id)),
+                    thread_id: Some(ThreadId(cb.thread_id)),
+                    chat_name: None,
+                };
+                match self
+                    .im_adapter
+                    .send_message(&target, &opencode_forms::format_form(&form))
+                    .await
+                {
+                    Ok(_) => {
+                        let mut seen = self.opencode_forms_seen.lock().await;
+                        if seen.len() > 500 {
+                            seen.clear();
+                        }
+                        seen.insert(form.id.clone());
+                    }
+                    Err(e) => tracing::warn!("[opencode-forms] send failed: {e}"),
+                }
+            }
+        }
+
+        // Permission prompts are a separate OpenCode API. Forward the ones
+        // belonging to bound OpenCode sessions too.
+        let permissions = opencode_forms::list_permissions().await;
+        if permissions.is_empty() {
+            return;
+        }
+        for (cb, wb) in bindings {
+            if wb.agent_type != "opencode" || wb.session_id.is_empty() {
+                continue;
+            }
+            for request in permissions
+                .iter()
+                .filter(|p| p.session_id == wb.session_id)
+            {
+                let key = format!("perm:{}", request.id);
+                if self.opencode_forms_seen.lock().await.contains(&key) {
+                    continue;
+                }
+                let target = MessageTarget {
+                    chat_id: ChatId(cb.group_chat_id.unwrap_or(cb.chat_id)),
+                    thread_id: Some(ThreadId(cb.thread_id)),
+                    chat_name: None,
+                };
+                match self
+                    .im_adapter
+                    .send_message(&target, &opencode_forms::format_permission(request))
+                    .await
+                {
+                    Ok(_) => {
+                        self.opencode_forms_seen.lock().await.insert(key);
+                    }
+                    Err(e) => tracing::warn!("[opencode-permission] send failed: {e}"),
+                }
+            }
+        }
     }
 
     /// Forward new terminal output for a non-Claude agent window.
