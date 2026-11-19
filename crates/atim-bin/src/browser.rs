@@ -291,7 +291,26 @@ fn read_dir_entries(path: &Path) -> Vec<DirEntry> {
     entries
 }
 
+/// Scan for existing sessions of the agent that will actually be launched.
+pub fn scan_agent_sessions(
+    agent: &atim_core::agent::types::AgentHandle,
+    path: &Path,
+) -> Vec<ClaudeSession> {
+    let detected = agent.scan_sessions(path).unwrap_or_default();
+    detected
+        .into_iter()
+        .map(|s| ClaudeSession {
+            id: s.id,
+            project_slug: s.project_slug,
+            summary: s.summary,
+            timestamp: s.timestamp,
+            message_count: s.message_count,
+        })
+        .collect()
+}
+
 /// Scan for existing Claude Code sessions using the Agent trait.
+#[allow(dead_code)]
 pub fn scan_claude_sessions(_path: &Path) -> Vec<ClaudeSession> {
     let agent = atim_core::agent::claude::ClaudeAgent;
     let detected = agent.scan_sessions(_path).unwrap_or_default();

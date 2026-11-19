@@ -3762,8 +3762,16 @@ impl Server {
                     )
                     .await;
 
-                // Scan the current directory for sessions and show picker
-                let sessions = browser::scan_claude_sessions(&state.current_path);
+                // Scan the current directory for sessions of the agent that
+                // will actually be launched (not always Claude Code).
+                let default_agent = self
+                    .config
+                    .agent_registry
+                    .get(&self.config.default_agent)
+                    .cloned()
+                    .unwrap_or_else(|| self.config.agent_registry.default().clone());
+                let sessions =
+                    browser::scan_agent_sessions(&default_agent, &state.current_path);
                 if sessions.is_empty() {
                     // No existing sessions — create new directly
                     let key = (target.chat_id.0, thread_id);
@@ -4154,6 +4162,43 @@ impl Server {
         // Only Claude Code supports sessions — skip for others.
         if !agent.supports_sessions() {
             return None;
+        }
+
+        // OpenCode has no /status session id: its SQLite store is the source
+        // of truth. Read the session the TUI is actually in, and register it
+        // so the monitor delivers its output.
+        if agent.name() == "opencode" {
+            let wid = WindowId(window_id.to_string());
+            if let Ok(cwd) = self.tmux_mgr.pane_cwd(&wid).await {
+                let known = std::collections::HashSet::new();
+                let deadline = std::time::Instant::now() + timeout;
+                loop {
+                    if let Ok(Some(sid)) = agent.discover_session(
+                        &cwd,
+                        &known,
+                        std::time::SystemTime::now(),
+                    ) {
+                        tracing::info!(
+                            "[resolve_session_id] opencode session from DB for window {window_id}: {sid}"
+                        );
+                        self.byte_offsets
+                            .lock()
+                            .await
+                            .entry(sid.clone())
+                            .or_insert(0);
+                        if let Err(e) = self.state_mgr.upsert_offset(&sid, 0).await {
+                            tracing::warn!(
+                                "[resolve_session_id] Failed to persist offset for {sid}: {e}"
+                            );
+                        }
+                        return Some(sid);
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return None;
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            }
         }
 
         // /status is the only reliable session discovery method.
