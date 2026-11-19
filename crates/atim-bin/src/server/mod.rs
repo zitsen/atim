@@ -28,6 +28,7 @@ use tokio::sync::mpsc;
 use crate::browser;
 use crate::browser::{BrowserMode, DirectoryBrowser};
 
+mod opencode_forms;
 mod recovery;
 
 /// Key type for per-user pending state: (user_id, thread_id).
@@ -140,6 +141,13 @@ pub struct Server {
     pub pending_rename_names: Arc<Mutex<HashMap<UserTriple, String>>>,
     /// Multi-question AskUser state: (user_id, thread_id) -> pending questions.
     pub pending_ask_questions: Arc<Mutex<HashMap<UserTriple, PendingAskQuestions>>>,
+    /// OpenCode question forms already forwarded to a chat (form_id).
+    pub opencode_forms_seen: Arc<Mutex<HashSet<String>>>,
+    /// Inbound messages awaiting a real assistant answer:
+    /// session_id -> [(chat target, message_id)]. The receipt reaction is
+    /// swapped to DONE when the answer is delivered, not when the text is
+    /// merely typed into the agent terminal.
+    pub pending_reactions: Arc<Mutex<HashMap<String, Vec<(MessageTarget, String)>>>>,
     /// Callback context tokens for validating inline keyboard callbacks.
     /// Stores (user_id, thread_id, created_at) for each callback token.
     pub callback_contexts: Arc<Mutex<HashMap<String, CallbackCtx>>>,
@@ -611,6 +619,36 @@ impl Server {
         }
     }
 
+    /// Remember that a chat message is waiting for the agent's answer.
+    async fn hold_reaction(&self, session_id: &str, target: &MessageTarget, message_id: &str) {
+        if session_id.is_empty() || message_id.is_empty() {
+            return;
+        }
+        let mut pending = self.pending_reactions.lock().await;
+        let entry = pending.entry(session_id.to_string()).or_default();
+        if entry.len() >= 50 {
+            entry.remove(0);
+        }
+        entry.push((target.clone(), message_id.to_string()));
+    }
+
+    /// Swap receipt reactions to DONE once the session actually answered.
+    async fn complete_reactions(&self, session_id: &str) {
+        let pending = self.pending_reactions.lock().await.remove(session_id);
+        if let Some(list) = pending {
+            for (target, message_id) in list {
+                let _ = self
+                    .im_adapter
+                    .remove_reaction(&target, &message_id, "Get")
+                    .await;
+                let _ = self
+                    .im_adapter
+                    .add_reaction(&target, &message_id, "DONE")
+                    .await;
+            }
+        }
+    }
+
     /// Render and send one batch of session output.
     ///
     /// Runs on the delivery task, never on the main event loop.
@@ -714,6 +752,7 @@ impl Server {
                 .iter()
                 .any(|m| m.content_type == atim_core::message::ContentType::Text);
             let status_key = (chat_id, thread_id_val);
+            let mut delivered_text = false;
 
             let mut status_msg_id = if has_text {
                 let consumed = self.status_consumed.lock().await;
@@ -925,6 +964,9 @@ impl Server {
                         // Text — accumulate for merging.
                         // Tables are handled by each adapter separately:
                         // Telegram converts to card-style, Feishu renders natively.
+                        if !msg.text.trim().is_empty() {
+                            delivered_text = true;
+                        }
                         if !merged.is_empty() {
                             merged.push('\n');
                         }
@@ -937,6 +979,10 @@ impl Server {
             }
 
             flush!();
+
+            if delivered_text {
+                self.complete_reactions(_sid).await;
+            }
 
             // Rewrite counters that have fallen far enough behind the true
             // total to be worth an edit. Doubles each time (×2, ×4, …) so a
@@ -2782,6 +2828,86 @@ impl Server {
 
         // Find binding for this user+thread
         if let Some((binding, wb_opt)) = find_cb() {
+            // A pending OpenCode question takes precedence: this text is the
+            // answer, not a new prompt for the TUI.
+            if !binding.session_id.is_empty()
+                && wb_opt.is_some_and(|wb| wb.agent_type == "opencode")
+            {
+                let permissions = opencode_forms::list_permissions().await;
+                if let Some(request) = permissions
+                    .iter()
+                    .find(|p| p.session_id == binding.session_id)
+                {
+                    let Some(decision) = opencode_forms::permission_decision(text) else {
+                        let _ = self
+                            .im_adapter
+                            .send_message(
+                                &target,
+                                "当前有权限请求待确认，请回复：1 允许一次 / 2 始终允许 / 3 拒绝",
+                            )
+                            .await;
+                        return Ok(());
+                    };
+                    let label = match decision {
+                        "once" => "允许一次",
+                        "always" => "始终允许",
+                        _ => "拒绝",
+                    };
+                    match opencode_forms::reply_permission(
+                        &binding.session_id,
+                        &request.id,
+                        decision,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            let _ = self
+                                .im_adapter
+                                .send_message(&target, &format!("✅ 权限已处理：{label}"))
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ = self
+                                .im_adapter
+                                .send_message(&target, &format!("❌ 权限处理失败：{e}"))
+                                .await;
+                        }
+                    }
+                    return Ok(());
+                }
+
+                let forms = opencode_forms::list_forms(&binding.session_id).await;
+                if let Some(form) = forms
+                    .into_iter()
+                    .find(|f| f.is_question() && f.fields.len() == 1)
+                {
+                    let field = &form.fields[0];
+                    let value = opencode_forms::answer_value(field, text);
+                    match opencode_forms::reply_form(
+                        &binding.session_id,
+                        &form.id,
+                        &field.key,
+                        &value,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            let _ = self
+                                .im_adapter
+                                .send_message(&target, &format!("✅ 已提交：{value}"))
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ = self
+                                .im_adapter
+                                .send_message(&target, &format!("❌ 提交答案失败：{e}"))
+                                .await;
+                        }
+                    }
+                    return Ok(());
+                }
+            }
+
             let mut unconfirmed_windows = rt
                 .window_bindings
                 .values()
@@ -2924,6 +3050,14 @@ impl Server {
                         let mut pending = self.pending_messages.lock().await;
                         pending.insert(key, text.to_string());
                     }
+                    if let Some(ref mid) = message_id {
+                        let sid = if binding.session_id.is_empty() {
+                            wb_opt.map(|wb| wb.session_id.as_str()).unwrap_or("")
+                        } else {
+                            binding.session_id.as_str()
+                        };
+                        self.hold_reaction(sid, &target, mid).await;
+                    }
                     let mut ctx_lock = self.callback_contexts.lock().await;
                     let recover_token = Self::make_callback_token(&mut ctx_lock, user_id, tid);
                     let cancel_token = Self::make_callback_token(&mut ctx_lock, user_id, tid);
@@ -2953,6 +3087,14 @@ impl Server {
                     {
                         let mut pending = self.pending_messages.lock().await;
                         pending.insert(key, text.to_string());
+                    }
+                    if let Some(ref mid) = message_id {
+                        let sid = if binding.session_id.is_empty() {
+                            wb_opt.map(|wb| wb.session_id.as_str()).unwrap_or("")
+                        } else {
+                            binding.session_id.as_str()
+                        };
+                        self.hold_reaction(sid, &target, mid).await;
                     }
                     let mut ctx_lock = self.callback_contexts.lock().await;
                     let recover_token = Self::make_callback_token(&mut ctx_lock, user_id, tid);
@@ -3059,9 +3201,13 @@ impl Server {
                     self.send_text_to_agent(&window_id, text, is_copilot)
                         .await?;
                     if let Some(ref mid) = message_id {
-                        // Swap the receipt for the completion mark.
-                        let _ = self.im_adapter.remove_reaction(&target, mid, "Get").await;
-                        let _ = self.im_adapter.add_reaction(&target, mid, "DONE").await;
+                        let sid = if binding.session_id.is_empty() {
+                            wb_opt.map(|wb| wb.session_id.as_str()).unwrap_or("")
+                        } else {
+                            binding.session_id.as_str()
+                        };
+                        // Keep the receipt reaction until the answer arrives.
+                        self.hold_reaction(sid, &target, mid).await;
                     }
                     let sc_chat_id = binding.group_chat_id.unwrap_or(binding.chat_id);
                     self.status_consumed
@@ -3207,9 +3353,13 @@ impl Server {
                                 window_id_str,
                             );
                             if let Some(ref mid) = message_id {
-                                // Swap the receipt for the completion mark.
-                                let _ = self.im_adapter.remove_reaction(&target, mid, "Get").await;
-                                let _ = self.im_adapter.add_reaction(&target, mid, "DONE").await;
+                                let sid = if binding.session_id.is_empty() {
+                                    wb_opt.map(|wb| wb.session_id.as_str()).unwrap_or("")
+                                } else {
+                                    binding.session_id.as_str()
+                                };
+                                // Keep the receipt reaction until the answer arrives.
+                                self.hold_reaction(sid, &target, mid).await;
                             }
                         }
                         Err(e) => {
@@ -3762,8 +3912,16 @@ impl Server {
                     )
                     .await;
 
-                // Scan the current directory for sessions and show picker
-                let sessions = browser::scan_claude_sessions(&state.current_path);
+                // Scan the current directory for sessions of the agent that
+                // will actually be launched (not always Claude Code).
+                let default_agent = self
+                    .config
+                    .agent_registry
+                    .get(&self.config.default_agent)
+                    .cloned()
+                    .unwrap_or_else(|| self.config.agent_registry.default().clone());
+                let sessions =
+                    browser::scan_agent_sessions(&default_agent, &state.current_path);
                 if sessions.is_empty() {
                     // No existing sessions — create new directly
                     let key = (target.chat_id.0, thread_id);
@@ -4154,6 +4312,43 @@ impl Server {
         // Only Claude Code supports sessions — skip for others.
         if !agent.supports_sessions() {
             return None;
+        }
+
+        // OpenCode has no /status session id: its SQLite store is the source
+        // of truth. Read the session the TUI is actually in, and register it
+        // so the monitor delivers its output.
+        if agent.name() == "opencode" {
+            let wid = WindowId(window_id.to_string());
+            if let Ok(cwd) = self.tmux_mgr.pane_cwd(&wid).await {
+                let known = std::collections::HashSet::new();
+                let deadline = std::time::Instant::now() + timeout;
+                loop {
+                    if let Ok(Some(sid)) = agent.discover_session(
+                        &cwd,
+                        &known,
+                        std::time::SystemTime::now(),
+                    ) {
+                        tracing::info!(
+                            "[resolve_session_id] opencode session from DB for window {window_id}: {sid}"
+                        );
+                        self.byte_offsets
+                            .lock()
+                            .await
+                            .entry(sid.clone())
+                            .or_insert(0);
+                        if let Err(e) = self.state_mgr.upsert_offset(&sid, 0).await {
+                            tracing::warn!(
+                                "[resolve_session_id] Failed to persist offset for {sid}: {e}"
+                            );
+                        }
+                        return Some(sid);
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return None;
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            }
         }
 
         // /status is the only reliable session discovery method.
@@ -5636,6 +5831,11 @@ impl Server {
             tracing::debug!("[probe] Skipped {stale} binding(s) whose window tmux no longer has");
         }
 
+        // OpenCode keeps AskUserQuestion prompts in its HTTP service rather
+        // than the pane or SQLite store. Poll them first so a pending question
+        // reaches the chat even when the TUI is idle.
+        self.poll_opencode_forms(&bindings).await;
+
         tracing::debug!("[probe] Probing {} windows", bindings.len());
 
         for (cb, wb) in bindings.into_iter().rev() {
@@ -5708,6 +5908,86 @@ impl Server {
         }
 
         Ok(())
+    }
+
+    /// Send pending OpenCode question forms to their bound chats.
+    async fn poll_opencode_forms(&self, bindings: &[(&ChatBinding, &WindowBinding)]) {
+        for (cb, wb) in bindings {
+            if wb.agent_type != "opencode" || wb.session_id.is_empty() {
+                continue;
+            }
+            let forms = opencode_forms::list_forms(&wb.session_id).await;
+            for form in forms {
+                // Only the question tool is answerable with a short text
+                // reply; multi-field forms stay in the terminal.
+                if !form.is_question() || form.fields.len() != 1 {
+                    continue;
+                }
+                if self
+                    .opencode_forms_seen
+                    .lock()
+                    .await
+                    .contains(&form.id)
+                {
+                    continue;
+                }
+                let target = MessageTarget {
+                    chat_id: ChatId(cb.group_chat_id.unwrap_or(cb.chat_id)),
+                    thread_id: Some(ThreadId(cb.thread_id)),
+                    chat_name: None,
+                };
+                match self
+                    .im_adapter
+                    .send_message(&target, &opencode_forms::format_form(&form))
+                    .await
+                {
+                    Ok(_) => {
+                        let mut seen = self.opencode_forms_seen.lock().await;
+                        if seen.len() > 500 {
+                            seen.clear();
+                        }
+                        seen.insert(form.id.clone());
+                    }
+                    Err(e) => tracing::warn!("[opencode-forms] send failed: {e}"),
+                }
+            }
+        }
+
+        // Permission prompts are a separate OpenCode API. Forward the ones
+        // belonging to bound OpenCode sessions too.
+        let permissions = opencode_forms::list_permissions().await;
+        if permissions.is_empty() {
+            return;
+        }
+        for (cb, wb) in bindings {
+            if wb.agent_type != "opencode" || wb.session_id.is_empty() {
+                continue;
+            }
+            for request in permissions
+                .iter()
+                .filter(|p| p.session_id == wb.session_id)
+            {
+                let key = format!("perm:{}", request.id);
+                if self.opencode_forms_seen.lock().await.contains(&key) {
+                    continue;
+                }
+                let target = MessageTarget {
+                    chat_id: ChatId(cb.group_chat_id.unwrap_or(cb.chat_id)),
+                    thread_id: Some(ThreadId(cb.thread_id)),
+                    chat_name: None,
+                };
+                match self
+                    .im_adapter
+                    .send_message(&target, &opencode_forms::format_permission(request))
+                    .await
+                {
+                    Ok(_) => {
+                        self.opencode_forms_seen.lock().await.insert(key);
+                    }
+                    Err(e) => tracing::warn!("[opencode-permission] send failed: {e}"),
+                }
+            }
+        }
     }
 
     /// Forward new terminal output for a non-Claude agent window.

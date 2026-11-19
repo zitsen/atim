@@ -35,8 +35,8 @@ async fn newest_mimo_history_time() -> Option<i64> {
     .flatten()
 }
 
-/// Timestamp of the newest part in the OpenCode store, for seeding the
-/// watermark after a restart (the watermark itself is not persisted).
+/// Timestamp of the newest part in the OpenCode store.
+#[allow(dead_code)]
 async fn newest_part_time() -> Option<i64> {
     let db_path = opencode_db_path()?;
     tokio::task::spawn_blocking(move || {
@@ -45,10 +45,26 @@ async fn newest_part_time() -> Option<i64> {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .ok()?;
-        db.query_row("SELECT COALESCE(MAX(time_updated), 0) FROM part", [], |r| {
-            r.get::<_, i64>(0)
-        })
-        .ok()
+        let has_v2 = db
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_message'",
+                [],
+                |_| Ok(()),
+            )
+            .is_ok();
+        if has_v2 {
+            db.query_row(
+                "SELECT COALESCE(MAX(time_updated), 0) FROM session_message",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .ok()
+        } else {
+            db.query_row("SELECT COALESCE(MAX(time_updated), 0) FROM part", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .ok()
+        }
     })
     .await
     .ok()
@@ -635,11 +651,28 @@ impl SessionMonitor {
         // user sees the whole history replayed as one long message. Seed it from
         // the newest part already in the store instead: a fresh session has none,
         // so nothing is replayed and only genuinely new output follows.
-        let last_time: i64 = {
+        let existing = {
             let offsets = self.byte_offsets.lock().await;
-            match offsets.get(offset_key) {
-                Some(&t) => t as i64,
-                None => newest_part_time().await.unwrap_or(0),
+            offsets.get(offset_key).copied()
+        };
+        let last_time: i64 = match existing {
+            Some(t) => t as i64,
+            None => {
+                // Seed just before the monitor starts instead of from the
+                // global newest message: the newest row may already be the
+                // reply we are about to deliver (the TUI writes it before the
+                // first poll), and a busy unrelated session keeps moving the
+                // global max past a quiet session's replies.
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                let t = now_ms.saturating_sub(2000).max(0);
+                self.byte_offsets
+                    .lock()
+                    .await
+                    .insert(offset_key.to_string(), t as u64);
+                t
             }
         };
 
@@ -674,15 +707,35 @@ impl SessionMonitor {
                     .collect::<Vec<_>>()
                     .join(",");
 
-                let sql = format!(
-                    "SELECT p.id, p.session_id, json_extract(p.data, '$.text'), p.time_updated
-                     FROM part p JOIN message m ON m.id = p.message_id
-                     WHERE p.time_updated > ?1
-                       AND p.session_id IN ({placeholders})
-                       AND json_extract(p.data, '$.type') = 'text'
-                       AND json_extract(m.data, '$.role') = 'assistant'
-                     ORDER BY p.time_updated ASC"
-                );
+                let has_v2 = db
+                    .query_row(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_message'",
+                        [],
+                        |_| Ok(()),
+                    )
+                    .is_ok();
+
+                let sql = if has_v2 {
+                    format!(
+                        "SELECT sm.id, sm.session_id, sm.data, sm.time_updated
+                         FROM session_message sm
+                         WHERE sm.time_updated > ?1
+                           AND sm.session_id IN ({placeholders})
+                           AND sm.type = 'assistant'
+                           AND json_extract(sm.data, '$.time.completed') IS NOT NULL
+                         ORDER BY sm.time_updated ASC"
+                    )
+                } else {
+                    format!(
+                        "SELECT p.id, p.session_id, json_extract(p.data, '$.text'), p.time_updated
+                         FROM part p JOIN message m ON m.id = p.message_id
+                         WHERE p.time_updated > ?1
+                           AND p.session_id IN ({placeholders})
+                           AND json_extract(p.data, '$.type') = 'text'
+                           AND json_extract(m.data, '$.role') = 'assistant'
+                         ORDER BY p.time_updated ASC"
+                    )
+                };
 
                 let mut stmt = db.prepare(&sql).map_err(|e| {
                     atim_core::error::Error::State(format!("opencode prepare: {e}"))
@@ -695,13 +748,44 @@ impl SessionMonitor {
                 let param_refs: Vec<&dyn rusqlite::types::ToSql> =
                     params.iter().map(|p| p.as_ref()).collect();
 
-                let rows: Vec<(String, String, String, i64)> = stmt
-                    .query_map(param_refs.as_slice(), |row| {
-                        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-                    })
-                    .map_err(|e| atim_core::error::Error::State(format!("opencode query: {e}")))?
-                    .filter_map(|r| r.ok())
-                    .collect();
+                let rows: Vec<(String, String, String, i64)> = if has_v2 {
+                    let mapped = stmt
+                        .query_map(param_refs.as_slice(), |row| {
+                            let data: String = row.get(2)?;
+                            let text = serde_json::from_str::<serde_json::Value>(&data)
+                                .ok()
+                                .and_then(|v| {
+                                    v.get("content").and_then(|c| c.as_array()).map(|parts| {
+                                        parts
+                                            .iter()
+                                            .filter(|p| {
+                                                p.get("type").and_then(|t| t.as_str())
+                                                    == Some("text")
+                                            })
+                                            .filter_map(|p| {
+                                                p.get("text").and_then(|t| t.as_str())
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .join("\n\n")
+                                    })
+                                })
+                                .unwrap_or_default();
+                            Ok((row.get(0)?, row.get(1)?, text, row.get(3)?))
+                        })
+                        .map_err(|e| {
+                            atim_core::error::Error::State(format!("opencode query: {e}"))
+                        })?;
+                    mapped.filter_map(|r| r.ok()).collect()
+                } else {
+                    let mapped = stmt
+                        .query_map(param_refs.as_slice(), |row| {
+                            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                        })
+                        .map_err(|e| {
+                            atim_core::error::Error::State(format!("opencode query: {e}"))
+                        })?;
+                    mapped.filter_map(|r| r.ok()).collect()
+                };
 
                 Ok(rows)
             })

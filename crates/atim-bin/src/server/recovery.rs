@@ -401,10 +401,16 @@ impl super::Server {
             if let Err(e) = self.state_mgr.save_session_map(&map).await {
                 tracing::warn!("[recover] Failed to save session_map (new): {e}");
             }
-            if let Err(e) = self.state_mgr.remove_offset(&session_id).await {
-                tracing::warn!("[recover] Failed to remove offset: {e}");
+            // A resumed OpenCode session keeps producing parts in the same
+            // session id. Register it in the monitor's watch list instead of
+            // removing it, otherwise its replies are never delivered.
+            self.byte_offsets
+                .lock()
+                .await
+                .insert(new_session_id.clone(), 0);
+            if let Err(e) = self.state_mgr.upsert_offset(&new_session_id, 0).await {
+                tracing::warn!("[recover] Failed to register offset: {e}");
             }
-            self.byte_offsets.lock().await.remove(&session_id);
         }
 
         self.state_mgr.save_runtime_locked(_rt_guard, &rt).await?;

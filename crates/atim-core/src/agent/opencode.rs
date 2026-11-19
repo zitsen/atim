@@ -73,12 +73,14 @@ impl Agent for OpenCodeAgent {
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| cwd.to_string());
 
+        let table = opencode_session_table(&db);
+        let sql = format!(
+            "SELECT id FROM {table} WHERE directory = ?1
+             AND id NOT IN (SELECT value FROM json_each(?2))
+             ORDER BY time_updated DESC LIMIT 1"
+        );
         let mut stmt = db
-            .prepare(
-                "SELECT id FROM session WHERE directory = ?1
-                 AND id NOT IN (SELECT value FROM json_each(?2))
-                 ORDER BY time_updated DESC LIMIT 1",
-            )
+            .prepare(&sql)
             .map_err(|e| crate::error::Error::State(format!("opencode prepare: {e}")))?;
 
         let known_json = serde_json::to_string(&known_ids.iter().collect::<Vec<_>>())
@@ -120,12 +122,14 @@ impl Agent for OpenCodeAgent {
         )
         .map_err(|e| crate::error::Error::State(format!("opencode open: {e}")))?;
 
+        let table = opencode_session_table(&db);
+        let sql = format!(
+            "SELECT id, title, directory, time_updated FROM {table}
+             WHERE directory = ?1
+             ORDER BY time_updated DESC LIMIT 25"
+        );
         let mut stmt = db
-            .prepare(
-                "SELECT id, title, directory, time_updated FROM session
-                 WHERE directory = ?1
-                 ORDER BY time_updated DESC LIMIT 25",
-            )
+            .prepare(&sql)
             .map_err(|e| crate::error::Error::State(format!("opencode prepare: {e}")))?;
 
         let sessions: Vec<DetectedSession> = stmt
@@ -177,6 +181,20 @@ impl AgentParser for OpenCodeParser {
     fn detect_interactive(&self, _pane_text: &str) -> Option<crate::message::InteractiveUi> {
         None
     }
+}
+
+/// Session table for the installed OpenCode schema.
+///
+/// OpenCode 2.x moved sessions to `session_v2`; 1.x used `session`.
+fn opencode_session_table(db: &rusqlite::Connection) -> &'static str {
+    let has_v2 = db
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_v2'",
+            [],
+            |_| Ok(()),
+        )
+        .is_ok();
+    if has_v2 { "session_v2" } else { "session" }
 }
 
 /// Path to OpenCode's SQLite session store.
@@ -278,5 +296,16 @@ mod tests {
         if let Some(path) = p {
             assert!(path.to_string_lossy().contains(".local/share/opencode"));
         }
+    }
+
+    #[test]
+    fn test_session_table_prefers_v2_when_present() {
+        let db = rusqlite::Connection::open_in_memory().expect("in-memory db");
+        db.execute_batch("CREATE TABLE session (id TEXT);")
+            .expect("legacy table");
+        assert_eq!(opencode_session_table(&db), "session");
+        db.execute_batch("CREATE TABLE session_v2 (id TEXT);")
+            .expect("v2 table");
+        assert_eq!(opencode_session_table(&db), "session_v2");
     }
 }
