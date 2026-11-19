@@ -143,6 +143,11 @@ pub struct Server {
     pub pending_ask_questions: Arc<Mutex<HashMap<UserTriple, PendingAskQuestions>>>,
     /// OpenCode question forms already forwarded to a chat (form_id).
     pub opencode_forms_seen: Arc<Mutex<HashSet<String>>>,
+    /// Inbound messages awaiting a real assistant answer:
+    /// session_id -> [(chat target, message_id)]. The receipt reaction is
+    /// swapped to DONE when the answer is delivered, not when the text is
+    /// merely typed into the agent terminal.
+    pub pending_reactions: Arc<Mutex<HashMap<String, Vec<(MessageTarget, String)>>>>,
     /// Callback context tokens for validating inline keyboard callbacks.
     /// Stores (user_id, thread_id, created_at) for each callback token.
     pub callback_contexts: Arc<Mutex<HashMap<String, CallbackCtx>>>,
@@ -614,6 +619,36 @@ impl Server {
         }
     }
 
+    /// Remember that a chat message is waiting for the agent's answer.
+    async fn hold_reaction(&self, session_id: &str, target: &MessageTarget, message_id: &str) {
+        if session_id.is_empty() || message_id.is_empty() {
+            return;
+        }
+        let mut pending = self.pending_reactions.lock().await;
+        let entry = pending.entry(session_id.to_string()).or_default();
+        if entry.len() >= 50 {
+            entry.remove(0);
+        }
+        entry.push((target.clone(), message_id.to_string()));
+    }
+
+    /// Swap receipt reactions to DONE once the session actually answered.
+    async fn complete_reactions(&self, session_id: &str) {
+        let pending = self.pending_reactions.lock().await.remove(session_id);
+        if let Some(list) = pending {
+            for (target, message_id) in list {
+                let _ = self
+                    .im_adapter
+                    .remove_reaction(&target, &message_id, "Get")
+                    .await;
+                let _ = self
+                    .im_adapter
+                    .add_reaction(&target, &message_id, "DONE")
+                    .await;
+            }
+        }
+    }
+
     /// Render and send one batch of session output.
     ///
     /// Runs on the delivery task, never on the main event loop.
@@ -717,6 +752,7 @@ impl Server {
                 .iter()
                 .any(|m| m.content_type == atim_core::message::ContentType::Text);
             let status_key = (chat_id, thread_id_val);
+            let mut delivered_text = false;
 
             let mut status_msg_id = if has_text {
                 let consumed = self.status_consumed.lock().await;
@@ -928,6 +964,9 @@ impl Server {
                         // Text — accumulate for merging.
                         // Tables are handled by each adapter separately:
                         // Telegram converts to card-style, Feishu renders natively.
+                        if !msg.text.trim().is_empty() {
+                            delivered_text = true;
+                        }
                         if !merged.is_empty() {
                             merged.push('\n');
                         }
@@ -940,6 +979,10 @@ impl Server {
             }
 
             flush!();
+
+            if delivered_text {
+                self.complete_reactions(_sid).await;
+            }
 
             // Rewrite counters that have fallen far enough behind the true
             // total to be worth an edit. Doubles each time (×2, ×4, …) so a
@@ -3007,6 +3050,14 @@ impl Server {
                         let mut pending = self.pending_messages.lock().await;
                         pending.insert(key, text.to_string());
                     }
+                    if let Some(ref mid) = message_id {
+                        let sid = if binding.session_id.is_empty() {
+                            wb_opt.map(|wb| wb.session_id.as_str()).unwrap_or("")
+                        } else {
+                            binding.session_id.as_str()
+                        };
+                        self.hold_reaction(sid, &target, mid).await;
+                    }
                     let mut ctx_lock = self.callback_contexts.lock().await;
                     let recover_token = Self::make_callback_token(&mut ctx_lock, user_id, tid);
                     let cancel_token = Self::make_callback_token(&mut ctx_lock, user_id, tid);
@@ -3036,6 +3087,14 @@ impl Server {
                     {
                         let mut pending = self.pending_messages.lock().await;
                         pending.insert(key, text.to_string());
+                    }
+                    if let Some(ref mid) = message_id {
+                        let sid = if binding.session_id.is_empty() {
+                            wb_opt.map(|wb| wb.session_id.as_str()).unwrap_or("")
+                        } else {
+                            binding.session_id.as_str()
+                        };
+                        self.hold_reaction(sid, &target, mid).await;
                     }
                     let mut ctx_lock = self.callback_contexts.lock().await;
                     let recover_token = Self::make_callback_token(&mut ctx_lock, user_id, tid);
@@ -3142,9 +3201,13 @@ impl Server {
                     self.send_text_to_agent(&window_id, text, is_copilot)
                         .await?;
                     if let Some(ref mid) = message_id {
-                        // Swap the receipt for the completion mark.
-                        let _ = self.im_adapter.remove_reaction(&target, mid, "Get").await;
-                        let _ = self.im_adapter.add_reaction(&target, mid, "DONE").await;
+                        let sid = if binding.session_id.is_empty() {
+                            wb_opt.map(|wb| wb.session_id.as_str()).unwrap_or("")
+                        } else {
+                            binding.session_id.as_str()
+                        };
+                        // Keep the receipt reaction until the answer arrives.
+                        self.hold_reaction(sid, &target, mid).await;
                     }
                     let sc_chat_id = binding.group_chat_id.unwrap_or(binding.chat_id);
                     self.status_consumed
@@ -3290,9 +3353,13 @@ impl Server {
                                 window_id_str,
                             );
                             if let Some(ref mid) = message_id {
-                                // Swap the receipt for the completion mark.
-                                let _ = self.im_adapter.remove_reaction(&target, mid, "Get").await;
-                                let _ = self.im_adapter.add_reaction(&target, mid, "DONE").await;
+                                let sid = if binding.session_id.is_empty() {
+                                    wb_opt.map(|wb| wb.session_id.as_str()).unwrap_or("")
+                                } else {
+                                    binding.session_id.as_str()
+                                };
+                                // Keep the receipt reaction until the answer arrives.
+                                self.hold_reaction(sid, &target, mid).await;
                             }
                         }
                         Err(e) => {
